@@ -34,5 +34,5 @@ pub use paths::{AppPaths, session_path_for_config};
 pub use sye_core::traits;
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
-    icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba,
+    icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba, render_tray_icon_rgba,
 };

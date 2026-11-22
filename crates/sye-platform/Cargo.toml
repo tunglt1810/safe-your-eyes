@@ -29,6 +29,9 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+[build-dependencies]
+png = "0.18"
+
 [lints.rust]
 # Linux and macOS enforce `#![forbid(unsafe_code)]` in `src/lib.rs`; Windows isolates Win32 FFI
 # behind `#[expect(unsafe_code, reason = "Win32 FFI")]` with `// SAFETY:` comments.

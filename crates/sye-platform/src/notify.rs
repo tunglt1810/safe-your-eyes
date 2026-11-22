@@ -7,6 +7,7 @@ use notify_rust::{Notification, Timeout};
 use sye_core::{BreakType, Notifier, PlatformError};
 
 const APP_NAME: &str = "Safe Your Eyes";
+const APP_ICON: &str = "safe-your-eyes";
 
 /// Desktop notification adapter backed by `notify-rust` (pure-Rust `zbus` on Linux).
 pub struct OsNotifier {
@@ -87,6 +88,7 @@ impl Notifier for OsNotifier {
         let mut notification = Notification::new();
         notification
             .appname(APP_NAME)
+            .icon(APP_ICON)
             .summary(&summary)
             .body(&body)
             .timeout(Timeout::Milliseconds(timeout_ms));

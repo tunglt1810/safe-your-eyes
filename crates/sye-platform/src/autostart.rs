@@ -142,6 +142,7 @@ pub fn render_linux_desktop_entry(entry: &AutostartEntry) -> String {
          Version=1.0\n\
          Name={name}\n\
          Comment=Protect your eyes from eye strain\n\
+         Icon=safe-your-eyes\n\
          Exec={exec_line}\n\
          Terminal=false\n\
          Categories=Utility;\n\
@@ -257,6 +258,7 @@ mod tests {
         let desktop = render_linux_desktop_entry(&entry);
         assert!(desktop.contains("[Desktop Entry]"));
         assert!(desktop.contains("Name=Safe Your Eyes"));
+        assert!(desktop.contains("Icon=safe-your-eyes"));
         assert!(desktop.contains("X-GNOME-Autostart-enabled=true"));
         assert!(desktop.contains(
             r#"Exec="/opt/My Apps/safe-your-eyes" --config "/home/user/my config.toml""#

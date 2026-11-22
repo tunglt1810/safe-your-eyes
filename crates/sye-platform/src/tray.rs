@@ -7,7 +7,7 @@ use sye_core::{BreakType, PlatformError, SchedulerState, TraySnapshot};
 use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
-const ICON_SIZE: u32 = 32;
+include!(concat!(env!("OUT_DIR"), "/tray_icons.rs"));
 
 const MENU_ID_STATUS: &str = "sye.status";
 const MENU_ID_ENABLE: &str = "sye.enable";
@@ -125,10 +125,15 @@ impl TrayHandle {
         let icon_state = icon_state_for_snapshot(initial);
         let icon = build_tray_icon(icon_state)?;
 
-        let tray_icon = TrayIconBuilder::new()
+        let builder = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip(format_tooltip(initial))
-            .with_icon(icon)
+            .with_tooltip(format_tooltip(initial));
+        #[cfg(target_os = "macos")]
+        let builder = builder.with_icon_templated(icon);
+        #[cfg(not(target_os = "macos"))]
+        let builder = builder.with_icon(icon);
+
+        let tray_icon = builder
             .build()
             .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
 
@@ -203,6 +208,9 @@ impl TrayHandle {
         let next_icon_state = icon_state_for_snapshot(snapshot);
         if next_icon_state != active.icon_state {
             let icon = build_tray_icon(next_icon_state)?;
+            #[cfg(target_os = "macos")]
+            let _ = active.tray_icon.set_icon_templated(Some(icon));
+            #[cfg(not(target_os = "macos"))]
             let _ = active.tray_icon.set_icon(Some(icon));
             active.icon_state = next_icon_state;
         }
@@ -301,75 +309,38 @@ fn build_tray_icon(state: TrayIconState) -> Result<Icon, PlatformError> {
     Icon::from_rgba(rgba, width, height).map_err(|err| PlatformError::Io(err.to_string()))
 }
 
-/// Generates an in-memory 32x32 RGBA eye icon for the given `TrayIconState`.
+/// Returns the platform-appropriate 64x64 RGBA tray icon for the given `TrayIconState`.
 ///
-/// Requires zero external image files or image-decoding dependencies.
+/// Uses monochrome template icons on macOS and Cozy colored icons on Linux and Windows.
 pub fn render_eye_icon_rgba(state: TrayIconState) -> (Vec<u8>, u32, u32) {
-    let mut pixels = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    let cx = (ICON_SIZE as f32) * 0.5 - 0.5;
-    let cy = (ICON_SIZE as f32) * 0.5 - 0.5;
+    render_tray_icon_rgba(state, cfg!(target_os = "macos"))
+}
 
-    let (outline_rgba, sclera_rgba, iris_rgba, pupil_rgba) = match state {
-        TrayIconState::Enabled => (
-            [24, 96, 62, 255],
-            [245, 250, 247, 255],
-            [46, 204, 113, 255],
-            [20, 35, 28, 255],
-        ),
-        TrayIconState::PreBreak => (
-            [140, 82, 10, 255],
-            [255, 250, 240, 255],
-            [243, 156, 18, 255],
-            [48, 30, 8, 255],
-        ),
-        TrayIconState::Disabled => (
-            [92, 100, 108, 220],
-            [205, 210, 215, 210],
-            [138, 148, 158, 220],
-            [70, 76, 82, 220],
-        ),
+/// Returns the 64x64 RGBA tray icon for `state`, choosing either the monochrome macOS template
+/// variant (`template == true`) or the Cozy colored variant (`template == false`).
+pub fn render_tray_icon_rgba(state: TrayIconState, template: bool) -> (Vec<u8>, u32, u32) {
+    let encoded = match (template, state) {
+        (false, TrayIconState::Enabled) => COLOR_ENABLED_RLE,
+        (false, TrayIconState::PreBreak) => COLOR_PRE_BREAK_RLE,
+        (false, TrayIconState::Disabled) => COLOR_DISABLED_RLE,
+        (true, TrayIconState::Enabled) => TEMPLATE_ENABLED_RLE,
+        (true, TrayIconState::PreBreak) => TEMPLATE_PRE_BREAK_RLE,
+        (true, TrayIconState::Disabled) => TEMPLATE_DISABLED_RLE,
     };
+    (decode_rle_rgba(encoded), ICON_SIZE, ICON_SIZE)
+}
 
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = (x as f32) - cx;
-            let dy = (y as f32) - cy;
-
-            // Almond-shaped eye contour.
-            let nx = dx / 13.5;
-            let ny = dy / 8.2;
-            let eye_dist = nx * nx + ny * ny;
-            let iris_dist = (dx * dx + dy * dy).sqrt();
-
-            let mut color = if eye_dist <= 1.0 {
-                if eye_dist >= 0.78 {
-                    outline_rgba
-                } else if iris_dist <= 3.0 {
-                    pupil_rgba
-                } else if iris_dist <= 6.2 {
-                    iris_rgba
-                } else {
-                    sclera_rgba
-                }
-            } else {
-                [0, 0, 0, 0]
-            };
-
-            // Diagonal slash across the disabled eye icon.
-            if state == TrayIconState::Disabled {
-                let diag = (dx - dy).abs();
-                let within_span = dx.abs() <= 12.5 && dy.abs() <= 12.5;
-                if diag <= 1.5 && within_span {
-                    color = [192, 57, 43, 240];
-                }
-            }
-
-            let idx = ((y * ICON_SIZE + x) * 4) as usize;
-            pixels[idx..idx + 4].copy_from_slice(&color);
+fn decode_rle_rgba(encoded: &[u8]) -> Vec<u8> {
+    let expected_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
+    let mut pixels = Vec::with_capacity(expected_len);
+    for &[count, r, g, b, a] in encoded.as_chunks::<5>().0 {
+        let rgba = [r, g, b, a];
+        for _ in 0..usize::from(count) {
+            pixels.extend_from_slice(&rgba);
         }
     }
-
-    (pixels, ICON_SIZE, ICON_SIZE)
+    pixels.resize(expected_len, 0);
+    pixels
 }
 
 #[cfg(test)]
@@ -394,24 +365,47 @@ mod tests {
 
     #[test]
     fn eye_icons_are_valid_rgba_and_visually_distinct() -> Result<(), Box<dyn std::error::Error>> {
-        let (enabled, w1, h1) = render_eye_icon_rgba(TrayIconState::Enabled);
-        let (disabled, w2, h2) = render_eye_icon_rgba(TrayIconState::Disabled);
-        let (pre_break, w3, h3) = render_eye_icon_rgba(TrayIconState::PreBreak);
+        let expected_bytes = (ICON_SIZE * ICON_SIZE * 4) as usize;
+        for template in [false, true] {
+            let (enabled, w1, h1) = render_tray_icon_rgba(TrayIconState::Enabled, template);
+            let (disabled, w2, h2) = render_tray_icon_rgba(TrayIconState::Disabled, template);
+            let (pre_break, w3, h3) = render_tray_icon_rgba(TrayIconState::PreBreak, template);
 
-        assert_eq!((w1, h1), (32, 32));
-        assert_eq!((w2, h2), (32, 32));
-        assert_eq!((w3, h3), (32, 32));
-        assert_eq!(enabled.len(), 32 * 32 * 4);
-        assert_eq!(disabled.len(), 32 * 32 * 4);
-        assert_eq!(pre_break.len(), 32 * 32 * 4);
+            assert_eq!((w1, h1), (ICON_SIZE, ICON_SIZE));
+            assert_eq!((w2, h2), (ICON_SIZE, ICON_SIZE));
+            assert_eq!((w3, h3), (ICON_SIZE, ICON_SIZE));
+            assert_eq!(enabled.len(), expected_bytes);
+            assert_eq!(disabled.len(), expected_bytes);
+            assert_eq!(pre_break.len(), expected_bytes);
 
-        assert_ne!(enabled, disabled);
-        assert_ne!(enabled, pre_break);
-        assert_ne!(disabled, pre_break);
+            assert_ne!(enabled, disabled);
+            assert_ne!(enabled, pre_break);
+            assert_ne!(disabled, pre_break);
 
-        Icon::from_rgba(enabled, w1, h1)?;
-        Icon::from_rgba(disabled, w2, h2)?;
-        Icon::from_rgba(pre_break, w3, h3)?;
+            if template {
+                for rgba in [&enabled, &disabled, &pre_break] {
+                    let pixels = rgba.as_chunks::<4>().0;
+                    assert!(
+                        pixels
+                            .iter()
+                            .all(|&[r, g, b, _]| r == 0 && g == 0 && b == 0),
+                        "macOS template tray icons must encode shape in alpha with RGB=(0,0,0)"
+                    );
+                    assert!(
+                        pixels.iter().any(|&[_, _, _, a]| a > 0),
+                        "template tray icon must contain visible pixels"
+                    );
+                }
+            }
+
+            Icon::from_rgba(enabled, w1, h1)?;
+            Icon::from_rgba(disabled, w2, h2)?;
+            Icon::from_rgba(pre_break, w3, h3)?;
+        }
+
+        let (default_enabled, w, h) = render_eye_icon_rgba(TrayIconState::Enabled);
+        assert_eq!((w, h), (ICON_SIZE, ICON_SIZE));
+        Icon::from_rgba(default_enabled, w, h)?;
         Ok(())
     }
 

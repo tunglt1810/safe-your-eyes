@@ -184,27 +184,30 @@ The daemon accepts connections in non-blocking mode so `Scheduler::tick()` never
 ## 10. Cozy Design System and Native UI (`sye-ui`)
 
 `sye-ui` renders native desktop controls through `longbridge/nsh` (AppKit on macOS, Win32 and Direct2D on Windows, GTK 4 on Linux).
-All visual tokens live in `crates/sye-ui/src/theme.rs` using `AdaptiveColor` for Light, Dark, and System modes.
+The visual tokens, contrast pairs, and motion presets follow the [Cozy Design System](https://github.com/tunglt1810/cozy) (`tokens/cozy.tokens.json`, `css/effects.css`, `docs/motion.md`) together with Astryx layout rules (`meta/astryx`).
+All visual tokens and motion presets live in `crates/sye-ui/src/theme.rs` using `AdaptiveColor` for Light, Dark, and System modes.
 All reusable controls live in `crates/sye-ui/src/ui.rs`.
 
 ### 10.1 Cozy Color Tokens
 
 The palette avoids pure `#FFFFFF` and `#000000` to reduce eye strain.
 Primary coral buttons pair with dark espresso text to keep WCAG AAA contrast (7.55:1 to 7.64:1).
+Status banners and destructive buttons pair `warning-muted` / `error-muted` fills with `on-warning-muted` / `on-error-muted` text from `tunglt1810/cozy`.
 
 | Token | Light Mode | Dark Mode | Role |
 |---|---|---|---|
-| `BACKGROUND_BODY` | `#FAEBDA` | `#18140E` | Main canvas (warm oatmeal / dark roast) |
-| `BACKGROUND_SURFACE` | `#FBF1E1` | `#231D16` | Cards, panels, and sticky toolbar |
-| `BACKGROUND_MUTED` | `#F3DFC8` | `#30261D` | Inputs, switch tracks, and secondary buttons |
-| `SIDEBAR_BG` | `#C3CBB9` | `#29332A` | Floating Sage Sidebar |
-| `SIDEBAR_ACTIVE` | `#F8E8D3` | `#404A41` | Active sidebar navigation pill |
-| `ACCENT` | `#EF8F63` | `#EE8F64` | Primary CTA fill and progress bar |
-| `ON_ACCENT` | `#261101` | `#18140E` | Primary CTA text (WCAG AAA) |
-| `TEXT_PRIMARY` | `#261101` | `#FFFEF7` | Primary headings and body text |
-| `TEXT_SECONDARY` | `#5B4C3B` | `#C2B7B1` | Labels and descriptions |
-| `TEXT_DISABLED` | `#968574` | `#70655C` | Placeholders and locked controls |
-| `WARNING` / `ERROR` | `#D99220` / `#C8433B` | `#F5C156` / `#F27B70` | Status banners and destructive actions |
+| `BACKGROUND_BODY` | `#FAEBDA` | `#18140E` | Main canvas (`bg-body`) |
+| `BACKGROUND_SURFACE` | `#FBF1E1` | `#231D16` | Unified Form Card, panels, and sticky toolbar (`bg-surface`) |
+| `BACKGROUND_MUTED` | `#F3DFC8` | `#30261D` | Inputs, switch tracks, segmented track, and secondary buttons (`bg-muted`) |
+| `SIDEBAR_BG` / `SIDEBAR_ACTIVE` | `#C3CBB9` / `#F8E8D3` | `#29332A` / `#404A41` | Floating Sage Sidebar and active indicator pill (`nav-bg`, `nav-active`) |
+| `SIDEBAR_TEXT` / `SIDEBAR_TEXT_MUTED` | `#403B26` / `#55503A` | `#FFFEF7` / `#B8C4B6` | Sidebar labels and version caption (`nav-text`, `nav-text-muted`) |
+| `ACCENT` / `ON_ACCENT` | `#EF8F63` / `#261101` | `#EE8F64` / `#18140E` | Primary CTA fill and WCAG AAA text (`accent`, `on-accent`) |
+| `FOCUS_RING` | `#A84A24` | `#F2A57E` | Input focus outline (`focus-ring`) |
+| `TEXT_PRIMARY` / `TEXT_SECONDARY` | `#261101` / `#5B4C3B` | `#FFFEF7` / `#C2B7B1` | Primary headings, labels, and supporting text |
+| `TEXT_DISABLED` | `#968574` | `#70655C` | Placeholders and disabled controls |
+| `WARNING_SOFT` / `ON_WARNING_MUTED` | `#FAE1B5` / `#6B4408` | `#443A26` / `#FCE09B` | Warning status banners |
+| `ERROR_SOFT` / `ON_ERROR_MUTED` | `#F9CFC8` / `#7E211C` | `#472826` / `#F9BEB8` | Error banners and destructive actions |
+| `HEADING_HIGHLIGHT` | `#FAD3B9` | `#7D4737` | Heading highlighter stroke (`mark-peach`) |
 | `KPI_SAGE` | `#E2DEC4` / `#7EAB9A` | `#31392C` / `#5E8C7A` | Short Break summary card |
 | `KPI_PEACH` | `#FBCBB4` / `#F48A65` | `#432F28` / `#E5866B` | Long Break summary card |
 | `KPI_BUTTER` | `#FAE1B5` / `#FAC76A` | `#443A26` / `#D9A74E` | Exercises summary card |
@@ -212,9 +215,11 @@ Primary coral buttons pair with dark espresso text to keep WCAG AAA contrast (7.
 
 ### 10.2 Shape, Motion, and Screens
 
-- Border radii use `12px` (elements), `18px` (cards), `22px` (Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill buttons).
-- **Break Overlay**: Uses restful dark-roast tones (`#18140E` canvas, `#231D16` card), fades in over `fade_in_ms`, shows the exercise title, `MM:SS` countdown, progress bar, shortcut lock notice, `Postpone (Space)`, and `Skip (Esc)`.
-- **Settings Window**: Uses the Floating Sage Sidebar (`Timing`, `Policies`, `Exercises`, `About & Support`), four Pastel KPI summary cards, and a sticky bottom toolbar (`Save`, `Reset`, `Cancel`). The About & Support tab provides a Light/Dark/System switcher and a **Buy Me a Coffee** link to `https://buymeacoffee.com/bbeeezzzzz`.
+- Border radii follow `tunglt1810/cozy`: `12px` (elements), `14px` (sidebar nav items), `18px` (Form Card), `20px` (Pastel KPI cards), `22px` (Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill controls).
+- Motion follows `tunglt1810/cozy`: `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) drives the sliding sidebar indicator, theme `SegmentedControl` thumb, and switch thumb; `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives tab panel entrances (`160ms`), highlighter sweeps (`380ms`), and theme color transitions (`200ms`); pressable pills scale to `0.97` on press.
+- All animations stop when the operating system enables Reduce Motion (`reduce_motion()`).
+- **Break Overlay**: Uses restful dark-roast tones (`#18140E` canvas, `#231D16` card), displays the embedded app icon, fades in over `fade_in_ms`, and shows the exercise title, `MM:SS` countdown, animated progress bar, shortcut lock notice, `Postpone (Space)`, and `Skip (Esc)`.
+- **Settings Window**: Uses the Floating Sage Sidebar (`Timing`, `Policies`, `Exercises`, `About & Support`, with embedded app icon and version footer), fixed page header with four Pastel KPI summary cards, and a unified rounded Form Card containing the scrollable form and clipped sticky toolbar (`Save`, `Reset`, `Cancel`). The About & Support tab provides a Light/Dark/System `SegmentedControl` and a **Buy Me a Coffee** link with QR code for `https://buymeacoffee.com/bbeeezzzzz`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.
 
 ## 11. CLI Contract (`safe-your-eyes`)

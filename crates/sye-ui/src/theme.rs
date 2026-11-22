@@ -1,8 +1,7 @@
-//! Cozy Design System tokens for `safe-your-eyes`, aligned with `DESIGN.md` and Astryx.
+//! Cozy Design System tokens for `safe-your-eyes`.
 //!
-//! Uses warm oatmeal/espresso light tones and dark-roast/warm-cream dark tones,
-//! eliminating pure `#FFF`/`#000`, enforcing WCAG AAA contrast on coral CTAs, and
-//! using dedicated WCAG AA `--color-text-{warning,error}` tokens for semantic text.
+//! Reference: <https://github.com/tunglt1810/cozy> (`tokens/cozy.tokens.json` v0.1.0,
+//! `css/effects.css`, and `docs/motion.md`), combined with Astryx layout conventions.
 
 use nsh_core::{
     element::{AdaptiveColor, Rgba, rgb, rgba},
@@ -12,12 +11,6 @@ use nsh_core::{
 /// Author support URL shown in Settings (About & Support) and documentation.
 pub const SUPPORT_URL: &str = "https://buymeacoffee.com/bbeeezzzzz";
 
-/// Converts `#rrggbb` + opacity into an `Rgba` value.
-pub(crate) const fn rgb_a(hex: u32, alpha: f32) -> Rgba {
-    let a = (alpha * 255.0 + 0.5) as u32;
-    rgba((hex << 8) | (a & 0xFF))
-}
-
 /// Pairs light and dark `Rgba` tones into an `AdaptiveColor`.
 const fn tone(light: Rgba, dark: Rgba) -> AdaptiveColor {
     AdaptiveColor {
@@ -26,53 +19,54 @@ const fn tone(light: Rgba, dark: Rgba) -> AdaptiveColor {
     }
 }
 
-/// Semantic Cozy palette tokens (Light / Dark) matching `DESIGN.md` §4.1.
+/// Semantic Cozy palette tokens (Light / Dark) from `tunglt1810/cozy` `tokens/cozy.tokens.json`.
 pub(crate) mod colors {
-    use super::{AdaptiveColor, rgb, rgb_a, rgba, tone};
+    use super::{AdaptiveColor, rgb, rgba, tone};
 
-    /// Main canvas background (`--color-background-body`: `#FAEBDA` / `#18140E`).
+    /// Main canvas background (`--cozy-bg-body`: `#FAEBDA` / `#18140E`).
     pub(crate) const BACKGROUND_BODY: AdaptiveColor = tone(rgb(0xFAEBDA), rgb(0x18140E));
-    /// Card, panel, and sticky toolbar surface (`--color-background-surface`: `#FBF1E1` / `#231D16`).
+    /// Card, panel, and sticky toolbar surface (`--cozy-bg-surface`: `#FBF1E1` / `#231D16`).
     pub(crate) const BACKGROUND_SURFACE: AdaptiveColor = tone(rgb(0xFBF1E1), rgb(0x231D16));
-    /// Segmented track, input fill, and subtle highlight (`--color-background-muted`: `#F3DFC8` / `#30261D`).
+    /// Segmented track, input fill, and subtle highlight (`--cozy-bg-muted`: `#F3DFC8` / `#30261D`).
     pub(crate) const BACKGROUND_MUTED: AdaptiveColor = tone(rgb(0xF3DFC8), rgb(0x30261D));
     /// Elevated active pill inside `SegmentedControl` (brighter than track in both Light and Dark).
     pub(crate) const SEGMENT_ACTIVE: AdaptiveColor = tone(rgb(0xFBF1E1), rgb(0x46392E));
 
-    /// Floating Sage Sidebar background (`--cozy-sidebar-bg`: `#C3CBB9` / `#29332A`).
+    /// Floating Sage Sidebar background (`--cozy-nav-bg`: `#C3CBB9` / `#29332A`).
     pub(crate) const SIDEBAR_BG: AdaptiveColor = tone(rgb(0xC3CBB9), rgb(0x29332A));
-    /// Active navigation pill inside the Floating Sage Sidebar (`--cozy-sidebar-active`: `#F8E8D3` / `#404A41`).
+    /// Active navigation pill (`--cozy-nav-active`: `#F8E8D3` / `#404A41`).
     pub(crate) const SIDEBAR_ACTIVE: AdaptiveColor = tone(rgb(0xF8E8D3), rgb(0x404A41));
-    /// Subtle hover tint on inactive sidebar items without reducing label contrast.
-    pub(crate) const SIDEBAR_HOVER: AdaptiveColor =
-        tone(rgb_a(0xF8E8D3, 0.45), rgb_a(0x404A41, 0.45));
+    /// Navigation label (`--cozy-nav-text`: `#403B26` / `#FFFEF7`).
+    pub(crate) const SIDEBAR_TEXT: AdaptiveColor = tone(rgb(0x403B26), rgb(0xFFFEF7));
+    /// Navigation secondary caption & version (`--cozy-nav-text-muted`: `#55503A` / `#B8C4B6`).
+    pub(crate) const SIDEBAR_TEXT_MUTED: AdaptiveColor = tone(rgb(0x55503A), rgb(0xB8C4B6));
+    /// Subtle hover layer on any surface (`--cozy-overlay-hover`: `#2611010D` / `#FFFEF70F`).
+    pub(crate) const OVERLAY_HOVER: AdaptiveColor = tone(rgba(0x2611010D), rgba(0xFFFEF70F));
 
-    /// Primary coral CTA accent (`--color-accent`: `#EF8F63` / `#EE8F64`).
+    /// Primary coral CTA accent (`--cozy-accent`: `#EF8F63` / `#EE8F64`).
     pub(crate) const ACCENT: AdaptiveColor = tone(rgb(0xEF8F63), rgb(0xEE8F64));
-    /// WCAG AAA dark espresso text on `ACCENT` (`--color-on-accent`: `#261101` / `#18140E`).
+    /// WCAG AAA dark espresso text on `ACCENT` (`--cozy-on-accent`: `#261101` / `#18140E`).
     pub(crate) const ON_ACCENT: AdaptiveColor = tone(rgb(0x261101), rgb(0x18140E));
+    /// Keyboard focus outline (`--cozy-focus-ring`: `#A84A24` / `#F2A57E`).
+    pub(crate) const FOCUS_RING: AdaptiveColor = tone(rgb(0xA84A24), rgb(0xF2A57E));
 
-    /// Warm primary text (`--color-text-primary`: `#261101` / `#FFFEF7`).
+    /// Warm primary text (`--cozy-text-primary`: `#261101` / `#FFFEF7`).
     pub(crate) const TEXT_PRIMARY: AdaptiveColor = tone(rgb(0x261101), rgb(0xFFFEF7));
-    /// Warm secondary text (`--color-text-secondary`: `#5B4C3B` / `#C2B7B1`).
+    /// Warm secondary text (`--cozy-text-secondary`: `#5B4C3B` / `#C2B7B1`).
     pub(crate) const TEXT_SECONDARY: AdaptiveColor = tone(rgb(0x5B4C3B), rgb(0xC2B7B1));
-    /// Warm muted/disabled text (`--color-text-disabled`: `#968574` / `#70655C`).
+    /// Warm muted/disabled text (`--cozy-text-disabled`: `#968574` / `#70655C`).
     pub(crate) const TEXT_DISABLED: AdaptiveColor = tone(rgb(0x968574), rgb(0x70655C));
 
-    /// Semantic status text tokens achieving WCAG AA on Light & Dark surfaces (`DESIGN.md` §4.1).
-    pub(crate) const TEXT_WARNING: AdaptiveColor = tone(rgb(0x8A5406), rgb(0xF5C96B));
-    pub(crate) const TEXT_ERROR: AdaptiveColor = tone(rgb(0xB0322B), rgb(0xF5938A));
+    /// Status banner & destructive chip surfaces and measured high-contrast text pairs.
+    pub(crate) const WARNING_SOFT: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
+    pub(crate) const ON_WARNING_MUTED: AdaptiveColor = tone(rgb(0x6B4408), rgb(0xFCE09B));
+    pub(crate) const ERROR_SOFT: AdaptiveColor = tone(rgb(0xF9CFC8), rgb(0x472826));
+    pub(crate) const ON_ERROR_MUTED: AdaptiveColor = tone(rgb(0x7E211C), rgb(0xF9BEB8));
+    pub(crate) const ACCENT_SOFT: AdaptiveColor = tone(rgba(0xEF8F6333), rgba(0xEE8F6438));
+    /// Highlighter stroke under headings (`--cozy-mark-peach`: `#FAD3B9` / `#7D4737`).
+    pub(crate) const HEADING_HIGHLIGHT: AdaptiveColor = tone(rgb(0xFAD3B9), rgb(0x7D4737));
 
-    /// Soft tinted backgrounds for status banners, highlighters, and destructive pills.
-    pub(crate) const WARNING_SOFT: AdaptiveColor =
-        tone(rgb_a(0xD99220, 0.14), rgb_a(0xF5C156, 0.16));
-    pub(crate) const ERROR_SOFT: AdaptiveColor = tone(rgb_a(0xC8433B, 0.12), rgb_a(0xF27B70, 0.16));
-    pub(crate) const ACCENT_SOFT: AdaptiveColor =
-        tone(rgb_a(0xEF8F63, 0.18), rgb_a(0xEE8F64, 0.18));
-    pub(crate) const HEADING_HIGHLIGHT: AdaptiveColor =
-        tone(rgb_a(0xEF8F63, 0.42), rgb_a(0xEE8F64, 0.36));
-
-    /// Hairline and emphasized borders (`--color-border` / `--color-border-emphasized`).
+    /// Hairline and emphasized borders (`--cozy-border` / `--cozy-border-emphasized`).
     pub(crate) const BORDER: AdaptiveColor = tone(rgba(0x5B4C3B22), rgb(0x3E3831));
     pub(crate) const BORDER_EMPHASIZED: AdaptiveColor = tone(rgb(0xDFCBB5), rgb(0x52493F));
 
@@ -84,12 +78,12 @@ pub(crate) mod colors {
     pub(crate) const OVERLAY_CARD: AdaptiveColor = tone(rgb(0x231D16), rgb(0x231D16));
     pub(crate) const OVERLAY_TEXT: AdaptiveColor = tone(rgb(0xFFFEF7), rgb(0xFFFEF7));
     pub(crate) const OVERLAY_MUTED: AdaptiveColor = tone(rgb(0xC2B7B1), rgb(0xC2B7B1));
-    pub(crate) const OVERLAY_TRACK: AdaptiveColor = tone(rgb(0x30261D), rgb(0x30261D));
+    pub(crate) const OVERLAY_TRACK: AdaptiveColor = tone(rgb(0x30271E), rgb(0x30271E));
     pub(crate) const OVERLAY_BORDER: AdaptiveColor = tone(rgb(0x3E3831), rgb(0x3E3831));
     pub(crate) const OVERLAY_BORDER_EMPHASIZED: AdaptiveColor = tone(rgb(0x52493F), rgb(0x52493F));
 }
 
-/// Pastel KPI card color pairs (Sage, Peach, Butter, Mist) matching `DESIGN.md` §4.1.
+/// Pastel KPI card color pairs (Sage, Peach, Butter, Mist) from `tokens/cozy.tokens.json`.
 pub(crate) mod kpi {
     use super::{AdaptiveColor, rgb, tone};
 
@@ -106,11 +100,12 @@ pub(crate) mod kpi {
     pub(crate) const MIST_ACCENT: AdaptiveColor = tone(rgb(0xA2B3C1), rgb(0x6D8296));
 }
 
-/// Cozy border-radius scale matching `DESIGN.md` §4.4 and Astryx shape relationships.
+/// Cozy border-radius scale matching `tokens/cozy.tokens.json` (`radius.*`).
 pub(crate) mod radii {
     use super::{Points, px};
 
     pub(crate) const ELEMENT: Points = px(12.0);
+    pub(crate) const NAV_ITEM: Points = px(14.0);
     pub(crate) const CONTAINER: Points = px(18.0);
     pub(crate) const KPI: Points = px(20.0);
     pub(crate) const SIDEBAR: Points = px(22.0);
@@ -118,30 +113,32 @@ pub(crate) mod radii {
     pub(crate) const PILL: Points = px(9999.0);
 }
 
-/// Cozy motion presets matching `DESIGN.md` §5 and §7.4.
+/// Cozy motion presets matching `tunglt1810/cozy` `tokens/cozy.tokens.json` & `docs/motion.md`.
 pub(crate) mod motion {
     use nsh_core::animation::Easing;
     use nsh_core::element::Spring;
 
-    /// Smooth spring physics for sliding sidebar and segmented control indicators.
+    /// `spring.default` (`stiffness: 420, damping: 32, mass: 0.9`) for sliding indicators and switch thumbs.
     pub(crate) const COZY_SPRING: Spring = Spring {
-        stiffness: 380.0,
+        stiffness: 420.0,
         damping: 32.0,
-        mass: 1.0,
+        mass: 0.9,
         velocity: None,
         frame_rate: None,
     };
 
-    /// Decelerating Cozy ease curve (`cubic-bezier(0.22, 1, 0.36, 1)`).
+    /// `motion.ease-out` (`cubic-bezier(0.22, 1, 0.36, 1)`).
     pub(crate) const COZY_EASE: Easing = Easing::Bezier(0.22, 1.0, 0.36, 1.0);
     pub(crate) const COZY_BEZIER: (f32, f32, f32, f32) = (0.22, 1.0, 0.36, 1.0);
 
-    /// Tab panel entrance transition duration (`DESIGN.md` §7.4: 160ms).
+    /// `motion.duration-fast` (160ms): tab panel entrance and control color transitions.
     pub(crate) const PANEL_ENTER_MS: f32 = 160.0;
-    /// Heading highlighter horizontal sweep duration (`DESIGN.md` §5.2: 380ms).
+    /// Heading highlighter horizontal sweep duration (`css/effects.css`: 380ms).
     pub(crate) const HIGHLIGHT_SWEEP_MS: f32 = 380.0;
-    /// Surface color transition duration when toggling Light / Dark mode.
-    pub(crate) const THEME_COLOR_MS: f32 = 220.0;
-    /// Standard hover/press/focus control transition duration.
-    pub(crate) const CONTROL_MS: f32 = 150.0;
+    /// `motion.duration-page` (200ms): surface color transition when switching Light / Dark mode.
+    pub(crate) const THEME_COLOR_MS: f32 = 200.0;
+    /// `motion.duration-fast` (160ms): standard hover/press/focus control transitions.
+    pub(crate) const CONTROL_MS: f32 = 160.0;
+    /// `.cozy-press:active` subtle press downscale (`0.97`).
+    pub(crate) const PRESS_SCALE: f32 = 0.97;
 }

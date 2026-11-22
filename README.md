@@ -1,7 +1,7 @@
 # Safe Your Eyes
 
 Safe Your Eyes is a small Rust desktop application that protects your eyes on macOS, Windows, and Linux.
-It follows the break cadence of [SafeEyes](https://github.com/slgobinath/safeeyes), renders native controls through [Native Shell (`longbridge/nsh`)](https://github.com/longbridge/nsh), and applies the Cozy Design System.
+It follows the break cadence of [SafeEyes](https://github.com/slgobinath/safeeyes), renders native controls through [Native Shell (`longbridge/nsh`)](https://github.com/longbridge/nsh), and applies the [Cozy Design System](https://github.com/tunglt1810/cozy).
 
 ![A workday with Safe Your Eyes](docs/assets/storyline.gif)
 
@@ -11,7 +11,7 @@ Read the 9-beat story in [docs/STORYLINE.md](docs/STORYLINE.md). Illustration dr
 
 - **Single binary (`safe-your-eyes`)**: Runs the background daemon, CLI client, and on-demand GUI subprocesses from one compiled file.
 - **No `tokio` runtime**: Uses `std::thread`, non-blocking local IPC, and native OS adapters.
-- **Cozy Design System**: Uses warm oatmeal (`#FAEBDA`) and espresso (`#261101`) in Light mode, and dark roast (`#18140E`) and warm cream (`#FFFEF7`) in Dark mode. The Settings window includes a Floating Sage Sidebar (`#C3CBB9` / `#29332A`), Pastel KPI summary cards, and WCAG AAA coral buttons (`#EF8F63`).
+- **[Cozy Design System](https://github.com/tunglt1810/cozy)**: Uses warm oatmeal (`#FAEBDA`) and espresso (`#261101`) in Light mode, and dark roast (`#18140E`) and warm cream (`#FFFEF7`) in Dark mode. The Settings window includes a Floating Sage Sidebar (`#C3CBB9` / `#29332A`), Pastel KPI summary cards, WCAG AAA coral buttons (`#EF8F63`), and Cozy spring/bezier motion with OS reduced-motion support.
 - **Smart policies**: Supports strict break mode, Smart Pause on idle, Do Not Disturb (fullscreen, battery, window rules), consecutive skip limits, and synthesized PCM WAV chimes.
 
 ## Prerequisites

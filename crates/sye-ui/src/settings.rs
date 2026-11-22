@@ -1,8 +1,8 @@
 //! Cozy Settings window view model and Native Shell (`nsh`) renderer.
 //!
-//! Applies the Cozy Design System (`DESIGN.md`): Floating Sage Sidebar, Pastel KPI
-//! summary cards, Light/Dark/System theme mode switching, warm sticky toolbar,
-//! and author support link (`https://buymeacoffee.com/bbeeezzzzz`).
+//! Applies the Cozy Design System (<https://github.com/tunglt1810/cozy>) with Astryx layout rules:
+//! Floating Sage Sidebar with spring indicator, Pastel KPI summary cards, SegmentedControl theme
+//! switcher, unified rounded Form Card with clipped sticky toolbar, and author support link.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -796,12 +796,12 @@ pub(crate) fn build_settings_view(
                                     text("Safe Your Eyes")
                                         .text_sm()
                                         .font_weight(FontWeight::BOLD)
-                                        .text_color(colors::TEXT_PRIMARY),
+                                        .text_color(colors::SIDEBAR_TEXT),
                                 )
                                 .child(
                                     text("Cozy Eye Care")
                                         .text_xs()
-                                        .text_color(colors::TEXT_SECONDARY),
+                                        .text_color(colors::SIDEBAR_TEXT_MUTED),
                                 ),
                         ),
                 )
@@ -837,7 +837,7 @@ pub(crate) fn build_settings_view(
                 text(format!("v{}", env!("CARGO_PKG_VERSION")))
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors::TEXT_SECONDARY),
+                    .text_color(colors::SIDEBAR_TEXT_MUTED),
             ),
         );
 

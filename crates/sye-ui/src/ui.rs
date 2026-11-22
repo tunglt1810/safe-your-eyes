@@ -1,4 +1,6 @@
 //! Reusable Cozy styled UI primitives built on `nsh_base`, `theme`, and Astryx layout rules.
+//!
+//! Design system reference: <https://github.com/tunglt1810/cozy>.
 
 use std::sync::{Arc, OnceLock};
 
@@ -39,7 +41,7 @@ pub(crate) fn app_icon(size_px: f32) -> impl IntoElement {
     image(src).w(px(size_px)).h(px(size_px)).flex_shrink_0()
 }
 
-/// Pastel KPI card color variant matching `DESIGN.md` §4.1.
+/// Pastel KPI card color variant matching `tunglt1810/cozy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KpiTone {
     Sage,
@@ -68,7 +70,7 @@ impl KpiTone {
     }
 }
 
-/// Page H1 heading paired with a Cozy pastel highlighter bar sweeping from left (`DESIGN.md` §5.2).
+/// Page H1 heading paired with a Cozy pastel highlighter bar sweeping from left (`tunglt1810/cozy`).
 pub(crate) fn page_heading(
     title: impl IntoReactive<SharedString>,
     subtitle: impl IntoReactive<SharedString>,
@@ -153,7 +155,7 @@ pub(crate) fn primary_button(
         .duration(motion::CONTROL_MS)
         .ease_out()
         .hover(|s| s.opacity(0.92))
-        .active(|s| s.opacity(0.84))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
         .disabled_style(|s| s.opacity(0.45))
         .child(
             text(label)
@@ -182,7 +184,7 @@ pub(crate) fn secondary_button(
         .duration(motion::CONTROL_MS)
         .ease_out()
         .hover(|s| s.opacity(0.9))
-        .active(|s| s.opacity(0.8))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.84))
         .disabled_style(|s| s.opacity(0.45))
         .child(
             text(label)
@@ -207,8 +209,8 @@ pub(crate) fn ghost_button(
         .transition()
         .duration(motion::CONTROL_MS)
         .ease_out()
-        .hover(|s| s.bg(colors::BACKGROUND_MUTED))
-        .active(|s| s.opacity(0.8))
+        .hover(|s| s.bg(colors::OVERLAY_HOVER))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.84))
         .disabled_style(|s| s.opacity(0.45))
         .child(
             text(label)
@@ -218,7 +220,7 @@ pub(crate) fn ghost_button(
         )
 }
 
-/// Cozy destructive pill button using WCAG AA `--color-text-error` (`DESIGN.md` §4.1).
+/// Cozy destructive pill button using measured `error-muted` / `on-error-muted` pair from `tunglt1810/cozy`.
 pub(crate) fn destructive_button(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
@@ -234,17 +236,17 @@ pub(crate) fn destructive_button(
         .transition()
         .duration(motion::CONTROL_MS)
         .ease_out()
-        .hover(|s| s.opacity(0.88))
-        .active(|s| s.opacity(0.76))
+        .hover(|s| s.opacity(0.9))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.82))
         .child(
             text(label)
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_ERROR),
+                .text_color(colors::ON_ERROR_MUTED),
         )
 }
 
-/// Astryx-style SegmentedControl pill track with spring-animated sliding thumb (`DESIGN.md` §7.1).
+/// Astryx-style SegmentedControl pill track with spring-animated sliding thumb (`tunglt1810/cozy`).
 pub(crate) fn segmented_track(active_index: impl Fn() -> usize + 'static) -> View {
     let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
     let sliding_pill = view()
@@ -303,7 +305,7 @@ pub(crate) fn segmented_option(
         )
 }
 
-/// Pastel KPI summary card (`20px` radius per `DESIGN.md` §1) with accent dot, label, and value.
+/// Pastel KPI summary card (`20px` radius per `tunglt1810/cozy`) with accent dot, label, and value.
 pub(crate) fn pastel_kpi_card(
     tone: KpiTone,
     label: &'static str,
@@ -418,10 +420,10 @@ pub(crate) fn cozy_input(
         .transition_colors()
         .duration(motion::CONTROL_MS)
         .ease_out()
-        .focus(|s| s.border_color(colors::ACCENT))
+        .focus(|s| s.border_color(colors::FOCUS_RING))
 }
 
-/// Spring-animated sliding background indicator for the Floating Sage Sidebar (`DESIGN.md` §5.2).
+/// Spring-animated sliding background indicator for the Floating Sage Sidebar (`tunglt1810/cozy`).
 pub(crate) fn sidebar_nav_indicator(
     active_index: impl Fn() -> usize + 'static,
 ) -> impl IntoElement {
@@ -433,7 +435,7 @@ pub(crate) fn sidebar_nav_indicator(
         .right(px(0.0))
         .z_index(0)
         .h(px(SIDEBAR_ITEM_HEIGHT))
-        .rounded(radii::ELEMENT)
+        .rounded(radii::NAV_ITEM)
         .bg(colors::SIDEBAR_ACTIVE)
         .translate_y(move || px(active_index() as f32 * step))
         .transition_transform()
@@ -454,28 +456,28 @@ pub(crate) fn sidebar_nav_item(
         .px_3()
         .items_start()
         .justify_center()
-        .rounded(radii::ELEMENT)
+        .rounded(radii::NAV_ITEM)
         .transition_colors()
         .duration(motion::CONTROL_MS)
         .ease_out()
-        .hover(|s| s.bg(colors::SIDEBAR_HOVER))
+        .hover(|s| s.bg(colors::OVERLAY_HOVER))
         .child(
             text(label)
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_PRIMARY),
+                .text_color(colors::SIDEBAR_TEXT),
         )
 }
 
-/// Warm status banner using WCAG AA `--color-text-{warning,error}` (`DESIGN.md` §4.1).
+/// Warm status banner using measured `warning-muted` / `error-muted` contrast pairs from `tunglt1810/cozy`.
 pub(crate) fn status_banner(
     is_error: bool,
     message: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
     let (bg, fg) = if is_error {
-        (colors::ERROR_SOFT, colors::TEXT_ERROR)
+        (colors::ERROR_SOFT, colors::ON_ERROR_MUTED)
     } else {
-        (colors::WARNING_SOFT, colors::TEXT_WARNING)
+        (colors::WARNING_SOFT, colors::ON_WARNING_MUTED)
     };
     view()
         .rounded(radii::ELEMENT)
@@ -502,8 +504,11 @@ pub(crate) fn support_link(label: &'static str) -> impl IntoElement {
         .justify_center()
         .rounded(radii::PILL)
         .bg(colors::ACCENT)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .hover(|s| s.opacity(0.92))
-        .active(|s| s.opacity(0.84))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
         .child(
             text(label)
                 .text_sm()

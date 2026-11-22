@@ -3,6 +3,8 @@
 Safe Your Eyes is a small Rust desktop application that protects your eyes on macOS, Windows, and Linux.
 It follows the break cadence of [SafeEyes](https://github.com/slgobinath/safeeyes), renders native controls through [Native Shell (`longbridge/nsh`)](https://github.com/longbridge/nsh), and applies the [Cozy Design System](https://github.com/tunglt1810/cozy).
 
+![Safe Your Eyes Cozy UI demo](docs/assets/ui-demo.gif)
+
 ![A workday with Safe Your Eyes](docs/assets/storyline.gif)
 
 Read the 9-beat story in [docs/STORYLINE.md](docs/STORYLINE.md). Illustration drawn with [tinycharts](https://github.com/tunglt1810/tinycharts).

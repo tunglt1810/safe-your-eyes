@@ -1,7 +1,7 @@
 //! Cozy Design System tokens for `safe-your-eyes`.
 //!
-//! Reference: <https://github.com/tunglt1810/cozy> (`tokens/cozy.tokens.json` v0.1.0,
-//! `css/effects.css`, and `docs/motion.md`), combined with Astryx layout conventions.
+//! Reference: <https://github.com/tunglt1810/cozy> (`v0.2.0` — `tokens/cozy.tokens.json`,
+//! `css/effects.css`, `docs/motion.md`, and `docs/patterns.md`), combined with Astryx layout rules.
 
 use nsh_core::{
     element::{AdaptiveColor, Rgba, rgb, rgba},
@@ -19,16 +19,18 @@ const fn tone(light: Rgba, dark: Rgba) -> AdaptiveColor {
     }
 }
 
-/// Semantic Cozy palette tokens (Light / Dark) from `tunglt1810/cozy` `tokens/cozy.tokens.json`.
+/// Semantic Cozy palette tokens (Light / Dark) from `tunglt1810/cozy` v0.2.0.
 pub(crate) mod colors {
     use super::{AdaptiveColor, rgb, rgba, tone};
 
     /// Main canvas background (`--cozy-bg-body`: `#FAEBDA` / `#18140E`).
     pub(crate) const BACKGROUND_BODY: AdaptiveColor = tone(rgb(0xFAEBDA), rgb(0x18140E));
-    /// Card, panel, and sticky toolbar surface (`--cozy-bg-surface`: `#FBF1E1` / `#231D16`).
+    /// Card, panel, input, secondary button, and sticky toolbar surface (`--cozy-bg-surface`: `#FBF1E1` / `#231D16`).
     pub(crate) const BACKGROUND_SURFACE: AdaptiveColor = tone(rgb(0xFBF1E1), rgb(0x231D16));
-    /// Segmented track, input fill, and subtle highlight (`--cozy-bg-muted`: `#F3DFC8` / `#30261D`).
+    /// Segmented track and quiet emphasis (`--cozy-bg-muted`: `#F3DFC8` / `#30261D`).
     pub(crate) const BACKGROUND_MUTED: AdaptiveColor = tone(rgb(0xF3DFC8), rgb(0x30261D));
+    /// Switch and progress track (`--cozy-track`: `#E6D2BC` / `#30271E`).
+    pub(crate) const TRACK: AdaptiveColor = tone(rgb(0xE6D2BC), rgb(0x30271E));
     /// Elevated active pill inside `SegmentedControl` (brighter than track in both Light and Dark).
     pub(crate) const SEGMENT_ACTIVE: AdaptiveColor = tone(rgb(0xFBF1E1), rgb(0x46392E));
 
@@ -57,6 +59,9 @@ pub(crate) mod colors {
     /// Warm muted/disabled text (`--cozy-text-disabled`: `#968574` / `#70655C`).
     pub(crate) const TEXT_DISABLED: AdaptiveColor = tone(rgb(0x968574), rgb(0x70655C));
 
+    /// Status borders and icons (v0.2.0: light warning `#B87A12` reaches >= 3:1 on body/surface).
+    pub(crate) const WARNING: AdaptiveColor = tone(rgb(0xB87A12), rgb(0xF5C156));
+    pub(crate) const ERROR: AdaptiveColor = tone(rgb(0xC8433B), rgb(0xF27B70));
     /// Status banner & destructive chip surfaces and measured high-contrast text pairs.
     pub(crate) const WARNING_SOFT: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
     pub(crate) const ON_WARNING_MUTED: AdaptiveColor = tone(rgb(0x6B4408), rgb(0xFCE09B));

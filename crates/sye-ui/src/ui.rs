@@ -165,7 +165,7 @@ pub(crate) fn primary_button(
         )
 }
 
-/// Cozy secondary pill button (warm muted surface + emphasized border).
+/// Cozy secondary pill button (`bg-surface` fill + `border-emphasized`, weight 600 per Cozy v0.2.0).
 pub(crate) fn secondary_button(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
@@ -177,24 +177,24 @@ pub(crate) fn secondary_button(
         .items_center()
         .justify_center()
         .rounded(radii::PILL)
-        .bg(colors::BACKGROUND_MUTED)
+        .bg(colors::BACKGROUND_SURFACE)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
         .transition()
         .duration(motion::CONTROL_MS)
         .ease_out()
-        .hover(|s| s.opacity(0.9))
-        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.84))
+        .hover(|s| s.bg(colors::OVERLAY_HOVER))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
         .disabled_style(|s| s.opacity(0.45))
         .child(
             text(label)
                 .text_sm()
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::TEXT_PRIMARY),
         )
 }
 
-/// Cozy ghost pill button for tertiary/cancel actions.
+/// Cozy ghost pill button for tertiary/cancel actions (weight 600 per Cozy v0.2.0).
 pub(crate) fn ghost_button(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
@@ -215,7 +215,7 @@ pub(crate) fn ghost_button(
         .child(
             text(label)
                 .text_sm()
-                .font_weight(FontWeight::MEDIUM)
+                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::TEXT_SECONDARY),
         )
 }
@@ -378,7 +378,7 @@ pub(crate) fn cozy_switch(
                     s.w(px(42.0))
                         .h(px(24.0))
                         .rounded(radii::PILL)
-                        .bg(colors::BACKGROUND_MUTED)
+                        .bg(colors::TRACK)
                         .border_1()
                         .border_color(colors::BORDER_EMPHASIZED)
                         .transition_colors()
@@ -397,7 +397,7 @@ pub(crate) fn cozy_switch(
         )
 }
 
-/// Cozy styled single-line text input (`12px` radius, `36px` control height).
+/// Cozy styled single-line text input (`12px` radius, `36px` height, `bg-surface` per Cozy v0.2.0).
 pub(crate) fn cozy_input(
     placeholder: &'static str,
     value: impl Fn() -> String + 'static,
@@ -414,12 +414,13 @@ pub(crate) fn cozy_input(
         .text_sm()
         .text_color(colors::TEXT_PRIMARY)
         .rounded(radii::ELEMENT)
-        .bg(colors::BACKGROUND_MUTED)
+        .bg(colors::BACKGROUND_SURFACE)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
         .transition_colors()
         .duration(motion::CONTROL_MS)
         .ease_out()
+        .hover(|s| s.border_color(colors::TEXT_DISABLED))
         .focus(|s| s.border_color(colors::FOCUS_RING))
 }
 
@@ -469,21 +470,25 @@ pub(crate) fn sidebar_nav_item(
         )
 }
 
-/// Warm status banner using measured `warning-muted` / `error-muted` contrast pairs from `tunglt1810/cozy`.
+/// Warm status banner using Cozy v0.2.0 contrast-checked fill, text, and border tokens.
 pub(crate) fn status_banner(
     is_error: bool,
     message: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
-    let (bg, fg) = if is_error {
-        (colors::ERROR_SOFT, colors::ON_ERROR_MUTED)
+    let (bg, fg, border) = if is_error {
+        (colors::ERROR_SOFT, colors::ON_ERROR_MUTED, colors::ERROR)
     } else {
-        (colors::WARNING_SOFT, colors::ON_WARNING_MUTED)
+        (
+            colors::WARNING_SOFT,
+            colors::ON_WARNING_MUTED,
+            colors::WARNING,
+        )
     };
     view()
         .rounded(radii::ELEMENT)
         .bg(bg)
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(border)
         .px_3()
         .py_2()
         .child(

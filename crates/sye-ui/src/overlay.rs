@@ -350,6 +350,15 @@ pub(crate) fn build_overlay_view(
         );
     }
 
+    let card_scale = animated_value(if reduce_motion() { 1.0 } else { 0.98 });
+    if !reduce_motion() {
+        card_scale.timing(
+            1.0,
+            crate::theme::motion::THEME_COLOR_MS,
+            crate::theme::motion::COZY_EASE,
+        );
+    }
+
     let mut card = view()
         .w(px(560.0))
         .max_w(percentage(0.9))
@@ -360,6 +369,7 @@ pub(crate) fn build_overlay_view(
         .p_8()
         .gap_5()
         .items_center()
+        .bind_scale(&card_scale)
         .child(app_icon(48.0))
         .child(
             view()

@@ -43,6 +43,9 @@ pub(crate) mod colors {
     pub(crate) const SIDEBAR_BG: AdaptiveColor = tone(rgb(0xC3CBB9), rgb(0x29332A));
     /// Active navigation pill inside the Floating Sage Sidebar (`--cozy-sidebar-active`: `#F8E8D3` / `#404A41`).
     pub(crate) const SIDEBAR_ACTIVE: AdaptiveColor = tone(rgb(0xF8E8D3), rgb(0x404A41));
+    /// Subtle hover tint on inactive sidebar items without reducing label contrast.
+    pub(crate) const SIDEBAR_HOVER: AdaptiveColor =
+        tone(rgb_a(0xF8E8D3, 0.45), rgb_a(0x404A41, 0.45));
 
     /// Primary coral CTA accent (`--color-accent`: `#EF8F63` / `#EE8F64`).
     pub(crate) const ACCENT: AdaptiveColor = tone(rgb(0xEF8F63), rgb(0xEE8F64));
@@ -113,4 +116,32 @@ pub(crate) mod radii {
     pub(crate) const SIDEBAR: Points = px(22.0);
     pub(crate) const PAGE: Points = px(28.0);
     pub(crate) const PILL: Points = px(9999.0);
+}
+
+/// Cozy motion presets matching `DESIGN.md` §5 and §7.4.
+pub(crate) mod motion {
+    use nsh_core::animation::Easing;
+    use nsh_core::element::Spring;
+
+    /// Smooth spring physics for sliding sidebar and segmented control indicators.
+    pub(crate) const COZY_SPRING: Spring = Spring {
+        stiffness: 380.0,
+        damping: 32.0,
+        mass: 1.0,
+        velocity: None,
+        frame_rate: None,
+    };
+
+    /// Decelerating Cozy ease curve (`cubic-bezier(0.22, 1, 0.36, 1)`).
+    pub(crate) const COZY_EASE: Easing = Easing::Bezier(0.22, 1.0, 0.36, 1.0);
+    pub(crate) const COZY_BEZIER: (f32, f32, f32, f32) = (0.22, 1.0, 0.36, 1.0);
+
+    /// Tab panel entrance transition duration (`DESIGN.md` §7.4: 160ms).
+    pub(crate) const PANEL_ENTER_MS: f32 = 160.0;
+    /// Heading highlighter horizontal sweep duration (`DESIGN.md` §5.2: 380ms).
+    pub(crate) const HIGHLIGHT_SWEEP_MS: f32 = 380.0;
+    /// Surface color transition duration when toggling Light / Dark mode.
+    pub(crate) const THEME_COLOR_MS: f32 = 220.0;
+    /// Standard hover/press/focus control transition duration.
+    pub(crate) const CONTROL_MS: f32 = 150.0;
 }

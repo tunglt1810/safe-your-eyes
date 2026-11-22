@@ -4,6 +4,7 @@
 //! summary cards, Light/Dark/System theme mode switching, warm sticky toolbar,
 //! and author support link (`https://buymeacoffee.com/bbeeezzzzz`).
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -12,12 +13,12 @@ use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config};
 
 use crate::UiError;
-use crate::theme::{SUPPORT_URL, colors, radii};
+use crate::theme::{SUPPORT_URL, colors, motion, radii};
 use crate::ui::{
     KpiTone, app_icon, cozy_input, cozy_switch, destructive_button, ghost_button, page_heading,
     pastel_kpi_card, primary_button, secondary_button, section_divider, section_header,
-    segmented_option, segmented_track, sidebar_nav_item, status_banner, support_link,
-    support_qr_card,
+    segmented_option, segmented_track, sidebar_nav_indicator, sidebar_nav_item, status_banner,
+    support_link, support_qr_card,
 };
 
 #[cfg(target_os = "linux")]
@@ -637,6 +638,12 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
 }
 
 fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
+    let theme_index = move || match appearance.get() {
+        Appearance::Light => 0,
+        Appearance::Dark => 1,
+        Appearance::System => 2,
+    };
+
     view()
         .gap_5()
         .child(
@@ -653,7 +660,7 @@ fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
                         .justify_between()
                         .gap_3()
                         .child(
-                            segmented_track()
+                            segmented_track(theme_index)
                                 .child(segmented_option(
                                     "Light",
                                     move || appearance.get() == Appearance::Light,
@@ -730,8 +737,36 @@ pub(crate) fn build_settings_view(
     let warning_msg = computed(move || vm.with(|m| m.load_warning.clone()));
     let error_msg = computed(move || vm.with(|m| m.validation_error.clone()));
 
+    let panel_opacity = animated_value(1.0);
+    let panel_y = animated_value(0.0);
+    let highlight_scale = animated_value(1.0);
+    let prev_tab = Cell::new(None::<SettingsTab>);
+
+    effect(move || {
+        let current = active_tab.get();
+        let previous = prev_tab.replace(Some(current));
+        if previous.is_some() && previous != Some(current) && !reduce_motion() {
+            panel_opacity.set(0.0);
+            panel_opacity.timing(1.0, motion::PANEL_ENTER_MS, motion::COZY_EASE);
+
+            panel_y.set(6.0);
+            panel_y.timing(0.0, motion::PANEL_ENTER_MS, motion::COZY_EASE);
+
+            highlight_scale.set(0.0);
+            highlight_scale.timing(1.0, motion::HIGHLIGHT_SWEEP_MS, motion::COZY_EASE);
+        }
+    });
+
     let save_sink = Arc::clone(&outcome_sink);
     let cancel_sink = outcome_sink;
+    let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
+
+    let tab_index = move || match active_tab.get() {
+        SettingsTab::Timing => 0,
+        SettingsTab::Policies => 1,
+        SettingsTab::Exercises => 2,
+        SettingsTab::About => 3,
+    };
 
     let sidebar = view()
         .w(px(210.0))
@@ -740,6 +775,9 @@ pub(crate) fn build_settings_view(
         .bg(colors::SIDEBAR_BG)
         .p_3()
         .justify_between()
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .gap_2()
@@ -769,7 +807,9 @@ pub(crate) fn build_settings_view(
                 )
                 .child(
                     view()
+                        .relative()
                         .gap_1()
+                        .child(sidebar_nav_indicator(tab_index))
                         .child(sidebar_nav_item(
                             "Timing",
                             move || active_tab.get() == SettingsTab::Timing,
@@ -843,12 +883,16 @@ pub(crate) fn build_settings_view(
     let page_header = view()
         .flex_shrink_0()
         .gap_3()
-        .child(page_heading("Settings", move || match active_tab.get() {
-            SettingsTab::Timing => "Timing",
-            SettingsTab::Policies => "Policies",
-            SettingsTab::Exercises => "Exercises",
-            SettingsTab::About => "About & Support",
-        }))
+        .child(page_heading(
+            "Settings",
+            move || match active_tab.get() {
+                SettingsTab::Timing => "Timing",
+                SettingsTab::Policies => "Policies",
+                SettingsTab::Exercises => "Exercises",
+                SettingsTab::About => "About & Support",
+            },
+            &highlight_scale,
+        ))
         .child(kpi_row)
         .child(when(
             move || warning_msg.get().is_some(),
@@ -859,27 +903,38 @@ pub(crate) fn build_settings_view(
             move || status_banner(true, move || error_msg.get().unwrap_or_default()),
         ));
 
-    let form_scroll = scroll().flex_1().bg(colors::BACKGROUND_SURFACE).child(
-        view()
-            .p_5()
-            .bg(colors::BACKGROUND_SURFACE)
-            .child(when(
-                move || active_tab.get() == SettingsTab::Timing,
-                move || timing_section(vm),
-            ))
-            .child(when(
-                move || active_tab.get() == SettingsTab::Policies,
-                move || policies_section(vm),
-            ))
-            .child(when(
-                move || active_tab.get() == SettingsTab::Exercises,
-                move || exercises_section(vm),
-            ))
-            .child(when(
-                move || active_tab.get() == SettingsTab::About,
-                move || about_section(appearance),
-            )),
-    );
+    let form_scroll = scroll()
+        .flex_1()
+        .bg(colors::BACKGROUND_SURFACE)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
+        .child(
+            view()
+                .p_5()
+                .bg(colors::BACKGROUND_SURFACE)
+                .transition_colors()
+                .duration(motion::THEME_COLOR_MS)
+                .ease_bezier(bx1, by1, bx2, by2)
+                .bind_opacity(&panel_opacity)
+                .bind_translate_y(&panel_y)
+                .child(when(
+                    move || active_tab.get() == SettingsTab::Timing,
+                    move || timing_section(vm),
+                ))
+                .child(when(
+                    move || active_tab.get() == SettingsTab::Policies,
+                    move || policies_section(vm),
+                ))
+                .child(when(
+                    move || active_tab.get() == SettingsTab::Exercises,
+                    move || exercises_section(vm),
+                ))
+                .child(when(
+                    move || active_tab.get() == SettingsTab::About,
+                    move || about_section(appearance),
+                )),
+        );
 
     let sticky_toolbar = view()
         .flex_shrink_0()
@@ -892,6 +947,9 @@ pub(crate) fn build_settings_view(
         .bg(colors::BACKGROUND_SURFACE)
         .border_t_1()
         .border_color(colors::BORDER)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .flex_row()
@@ -932,6 +990,9 @@ pub(crate) fn build_settings_view(
         .border_1()
         .border_color(colors::BORDER)
         .overflow_hidden()
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .child(form_scroll)
         .child(sticky_toolbar);
 
@@ -941,6 +1002,9 @@ pub(crate) fn build_settings_view(
         .flex_row()
         .p_4()
         .gap_4()
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .child(sidebar)
         .child(view().flex_1().gap_4().child(page_header).child(form_card))
 }
@@ -1257,10 +1321,18 @@ mod tests {
         assert!(app.shows("Break Schedule"));
         assert!(app.shows("Short Break"));
 
+        app.press("Policies")?;
+        app.wait_for("Break Enforcement")?;
+
         app.press("About & Support")?;
         app.wait_for("Buy Me a Coffee")?;
         assert!(app.shows("Support link: https://buymeacoffee.com/bbeeezzzzz"));
         assert!(app.shows("Scan to Buy Me a Coffee"));
+
+        app.press("Dark")?;
+        app.wait_for("Active mode: Dark (Dark Roast)")?;
+        app.press("System")?;
+        app.wait_for("Active mode: System")?;
         Ok(())
     }
 }

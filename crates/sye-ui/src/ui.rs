@@ -6,9 +6,15 @@ use nsh_base::{button, input, link, switch};
 use nsh_core::element::ImageSrc;
 use nsh_core::prelude::*;
 
-use crate::theme::{SUPPORT_URL, colors, radii};
+use crate::theme::{SUPPORT_URL, colors, motion, radii};
 
 include!(concat!(env!("OUT_DIR"), "/app_icon.rs"));
+
+/// Shared geometry constants for spring-animated sliding indicators.
+const SIDEBAR_ITEM_HEIGHT: f32 = 38.0;
+const SIDEBAR_ITEM_GAP: f32 = 4.0;
+const SEGMENT_OPTION_WIDTH: f32 = 80.0;
+const SEGMENT_OPTION_HEIGHT: f32 = 32.0;
 
 fn app_icon_rgba() -> Arc<[u8]> {
     static PIXELS: OnceLock<Arc<[u8]>> = OnceLock::new();
@@ -62,11 +68,13 @@ impl KpiTone {
     }
 }
 
-/// Page H1 heading paired with a subtle Cozy pastel highlighter bar (`DESIGN.md` §5.2).
+/// Page H1 heading paired with a Cozy pastel highlighter bar sweeping from left (`DESIGN.md` §5.2).
 pub(crate) fn page_heading(
     title: impl IntoReactive<SharedString>,
     subtitle: impl IntoReactive<SharedString>,
+    highlight_scale: &AnimatedValue,
 ) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
     view()
         .gap_1()
         .child(
@@ -88,6 +96,9 @@ pub(crate) fn page_heading(
                         .bg(colors::BACKGROUND_MUTED)
                         .border_1()
                         .border_color(colors::BORDER)
+                        .transition_colors()
+                        .duration(motion::THEME_COLOR_MS)
+                        .ease_bezier(bx1, by1, bx2, by2)
                         .child(
                             text(subtitle)
                                 .text_xs()
@@ -101,7 +112,9 @@ pub(crate) fn page_heading(
                 .w(px(48.0))
                 .h(px(4.0))
                 .rounded(radii::PILL)
-                .bg(colors::HEADING_HIGHLIGHT),
+                .bg(colors::HEADING_HIGHLIGHT)
+                .origin_left()
+                .bind_transform(nsh_core::TransformKind::ScaleX, highlight_scale),
         )
 }
 
@@ -136,6 +149,9 @@ pub(crate) fn primary_button(
         .justify_center()
         .rounded(radii::PILL)
         .bg(colors::ACCENT)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .hover(|s| s.opacity(0.92))
         .active(|s| s.opacity(0.84))
         .disabled_style(|s| s.opacity(0.45))
@@ -162,6 +178,9 @@ pub(crate) fn secondary_button(
         .bg(colors::BACKGROUND_MUTED)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .hover(|s| s.opacity(0.9))
         .active(|s| s.opacity(0.8))
         .disabled_style(|s| s.opacity(0.45))
@@ -185,6 +204,9 @@ pub(crate) fn ghost_button(
         .items_center()
         .justify_center()
         .rounded(radii::PILL)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .hover(|s| s.bg(colors::BACKGROUND_MUTED))
         .active(|s| s.opacity(0.8))
         .disabled_style(|s| s.opacity(0.45))
@@ -209,6 +231,9 @@ pub(crate) fn destructive_button(
         .justify_center()
         .rounded(radii::PILL)
         .bg(colors::ERROR_SOFT)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .hover(|s| s.opacity(0.88))
         .active(|s| s.opacity(0.76))
         .child(
@@ -219,20 +244,40 @@ pub(crate) fn destructive_button(
         )
 }
 
-/// Astryx-style SegmentedControl pill track (`DESIGN.md` §7.1).
-pub(crate) fn segmented_track() -> View {
+/// Astryx-style SegmentedControl pill track with spring-animated sliding thumb (`DESIGN.md` §7.1).
+pub(crate) fn segmented_track(active_index: impl Fn() -> usize + 'static) -> View {
+    let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
+    let sliding_pill = view()
+        .absolute()
+        .top(px(4.0))
+        .left(px(4.0))
+        .z_index(0)
+        .w(px(SEGMENT_OPTION_WIDTH))
+        .h(px(SEGMENT_OPTION_HEIGHT))
+        .rounded(radii::PILL)
+        .bg(colors::SEGMENT_ACTIVE)
+        .border_1()
+        .border_color(colors::BORDER_EMPHASIZED)
+        .translate_x(move || px(active_index() as f32 * SEGMENT_OPTION_WIDTH))
+        .transition_transform()
+        .ease_spring(motion::COZY_SPRING);
+
     view()
+        .relative()
         .flex_row()
         .items_center()
-        .gap_1()
         .p_1()
         .rounded(radii::PILL)
         .bg(colors::BACKGROUND_MUTED)
         .border_1()
         .border_color(colors::BORDER)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
+        .child(sliding_pill)
 }
 
-/// Segment option inside `segmented_track()`, highlighting active selection with surface elevation.
+/// Fixed-width segment button overlaid above `segmented_track`'s sliding spring pill.
 pub(crate) fn segmented_option(
     label: &'static str,
     selected: impl Fn() -> bool + 'static,
@@ -241,17 +286,15 @@ pub(crate) fn segmented_option(
     button()
         .on_press(on_press)
         .selected(selected)
-        .h(px(32.0))
-        .px_4()
+        .z_index(1)
+        .w(px(SEGMENT_OPTION_WIDTH))
+        .h(px(SEGMENT_OPTION_HEIGHT))
         .items_center()
         .justify_center()
         .rounded(radii::PILL)
-        .hover(|s| s.bg(colors::SEGMENT_ACTIVE).opacity(0.75))
-        .selected_style(|s| {
-            s.bg(colors::SEGMENT_ACTIVE)
-                .border_1()
-                .border_color(colors::BORDER_EMPHASIZED)
-        })
+        .transition_colors()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .child(
             text(label)
                 .text_sm()
@@ -266,6 +309,7 @@ pub(crate) fn pastel_kpi_card(
     label: &'static str,
     value: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
     view()
         .flex_1()
         .rounded(radii::KPI)
@@ -275,6 +319,9 @@ pub(crate) fn pastel_kpi_card(
         .px_4()
         .py_3()
         .gap_1()
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .flex_row()
@@ -332,6 +379,9 @@ pub(crate) fn cozy_switch(
                         .bg(colors::BACKGROUND_MUTED)
                         .border_1()
                         .border_color(colors::BORDER_EMPHASIZED)
+                        .transition_colors()
+                        .duration(motion::CONTROL_MS)
+                        .ease_out()
                         .checked(|c| c.bg(colors::ACCENT).border_color(colors::ACCENT))
                 })
                 .thumb_style(|s| {
@@ -339,6 +389,8 @@ pub(crate) fn cozy_switch(
                         .h(px(18.0))
                         .rounded(radii::PILL)
                         .bg(colors::SWITCH_KNOB)
+                        .transition_transform()
+                        .ease_spring(motion::COZY_SPRING)
                 }),
         )
 }
@@ -363,10 +415,32 @@ pub(crate) fn cozy_input(
         .bg(colors::BACKGROUND_MUTED)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
+        .transition_colors()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
         .focus(|s| s.border_color(colors::ACCENT))
 }
 
-/// Sidebar navigation pill inside the Floating Sage Sidebar (`12px` radius).
+/// Spring-animated sliding background indicator for the Floating Sage Sidebar (`DESIGN.md` §5.2).
+pub(crate) fn sidebar_nav_indicator(
+    active_index: impl Fn() -> usize + 'static,
+) -> impl IntoElement {
+    let step = SIDEBAR_ITEM_HEIGHT + SIDEBAR_ITEM_GAP;
+    view()
+        .absolute()
+        .top(px(0.0))
+        .left(px(0.0))
+        .right(px(0.0))
+        .z_index(0)
+        .h(px(SIDEBAR_ITEM_HEIGHT))
+        .rounded(radii::ELEMENT)
+        .bg(colors::SIDEBAR_ACTIVE)
+        .translate_y(move || px(active_index() as f32 * step))
+        .transition_transform()
+        .ease_spring(motion::COZY_SPRING)
+}
+
+/// Sidebar navigation button layered above `sidebar_nav_indicator`.
 pub(crate) fn sidebar_nav_item(
     label: &'static str,
     selected: impl Fn() -> bool + 'static,
@@ -375,13 +449,16 @@ pub(crate) fn sidebar_nav_item(
     button()
         .on_press(on_press)
         .selected(selected)
-        .h(px(38.0))
+        .z_index(1)
+        .h(px(SIDEBAR_ITEM_HEIGHT))
         .px_3()
         .items_start()
         .justify_center()
         .rounded(radii::ELEMENT)
-        .hover(|s| s.bg(colors::SIDEBAR_ACTIVE).opacity(0.8))
-        .selected_style(|s| s.bg(colors::SIDEBAR_ACTIVE))
+        .transition_colors()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
+        .hover(|s| s.bg(colors::SIDEBAR_HOVER))
         .child(
             text(label)
                 .text_sm()

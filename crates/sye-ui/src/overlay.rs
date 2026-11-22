@@ -305,6 +305,9 @@ pub(crate) fn build_overlay_view(
                 .bg(colors::OVERLAY_TRACK)
                 .border_1()
                 .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
+                .transition()
+                .duration(crate::theme::motion::CONTROL_MS)
+                .ease_out()
                 .hover(|s| s.opacity(0.9))
                 .active(|s| s.opacity(0.8))
                 .disabled_style(|s| s.opacity(0.4))
@@ -332,6 +335,9 @@ pub(crate) fn build_overlay_view(
                 .justify_center()
                 .rounded(radii::PILL)
                 .bg(colors::ACCENT)
+                .transition()
+                .duration(crate::theme::motion::CONTROL_MS)
+                .ease_out()
                 .hover(|s| s.opacity(0.92))
                 .active(|s| s.opacity(0.84))
                 .disabled_style(|s| s.opacity(0.4))
@@ -392,6 +398,9 @@ pub(crate) fn build_overlay_view(
                         .h(px(8.0))
                         .rounded(radii::PILL)
                         .bg(colors::ACCENT)
+                        .transition_all()
+                        .duration(180.0)
+                        .ease_linear()
                         .w(move || percentage(vm.with(OverlayViewModel::progress))),
                 ),
         );

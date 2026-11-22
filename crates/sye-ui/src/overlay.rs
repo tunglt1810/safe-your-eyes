@@ -11,6 +11,7 @@ use sye_core::scheduler::{OverlayOutcome, OverlayRequest};
 
 use crate::UiError;
 use crate::theme::{colors, radii};
+use crate::ui::app_icon;
 
 #[cfg(target_os = "linux")]
 use nsh_platform_linux as platform;
@@ -303,7 +304,7 @@ pub(crate) fn build_overlay_view(
                 .rounded(radii::PILL)
                 .bg(colors::OVERLAY_TRACK)
                 .border_1()
-                .border_color(colors::BORDER_EMPHASIZED)
+                .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
                 .hover(|s| s.opacity(0.9))
                 .active(|s| s.opacity(0.8))
                 .disabled_style(|s| s.opacity(0.4))
@@ -349,10 +350,11 @@ pub(crate) fn build_overlay_view(
         .rounded(radii::PAGE)
         .bg(colors::OVERLAY_CARD)
         .border_1()
-        .border_color(colors::BORDER)
+        .border_color(colors::OVERLAY_BORDER)
         .p_8()
         .gap_5()
         .items_center()
+        .child(app_icon(48.0))
         .child(
             view()
                 .px_3()

@@ -3538,6 +3538,7 @@ dependencies = [
  "nsh-platform-macos",
  "nsh-platform-windows",
  "nsh-testing",
+ "png 0.18.1",
  "qrcode",
  "sye-core",
 ]

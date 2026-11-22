@@ -14,8 +14,9 @@ use sye_core::config::{BreakSpec, BreakType, Config};
 use crate::UiError;
 use crate::theme::{SUPPORT_URL, colors, radii};
 use crate::ui::{
-    KpiTone, cozy_card, cozy_input, cozy_switch, destructive_button, ghost_button, pastel_kpi_card,
-    primary_button, secondary_button, sidebar_nav_item, status_banner, support_link,
+    KpiTone, app_icon, cozy_input, cozy_switch, destructive_button, ghost_button, page_heading,
+    pastel_kpi_card, primary_button, secondary_button, section_divider, section_header,
+    segmented_option, segmented_track, sidebar_nav_item, status_banner, support_link,
     support_qr_card,
 };
 
@@ -291,6 +292,7 @@ fn number_field_row(
 ) -> impl IntoElement {
     view()
         .flex_row()
+        .h(px(36.0))
         .items_center()
         .justify_between()
         .gap_3()
@@ -314,21 +316,27 @@ fn number_field_row(
                         }
                     },
                 )))
-                .child(text(unit).text_xs().text_color(colors::TEXT_SECONDARY)),
+                .child(
+                    view().w(px(44.0)).child(
+                        text(unit)
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors::TEXT_SECONDARY),
+                    ),
+                ),
         )
 }
 
 fn timing_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
     view()
-        .gap_4()
+        .gap_5()
         .child(
-            cozy_card()
-                .child(
-                    text("Break Schedule")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Break Schedule",
+                    "Configure short and long break cadence and durations.",
+                ))
                 .child(number_field_row(
                     "Short break interval",
                     "secs",
@@ -354,14 +362,14 @@ fn timing_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
                     move |v| vm.update(|m| m.config.long_break_duration_secs = v),
                 )),
         )
+        .child(section_divider())
         .child(
-            cozy_card()
-                .child(
-                    text("Transitions & Controls")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Transitions & Controls",
+                    "Fine-tune warnings, fade-in speed, postpone length, and session persistence.",
+                ))
                 .child(number_field_row(
                     "Pre-break warning",
                     "secs",
@@ -401,15 +409,14 @@ fn timing_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
 
 fn policies_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
     view()
-        .gap_4()
+        .gap_5()
         .child(
-            cozy_card()
-                .child(
-                    text("Break Enforcement")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Break Enforcement",
+                    "Control whether breaks can be skipped, postponed, or strictly enforced.",
+                ))
                 .child(cozy_switch(
                     "Strict break (hide Skip)",
                     move || vm.with(|m| m.config.strict_break),
@@ -437,14 +444,14 @@ fn policies_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
                     },
                 )),
         )
+        .child(section_divider())
         .child(
-            cozy_card()
-                .child(
-                    text("Smart Pause & Do Not Disturb")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Smart Pause & Do Not Disturb",
+                    "Automatically pause timers while idle, on battery, or in fullscreen apps.",
+                ))
                 .child(cozy_switch(
                     "Smart Pause on idle",
                     move || vm.with(|m| m.config.smart_pause.enabled),
@@ -467,14 +474,14 @@ fn policies_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
                     move |v| vm.update(|m| m.config.do_not_disturb.while_on_battery = v),
                 )),
         )
+        .child(section_divider())
         .child(
-            cozy_card()
-                .child(
-                    text("Audible Chime")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Audible Chime",
+                    "Play a gentle synthesized chime before or after breaks.",
+                ))
                 .child(cozy_switch(
                     "Pre-break chime",
                     move || vm.with(|m| m.config.audible_alert.pre_break),
@@ -521,15 +528,14 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
     });
 
     view()
-        .gap_4()
+        .gap_5()
         .child(
-            cozy_card()
-                .child(
-                    text("Short Break Exercises")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Short Break Exercises",
+                    "Quick 15-second prompts cycled during work intervals.",
+                ))
                 .child(
                     view()
                         .flex_row()
@@ -575,14 +581,14 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
                     },
                 ))),
         )
+        .child(section_divider())
         .child(
-            cozy_card()
-                .child(
-                    text("Long Break Exercises")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Long Break Exercises",
+                    "Restorative prompts shown after every four short breaks.",
+                ))
                 .child(
                     view()
                         .flex_row()
@@ -632,78 +638,82 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
 
 fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
     view()
-        .gap_4()
+        .gap_5()
         .child(
-            cozy_card()
-                .child(
-                    text("Cozy Appearance")
-                        .text_base()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::TEXT_PRIMARY),
-                )
-                .child(
-                    text("Switch between warm oatmeal Light mode, dark roast Dark mode, or follow your OS.")
-                        .text_xs()
-                        .text_color(colors::TEXT_SECONDARY),
-                )
+            view()
+                .gap_3()
+                .child(section_header(
+                    "Cozy Appearance",
+                    "Switch between warm oatmeal Light mode, dark roast Dark mode, or follow your OS.",
+                ))
                 .child(
                     view()
                         .flex_row()
-                        .gap_2()
-                        .child(secondary_button("Light", move || {
-                            appearance.set(Appearance::Light);
-                            set_color_scheme(Appearance::Light);
-                        }))
-                        .child(secondary_button("Dark", move || {
-                            appearance.set(Appearance::Dark);
-                            set_color_scheme(Appearance::Dark);
-                        }))
-                        .child(secondary_button("System", move || {
-                            appearance.set(Appearance::System);
-                            set_color_scheme(Appearance::System);
-                        })),
-                )
-                .child(
-                    text(move || match appearance.get() {
-                        Appearance::Light => "Active mode: Light (Warm Oatmeal)",
-                        Appearance::Dark => "Active mode: Dark (Dark Roast)",
-                        Appearance::System => "Active mode: System",
-                    })
-                    .text_xs()
-                    .text_color(colors::TEXT_SECONDARY),
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            segmented_track()
+                                .child(segmented_option(
+                                    "Light",
+                                    move || appearance.get() == Appearance::Light,
+                                    move || {
+                                        appearance.set(Appearance::Light);
+                                        set_color_scheme(Appearance::Light);
+                                    },
+                                ))
+                                .child(segmented_option(
+                                    "Dark",
+                                    move || appearance.get() == Appearance::Dark,
+                                    move || {
+                                        appearance.set(Appearance::Dark);
+                                        set_color_scheme(Appearance::Dark);
+                                    },
+                                ))
+                                .child(segmented_option(
+                                    "System",
+                                    move || appearance.get() == Appearance::System,
+                                    move || {
+                                        appearance.set(Appearance::System);
+                                        set_color_scheme(Appearance::System);
+                                    },
+                                )),
+                        )
+                        .child(
+                            text(move || match appearance.get() {
+                                Appearance::Light => "Active mode: Light (Warm Oatmeal)",
+                                Appearance::Dark => "Active mode: Dark (Dark Roast)",
+                                Appearance::System => "Active mode: System",
+                            })
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(colors::TEXT_SECONDARY),
+                        ),
                 ),
         )
+        .child(section_divider())
         .child(
-            cozy_card().child(
-                view()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
-                    .child(
-                        view()
-                            .flex_1()
-                            .gap_3()
-                            .child(
-                                text("Support Safe Your Eyes")
-                                    .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(colors::TEXT_PRIMARY),
-                            )
-                            .child(
-                                text("Built in Rust with Native Shell (nsh) and the Cozy Design System to keep your eyes healthy with minimal footprint.")
-                                    .text_sm()
-                                    .text_color(colors::TEXT_SECONDARY),
-                            )
-                            .child(
-                                text(format!("Support link: {SUPPORT_URL}"))
-                                    .text_xs()
-                                    .text_color(colors::TEXT_SECONDARY),
-                            )
-                            .child(view().flex_row().child(support_link("Buy Me a Coffee"))),
-                    )
-                    .child(support_qr_card()),
-            ),
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_5()
+                .child(
+                    view()
+                        .flex_1()
+                        .gap_3()
+                        .child(section_header(
+                            "Support Safe Your Eyes",
+                            "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
+                        ))
+                        .child(
+                            text(format!("Support link: {SUPPORT_URL}"))
+                                .text_xs()
+                                .text_color(colors::TEXT_SECONDARY),
+                        )
+                        .child(view().flex_row().child(support_link("Buy Me a Coffee"))),
+                )
+                .child(support_qr_card()),
         )
 }
 
@@ -724,48 +734,72 @@ pub(crate) fn build_settings_view(
     let cancel_sink = outcome_sink;
 
     let sidebar = view()
-        .w(px(196.0))
+        .w(px(210.0))
+        .flex_shrink_0()
         .rounded(radii::SIDEBAR)
         .bg(colors::SIDEBAR_BG)
         .p_3()
-        .gap_2()
+        .justify_between()
         .child(
             view()
-                .px_2()
-                .py_2()
-                .gap_1()
+                .gap_2()
                 .child(
-                    text("Safe Your Eyes")
-                        .text_base()
-                        .font_weight(FontWeight::BOLD)
-                        .text_color(colors::TEXT_PRIMARY),
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_3()
+                        .px_2()
+                        .py_2()
+                        .child(app_icon(36.0))
+                        .child(
+                            view()
+                                .gap_1()
+                                .child(
+                                    text("Safe Your Eyes")
+                                        .text_sm()
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(colors::TEXT_PRIMARY),
+                                )
+                                .child(
+                                    text("Cozy Eye Care")
+                                        .text_xs()
+                                        .text_color(colors::TEXT_SECONDARY),
+                                ),
+                        ),
                 )
                 .child(
-                    text("Cozy Eye Care")
-                        .text_xs()
-                        .text_color(colors::TEXT_SECONDARY),
+                    view()
+                        .gap_1()
+                        .child(sidebar_nav_item(
+                            "Timing",
+                            move || active_tab.get() == SettingsTab::Timing,
+                            move || vm.update(|m| m.active_tab = SettingsTab::Timing),
+                        ))
+                        .child(sidebar_nav_item(
+                            "Policies",
+                            move || active_tab.get() == SettingsTab::Policies,
+                            move || vm.update(|m| m.active_tab = SettingsTab::Policies),
+                        ))
+                        .child(sidebar_nav_item(
+                            "Exercises",
+                            move || active_tab.get() == SettingsTab::Exercises,
+                            move || vm.update(|m| m.active_tab = SettingsTab::Exercises),
+                        ))
+                        .child(sidebar_nav_item(
+                            "About & Support",
+                            move || active_tab.get() == SettingsTab::About,
+                            move || vm.update(|m| m.active_tab = SettingsTab::About),
+                        )),
                 ),
         )
-        .child(sidebar_nav_item(
-            "Timing",
-            move || active_tab.get() == SettingsTab::Timing,
-            move || vm.update(|m| m.active_tab = SettingsTab::Timing),
-        ))
-        .child(sidebar_nav_item(
-            "Policies",
-            move || active_tab.get() == SettingsTab::Policies,
-            move || vm.update(|m| m.active_tab = SettingsTab::Policies),
-        ))
-        .child(sidebar_nav_item(
-            "Exercises",
-            move || active_tab.get() == SettingsTab::Exercises,
-            move || vm.update(|m| m.active_tab = SettingsTab::Exercises),
-        ))
-        .child(sidebar_nav_item(
-            "About & Support",
-            move || active_tab.get() == SettingsTab::About,
-            move || vm.update(|m| m.active_tab = SettingsTab::About),
-        ));
+        .child(
+            view().px_3().py_1().child(
+                text(format!("v{}", env!("CARGO_PKG_VERSION")))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors::TEXT_SECONDARY),
+            ),
+        );
 
     let kpi_row = view()
         .flex_row()
@@ -806,25 +840,29 @@ pub(crate) fn build_settings_view(
             })
         }));
 
-    let content_body = scroll().flex_1().child(
+    let page_header = view()
+        .flex_shrink_0()
+        .gap_3()
+        .child(page_heading("Settings", move || match active_tab.get() {
+            SettingsTab::Timing => "Timing",
+            SettingsTab::Policies => "Policies",
+            SettingsTab::Exercises => "Exercises",
+            SettingsTab::About => "About & Support",
+        }))
+        .child(kpi_row)
+        .child(when(
+            move || warning_msg.get().is_some(),
+            move || status_banner(false, move || warning_msg.get().unwrap_or_default()),
+        ))
+        .child(when(
+            move || error_msg.get().is_some(),
+            move || status_banner(true, move || error_msg.get().unwrap_or_default()),
+        ));
+
+    let form_scroll = scroll().flex_1().bg(colors::BACKGROUND_SURFACE).child(
         view()
             .p_5()
-            .gap_4()
-            .child(
-                text("Settings")
-                    .text_2xl()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(colors::TEXT_PRIMARY),
-            )
-            .child(kpi_row)
-            .child(when(
-                move || warning_msg.get().is_some(),
-                move || status_banner(false, move || warning_msg.get().unwrap_or_default()),
-            ))
-            .child(when(
-                move || error_msg.get().is_some(),
-                move || status_banner(true, move || error_msg.get().unwrap_or_default()),
-            ))
+            .bg(colors::BACKGROUND_SURFACE)
             .child(when(
                 move || active_tab.get() == SettingsTab::Timing,
                 move || timing_section(vm),
@@ -844,11 +882,13 @@ pub(crate) fn build_settings_view(
     );
 
     let sticky_toolbar = view()
+        .flex_shrink_0()
         .flex_row()
         .items_center()
         .justify_between()
         .px_5()
         .py_3()
+        .rounded_b(radii::CONTAINER)
         .bg(colors::BACKGROUND_SURFACE)
         .border_t_1()
         .border_color(colors::BORDER)
@@ -884,6 +924,17 @@ pub(crate) fn build_settings_view(
             }
         }));
 
+    // Unified Form Card keeps the scrollable form and sticky footer strictly inside one rounded border.
+    let form_card = view()
+        .flex_1()
+        .rounded(radii::CONTAINER)
+        .bg(colors::BACKGROUND_SURFACE)
+        .border_1()
+        .border_color(colors::BORDER)
+        .overflow_hidden()
+        .child(form_scroll)
+        .child(sticky_toolbar);
+
     view()
         .flex_1()
         .bg(colors::BACKGROUND_BODY)
@@ -891,14 +942,7 @@ pub(crate) fn build_settings_view(
         .p_4()
         .gap_4()
         .child(sidebar)
-        .child(
-            view()
-                .flex_1()
-                .rounded(radii::CONTAINER)
-                .bg(colors::BACKGROUND_BODY)
-                .child(content_body)
-                .child(sticky_toolbar),
-        )
+        .child(view().flex_1().gap_4().child(page_header).child(form_card))
 }
 
 #[component]
@@ -940,7 +984,7 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
                 title: "Safe Your Eyes — Settings".to_owned(),
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.settings".to_owned(),
-                size: (860, 620),
+                size: (920, 680),
                 appearance: Appearance::Light,
                 ..Default::default()
             },

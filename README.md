@@ -10,7 +10,7 @@ Safe Your Eyes is a small Rust app for Windows, macOS and Linux. Every so often 
 
 The idea comes from [SafeEyes](https://github.com/slgobinath/safeeyes). The native UI runs on [Native Shell (`longbridge/nsh`)](https://github.com/longbridge/nsh) and uses my [Cozy Design System](https://github.com/tunglt1810/cozy).
 
-![Close your eyes, open your mind. A workday time-lapse of Safe Your Eyes](docs/assets/storyline.gif)
+![Close your eyes, open your mind. A comic of one workday with Safe Your Eyes](docs/assets/storyline.gif)
 
 The whole workday story, with a state diagram, is in [docs/STORYLINE.md](docs/STORYLINE.md). I drew the charts with [tinycharts](https://github.com/tunglt1810/tinycharts).
 

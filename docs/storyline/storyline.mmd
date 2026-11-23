@@ -1,0 +1,29 @@
+---
+title: "Close your eyes, open your mind"
+---
+stateDiagram-v2
+  [*] --> morning
+  morning: 1 coffee, AI, go
+  strain: 2 forgot to blink
+  chime: 3 a 15-second pause
+  stretch: 4 an idea lands
+  sprint: 5 one more prompt
+  locked: 6 no skip this time
+  calm: 7 eyes shut, mind open
+  shipped: 8 shipped, eyes fresh
+  night: 9 quit, see you at 9
+  state ask <<choice>>
+  morning --> strain: next step
+  strain --> strain: break due
+  strain --> chime: next step [break due]
+  chime --> stretch: next step
+  stretch --> sprint: next step
+  sprint --> sprint: skip [under the limit]
+  sprint --> ask: next step
+  ask --> locked: [skip limit reached]
+  ask --> calm: [else]
+  locked --> calm: close eyes
+  calm --> calm: close eyes
+  calm --> shipped: next step [eyes closed]
+  shipped --> night: next step
+  night --> morning: another day

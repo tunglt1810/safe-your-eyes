@@ -1,0 +1,21 @@
+{
+ "title": "Close your eyes, open your mind",
+ "checked": "Every reachable state checked (9 states, 14 with their data, 18 steps). All 3 rules hold.",
+ "rules": [
+  {
+   "rule": "Every step can happen, and none is a dead end",
+   "says": "Each of the 9 states is reached from the start, every step can fire, and no state leaves you stuck.",
+   "path": "Holds on every path."
+  },
+  {
+   "rule": "Rest before you ship",
+   "says": "The day ships only after the eyes really close for the break.",
+   "path": "Take away the eyes closed guard and it breaks in 7 steps: next step, break due, next step, next step, next step, next step, next step."
+  },
+  {
+   "rule": "Two skips at most",
+   "says": "After two skips in a row, Skip and Postpone lock.",
+   "path": "Take away the under the limit guard and it breaks in 8 steps: next step, break due, next step, next step, next step, skip, skip, skip."
+  }
+ ]
+}

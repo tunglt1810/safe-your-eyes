@@ -138,14 +138,14 @@ pub fn decode_response(line: &str) -> Result<IpcResponse, IpcCodecError> {
 #[derive(Deserialize)]
 struct CmdProbe<'a> {
     #[serde(borrow)]
-    cmd: &'a str,
+    cmd: std::borrow::Cow<'a, str>,
 }
 
 fn classify_command_error(trimmed: &str) -> IpcErrorCode {
     let Ok(probe) = serde_json::from_str::<CmdProbe<'_>>(trimmed) else {
         return IpcErrorCode::InvalidRequest;
     };
-    match probe.cmd {
+    match probe.cmd.as_ref() {
         "status" | "enable" | "disable" | "take_break" | "open_settings" | "quit" => {
             IpcErrorCode::InvalidRequest
         }

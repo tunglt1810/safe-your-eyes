@@ -21,7 +21,6 @@ fn main() -> ExitCode {
         }
     };
 
-    // Handle modes that do not require filesystem path resolution first.
     match args.mode {
         CommandMode::Help => {
             print!("{HELP_TEXT}");

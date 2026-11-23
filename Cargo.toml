@@ -36,7 +36,6 @@ style = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 
-# Selective pedantic lints
 cloned_instead_of_copied = "warn"
 doc_markdown = "warn"
 explicit_iter_loop = "warn"
@@ -52,14 +51,12 @@ unnested_or_patterns = "warn"
 unused_self = "warn"
 wildcard_imports = "warn"
 
-# Selective nursery lints
 or_fun_call = "warn"
 redundant_clone = "warn"
 redundant_else = "warn"
 significant_drop_tightening = "warn"
 use_self = "warn"
 
-# Restriction lints
 dbg_macro = "warn"
 unwrap_used = "deny"
 expect_used = "deny"

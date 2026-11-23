@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sye_core::config::{BreakType, Config};
 use sye_core::ipc::{IpcCommand, IpcResponse};
+use sye_core::policies::ACTIVE_POSTPONE_SECS;
 use sye_core::scheduler::{
     OverlayOutcome, Scheduler, SchedulerAction, SchedulerEvent, SchedulerState,
 };
@@ -189,7 +190,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
     if persist_state {
         let (session, session_err) = SessionState::load_or_default(&paths.session_file);
         if let Some(err) = session_err {
-            eprintln!("Warning: ignoring corrupt session file ({err})");
+            eprintln!("Warning: ignoring unreadable session file ({err})");
         } else {
             scheduler.restore_session(&session);
         }
@@ -238,9 +239,17 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
                 host.execute(scheduler.handle_event(SchedulerEvent::IdleObserved(idle)));
             }
             if scheduler.state() == SchedulerState::PreBreak {
-                let dnd_ctx = dnd_provider.query_dnd_context().ok();
+                let dnd_ctx = if scheduler.config().do_not_disturb.enabled {
+                    dnd_provider.query_dnd_context().ok()
+                } else {
+                    None
+                };
+                // SPEC 7.1: postpone_if_active applies only in the final seconds before Break.
+                let postpone_idle = current_idle.filter(|_| {
+                    scheduler.status_snapshot().seconds_until_next_break <= ACTIVE_POSTPONE_SECS
+                });
                 let policy_actions =
-                    scheduler.evaluate_pre_break_policies(current_idle, dnd_ctx.as_ref());
+                    scheduler.evaluate_pre_break_policies(postpone_idle, dnd_ctx.as_ref());
                 if !policy_actions.is_empty() {
                     host.execute(policy_actions);
                 }

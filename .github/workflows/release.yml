@@ -131,6 +131,7 @@ jobs:
           ''')
           Path(os.environ["APP_DIR"], "Contents", "Info.plist").write_text(plist, encoding="utf-8")
           PY
+          codesign --force --deep --sign - "$APP_DIR"
           ditto -c -k --sequesterRsrc --keepParent "$APP_DIR" "dist/${{ matrix.asset_name }}"
           rm -rf "$APP_DIR"
 
@@ -216,7 +217,7 @@ jobs:
             echo "### Install on macOS (Homebrew Cask)"
             echo ""
             echo '```bash'
-            echo 'brew install --cask --no-quarantine tunglt1810/tap/safe-your-eyes'
+            echo 'brew install --cask tunglt1810/tap/safe-your-eyes'
             echo '```'
             echo ""
             echo "### Downloads & VirusTotal Verification"
@@ -280,6 +281,10 @@ jobs:
 
               app "Safe Your Eyes.app"
               binary "#{{appdir}}/Safe Your Eyes.app/Contents/MacOS/safe-your-eyes"
+
+              postflight_steps do
+                run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}}}/Safe Your Eyes.app"]
+              end
 
               zap trash: [
                 "~/Library/Application Support/safe-your-eyes",

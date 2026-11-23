@@ -13,6 +13,10 @@ cask "safe-your-eyes" do
   app "Safe Your Eyes.app"
   binary "#{appdir}/Safe Your Eyes.app/Contents/MacOS/safe-your-eyes"
 
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Safe Your Eyes.app"]
+  end
+
   zap trash: [
     "~/Library/Application Support/safe-your-eyes",
     "~/Library/Caches/safe-your-eyes",

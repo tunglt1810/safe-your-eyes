@@ -20,7 +20,8 @@ impl std::fmt::Debug for SystemIdleProvider {
 
 impl SystemIdleProvider {
     /// Creates a new `SystemIdleProvider`.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             #[cfg(target_os = "linux")]
             x11: Mutex::new(None),
@@ -56,16 +57,18 @@ impl IdleProvider for SystemIdleProvider {
 }
 
 /// Parses `HIDIdleTime` (nanoseconds) from `ioreg -c IOHIDSystem -d 4` output on macOS.
-///
-/// Compiled unconditionally so cross-platform unit tests run on every OS.
-pub fn parse_macos_hid_idle_time(output: &str) -> Option<Duration> {
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_hid_idle_time(output: &str) -> Option<Duration> {
     for line in output.lines() {
         if !line.contains("\"HIDIdleTime\"") {
             continue;
         }
-        let (_, rhs) = line.split_once('=')?;
-        let trimmed = rhs.trim();
-        let nanos = trimmed.parse::<u64>().ok()?;
+        let Some((_, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        let Ok(nanos) = rhs.trim().parse::<u64>() else {
+            continue;
+        };
         return Some(Duration::from_nanos(nanos));
     }
     None
@@ -73,7 +76,7 @@ pub fn parse_macos_hid_idle_time(output: &str) -> Option<Duration> {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
     use std::time::Duration;
 
     use sye_core::PlatformError;
@@ -118,19 +121,18 @@ mod linux_impl {
     }
 
     fn query_x11_idle(cache: &Mutex<Option<X11IdleConn>>) -> Option<Duration> {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        if let Some(existing) = guard.as_ref()
-            && let Some(ms) = existing.query_ms()
-        {
-            return Some(Duration::from_millis(u64::from(ms)));
-        }
-
-        // Reconnect once if no cached connection or the previous connection errored.
-        *guard = X11IdleConn::connect();
-        let ms = guard.as_ref()?.query_ms()?;
+        let ms = {
+            let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(existing) = guard.as_ref()
+                && let Some(ms) = existing.query_ms()
+            {
+                Some(ms)
+            } else {
+                // Reconnect once if no cached connection or the previous connection errored.
+                *guard = X11IdleConn::connect();
+                guard.as_ref().and_then(X11IdleConn::query_ms)
+            }
+        }?;
         Some(Duration::from_millis(u64::from(ms)))
     }
 
@@ -202,13 +204,18 @@ mod windows_impl {
     use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
-    #[expect(unsafe_code, reason = "Win32 FFI")]
+    const LASTINPUTINFO_SIZE_U32: u32 = const {
+        assert!(size_of::<LASTINPUTINFO>() <= u32::MAX as usize);
+        size_of::<LASTINPUTINFO>() as u32
+    };
+
     pub(super) fn query_idle_duration() -> Result<Duration, PlatformError> {
         let mut lii = LASTINPUTINFO {
-            cbSize: size_of::<LASTINPUTINFO>() as u32,
+            cbSize: LASTINPUTINFO_SIZE_U32,
             dwTime: 0,
         };
         // SAFETY: `lii` is properly initialized with its exact byte size and valid for writes.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
         let ok = unsafe { GetLastInputInfo(&mut lii) };
         if ok == 0 {
             return Err(PlatformError::Unavailable(
@@ -216,6 +223,7 @@ mod windows_impl {
             ));
         }
         // SAFETY: `GetTickCount` has no preconditions and returns monotonic 32-bit ms since boot.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
         let now_ms = unsafe { GetTickCount() };
         let elapsed_ms = now_ms.wrapping_sub(lii.dwTime);
         Ok(Duration::from_millis(u64::from(elapsed_ms)))

@@ -10,7 +10,7 @@ pub mod config;
 pub mod ipc;
 pub mod policies;
 pub mod queue;
-pub mod rng;
+mod rng;
 pub mod scheduler;
 pub mod session;
 pub mod traits;
@@ -32,7 +32,6 @@ pub use policies::{
     SmartPauseDecision, SmartPausePolicy,
 };
 pub use queue::{BreakQueue, QueuedBreak, ResolvedBreak};
-pub use rng::SplitMix64;
 pub use scheduler::{
     OverlayOutcome, OverlayRequest, Scheduler, SchedulerAction, SchedulerEvent, SchedulerState,
     StatusSnapshot, TraySnapshot,

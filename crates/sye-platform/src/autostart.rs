@@ -18,6 +18,7 @@ pub struct AutostartEntry {
 
 impl AutostartEntry {
     /// Creates a default `AutostartEntry` for `safe-your-eyes`.
+    #[must_use]
     pub fn for_safe_your_eyes(executable: PathBuf) -> Self {
         Self {
             app_id: "io.github.safeyoureyes.SafeYourEyes".to_owned(),
@@ -36,7 +37,8 @@ pub struct AutostartManager {
 
 impl AutostartManager {
     /// Creates an `AutostartManager` targeting an explicit file path.
-    pub fn new(entry_path: PathBuf) -> Self {
+    #[must_use]
+    pub const fn new(entry_path: PathBuf) -> Self {
         Self { entry_path }
     }
 
@@ -48,11 +50,13 @@ impl AutostartManager {
     }
 
     /// Returns the managed autostart file path.
+    #[must_use]
     pub fn entry_path(&self) -> &Path {
         &self.entry_path
     }
 
     /// Returns `true` if the autostart entry currently exists on disk.
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.entry_path.is_file()
     }
@@ -99,9 +103,7 @@ pub fn sync_system_autostart(
     let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
     let mut entry = AutostartEntry::for_safe_your_eyes(exe);
     if let Some(cfg_path) = custom_config {
-        let is_default = crate::AppPaths::resolve()
-            .map(|p| p.config_file == cfg_path)
-            .unwrap_or(false);
+        let is_default = crate::AppPaths::resolve().is_ok_and(|p| p.config_file == cfg_path);
         if !is_default {
             entry.args = vec![
                 "--config".to_owned(),
@@ -162,13 +164,15 @@ fn render_for_current_os(entry: &AutostartEntry) -> String {
 }
 
 /// Renders an XDG autostart `.desktop` file for Linux desktop environments.
+#[must_use]
 pub fn render_linux_desktop_entry(entry: &AutostartEntry) -> String {
-    let mut exec_parts = Vec::with_capacity(1 + entry.args.len());
-    exec_parts.push(quote_desktop_arg(&entry.executable.to_string_lossy()));
+    let exe = entry.executable.to_string_lossy();
+    let mut exec_line = String::with_capacity(exe.len() + entry.args.len() * 16);
+    push_quoted_desktop_arg(&mut exec_line, &exe);
     for arg in &entry.args {
-        exec_parts.push(quote_desktop_arg(arg));
+        exec_line.push(' ');
+        push_quoted_desktop_arg(&mut exec_line, arg);
     }
-    let exec_line = exec_parts.join(" ");
 
     format!(
         "[Desktop Entry]\n\
@@ -185,48 +189,57 @@ pub fn render_linux_desktop_entry(entry: &AutostartEntry) -> String {
     )
 }
 
-/// Renders a macOS `launchd` LaunchAgent `.plist` XML file.
+/// Renders a macOS `launchd` `LaunchAgent` `.plist` XML file.
+#[must_use]
 pub fn render_macos_launch_agent_plist(entry: &AutostartEntry) -> String {
-    let mut program_args = String::new();
-    program_args.push_str("        <string>");
-    program_args.push_str(&escape_xml(&entry.executable.to_string_lossy()));
-    program_args.push_str("</string>\n");
-    for arg in &entry.args {
-        program_args.push_str("        <string>");
-        program_args.push_str(&escape_xml(arg));
-        program_args.push_str("</string>\n");
-    }
-
-    format!(
+    let exe = entry.executable.to_string_lossy();
+    let mut out =
+        String::with_capacity(384 + entry.app_id.len() + exe.len() + entry.args.len() * 32);
+    out.push_str(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
          \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
          <plist version=\"1.0\">\n\
          <dict>\n\
              <key>Label</key>\n\
-             <string>{label}</string>\n\
+             <string>",
+    );
+    push_escaped_xml(&mut out, &entry.app_id);
+    out.push_str(
+        "</string>\n\
              <key>ProgramArguments</key>\n\
-             <array>\n\
-         {program_args}\
-             </array>\n\
+             <array>\n        <string>",
+    );
+    push_escaped_xml(&mut out, &exe);
+    out.push_str("</string>\n");
+    for arg in &entry.args {
+        out.push_str("        <string>");
+        push_escaped_xml(&mut out, arg);
+        out.push_str("</string>\n");
+    }
+    out.push_str(
+        "    </array>\n\
              <key>RunAtLoad</key>\n\
              <true/>\n\
          </dict>\n\
          </plist>\n",
-        label = escape_xml(&entry.app_id)
-    )
+    );
+    out
 }
 
 /// Renders a Windows Startup folder `.cmd` launcher script (no Registry FFI required).
+#[must_use]
 pub fn render_windows_startup_cmd(entry: &AutostartEntry) -> String {
-    let exe = entry.executable.to_string_lossy().replace('"', "\"\"");
-    let mut cmd = format!("@echo off\r\nstart \"\" \"{exe}\"");
+    let exe = entry.executable.to_string_lossy();
+    let mut cmd = String::with_capacity(32 + exe.len() + entry.args.len() * 16);
+    cmd.push_str("@echo off\r\nstart \"\" \"");
+    push_cmd_escaped(&mut cmd, &exe);
+    cmd.push('"');
     for arg in &entry.args {
         cmd.push(' ');
-        if arg.contains(' ') || arg.contains('"') {
-            let escaped = arg.replace('"', "\"\"");
+        if arg.contains([' ', '"']) {
             cmd.push('"');
-            cmd.push_str(&escaped);
+            push_cmd_escaped(&mut cmd, arg);
             cmd.push('"');
         } else {
             cmd.push_str(arg);
@@ -236,15 +249,25 @@ pub fn render_windows_startup_cmd(entry: &AutostartEntry) -> String {
     cmd
 }
 
-fn quote_desktop_arg(arg: &str) -> String {
+fn push_cmd_escaped(out: &mut String, input: &str) {
+    for ch in input.chars() {
+        if ch == '"' {
+            out.push_str("\"\"");
+        } else {
+            out.push(ch);
+        }
+    }
+}
+
+fn push_quoted_desktop_arg(out: &mut String, arg: &str) {
     let needs_quotes = arg.is_empty()
         || arg
             .chars()
             .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '$' | '`' | '%'));
     if !needs_quotes {
-        return arg.to_owned();
+        out.push_str(arg);
+        return;
     }
-    let mut out = String::with_capacity(arg.len() + 2);
     out.push('"');
     for ch in arg.chars() {
         match ch {
@@ -257,11 +280,9 @@ fn quote_desktop_arg(arg: &str) -> String {
         }
     }
     out.push('"');
-    out
 }
 
-fn escape_xml(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
+fn push_escaped_xml(out: &mut String, input: &str) {
     for ch in input.chars() {
         match ch {
             '&' => out.push_str("&amp;"),
@@ -272,7 +293,6 @@ fn escape_xml(input: &str) -> String {
             _ => out.push(ch),
         }
     }
-    out
 }
 
 #[cfg(test)]

@@ -9,7 +9,7 @@ use crate::scheduler::SchedulerState;
 pub const ACTIVE_POSTPONE_SECS: u64 = 2;
 
 /// Decision produced by `SmartPausePolicy::evaluate_idle`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmartPauseDecision {
     None,
     /// User idle reached threshold while waiting; enter `Resting`.
@@ -31,6 +31,7 @@ pub struct SmartPausePolicy {
 
 impl SmartPausePolicy {
     /// Creates a fresh `SmartPausePolicy`.
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             idle_paused: false,
@@ -39,17 +40,19 @@ impl SmartPausePolicy {
     }
 
     /// Returns whether `SmartPausePolicy` currently owns a `Resting` pause.
+    #[must_use]
     pub const fn is_idle_paused(&self) -> bool {
         self.idle_paused
     }
 
     /// Clears internal idle tracking (called when manually disabled or quitting).
-    pub fn reset(&mut self) {
+    pub const fn reset(&mut self) {
         self.idle_paused = false;
         self.idle_origin = None;
     }
 
     /// Evaluates observed OS idle duration against the current scheduler state.
+    #[must_use]
     pub fn evaluate_idle(
         &mut self,
         cfg: &SmartPauseConfig,
@@ -93,8 +96,8 @@ impl SmartPausePolicy {
 
     /// Returns a short deferral if `postpone_if_active` is enabled and the user was active
     /// within the last `ACTIVE_POSTPONE_SECS` seconds.
+    #[must_use]
     pub fn should_postpone_if_active(
-        &self,
         cfg: &SmartPauseConfig,
         current_idle: Duration,
     ) -> Option<Duration> {
@@ -134,6 +137,7 @@ pub enum DndDecision {
 
 impl DndDecision {
     /// Returns `true` when the break should be suppressed.
+    #[must_use]
     pub const fn should_suppress(self) -> bool {
         matches!(self, Self::Suppress(_))
     }
@@ -144,8 +148,9 @@ impl DndDecision {
 pub struct DoNotDisturbPolicy;
 
 impl DoNotDisturbPolicy {
-    /// Evaluates `ctx` against `cfg` using strict SafeEyes precedence:
+    /// Evaluates `ctx` against `cfg` using strict `SafeEyes` precedence:
     /// `while_on_battery` -> `skip_break_windows` -> `take_break_windows` -> `is_fullscreen` -> `system_inhibited`.
+    #[must_use]
     pub fn evaluate(cfg: &DoNotDisturbConfig, ctx: &DndContext) -> DndDecision {
         if !cfg.enabled {
             return DndDecision::Allow;
@@ -153,13 +158,17 @@ impl DoNotDisturbPolicy {
         if cfg.while_on_battery && ctx.on_battery {
             return DndDecision::Suppress(DndReason::OnBattery);
         }
-        if let Some(window) = ctx.active_window_class.as_deref()
+        let has_window_rules =
+            !cfg.skip_break_windows.is_empty() || !cfg.take_break_windows.is_empty();
+        if has_window_rules
+            && let Some(window) = ctx.active_window_class.as_deref()
             && !window.trim().is_empty()
         {
-            if matches_any_window(window, &cfg.skip_break_windows) {
+            let active_lower = window.to_lowercase();
+            if matches_any_window_lower(&active_lower, &cfg.skip_break_windows) {
                 return DndDecision::Suppress(DndReason::SkipWindow);
             }
-            if matches_any_window(window, &cfg.take_break_windows) {
+            if matches_any_window_lower(&active_lower, &cfg.take_break_windows) {
                 return DndDecision::Allow;
             }
         }
@@ -173,8 +182,7 @@ impl DoNotDisturbPolicy {
     }
 }
 
-fn matches_any_window(active: &str, patterns: &[String]) -> bool {
-    let active_lower = active.to_lowercase();
+fn matches_any_window_lower(active_lower: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pattern| {
         let trimmed = pattern.trim();
         !trimmed.is_empty() && active_lower.contains(&trimmed.to_lowercase())
@@ -189,6 +197,7 @@ pub struct SkipLimitPolicy {
 
 impl SkipLimitPolicy {
     /// Creates a policy initialized with an existing skip count (e.g. from `SessionState`).
+    #[must_use]
     pub const fn new(initial_count: u32) -> Self {
         Self {
             consecutive_skips: initial_count,
@@ -196,31 +205,34 @@ impl SkipLimitPolicy {
     }
 
     /// Returns the current number of consecutive skips or postpones.
+    #[must_use]
     pub const fn count(&self) -> u32 {
         self.consecutive_skips
     }
 
     /// Increments the consecutive skip counter on a skipped break.
-    pub fn record_skip(&mut self) {
+    pub const fn record_skip(&mut self) {
         self.consecutive_skips = self.consecutive_skips.saturating_add(1);
     }
 
     /// Increments the consecutive skip counter on a postponed break.
-    pub fn record_postpone(&mut self) {
+    pub const fn record_postpone(&mut self) {
         self.consecutive_skips = self.consecutive_skips.saturating_add(1);
     }
 
     /// Resets the consecutive skip counter after a completed break.
-    pub fn record_completed_break(&mut self) {
+    pub const fn record_completed_break(&mut self) {
         self.consecutive_skips = 0;
     }
 
     /// Returns `true` when Skip and Postpone controls must be disabled.
+    #[must_use]
     pub const fn controls_disabled(&self, cfg: &SkipLimitConfig) -> bool {
         cfg.enabled && self.consecutive_skips >= cfg.max_skips
     }
 
     /// Returns an optional status note for the break overlay.
+    #[must_use]
     pub fn status_label(&self, cfg: &SkipLimitConfig) -> Option<String> {
         if !cfg.enabled {
             return None;
@@ -257,7 +269,10 @@ mod tests {
             ),
             SmartPauseDecision::None
         );
-        assert_eq!(policy.should_postpone_if_active(&cfg, Duration::ZERO), None);
+        assert_eq!(
+            SmartPausePolicy::should_postpone_if_active(&cfg, Duration::ZERO),
+            None
+        );
     }
 
     #[test]
@@ -377,15 +392,15 @@ mod tests {
             postpone_if_active: true,
         };
         assert_eq!(
-            policy.should_postpone_if_active(&cfg, Duration::from_secs(0)),
+            SmartPausePolicy::should_postpone_if_active(&cfg, Duration::from_secs(0)),
             Some(Duration::from_secs(2))
         );
         assert_eq!(
-            policy.should_postpone_if_active(&cfg, Duration::from_secs(1)),
+            SmartPausePolicy::should_postpone_if_active(&cfg, Duration::from_secs(1)),
             Some(Duration::from_secs(2))
         );
         assert_eq!(
-            policy.should_postpone_if_active(&cfg, Duration::from_secs(2)),
+            SmartPausePolicy::should_postpone_if_active(&cfg, Duration::from_secs(2)),
             None
         );
         // now < current_idle does not underflow.
@@ -423,7 +438,7 @@ mod tests {
         let cfg = DoNotDisturbConfig {
             enabled: true,
             while_on_battery: true,
-            skip_break_windows: vec!["vlc".to_owned(), "".to_owned(), "   ".to_owned()],
+            skip_break_windows: vec!["vlc".to_owned(), String::new(), "   ".to_owned()],
             take_break_windows: vec!["vlc".to_owned(), "code".to_owned()],
         };
         // Battery beats window lists.

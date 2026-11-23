@@ -23,7 +23,8 @@ impl SubprocessOverlayLauncher {
     }
 
     /// Creates a launcher with an explicit program and leading arguments (useful for testing).
-    pub fn with_command(program: PathBuf, base_args: Vec<String>) -> Self {
+    #[must_use]
+    pub const fn with_command(program: PathBuf, base_args: Vec<String>) -> Self {
         Self {
             program,
             base_args,
@@ -32,7 +33,8 @@ impl SubprocessOverlayLauncher {
     }
 
     /// Returns `true` if an overlay subprocess is currently tracked.
-    pub fn is_running(&self) -> bool {
+    #[must_use]
+    pub const fn is_running(&self) -> bool {
         self.child.is_some()
     }
 }
@@ -77,7 +79,10 @@ impl OverlayLauncher for SubprocessOverlayLauncher {
 
         let mut buf = Vec::new();
         if let Some(stdout) = finished.stdout.take() {
-            let mut limited = stdout.take((MAX_IPC_LINE_BYTES as u64).saturating_add(1));
+            let max_read = u64::try_from(MAX_IPC_LINE_BYTES)
+                .unwrap_or(u64::MAX)
+                .saturating_add(1);
+            let mut limited = stdout.take(max_read);
             let _ = limited.read_to_end(&mut buf);
         }
 

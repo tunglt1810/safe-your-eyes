@@ -40,7 +40,14 @@ impl fmt::Display for IpcError {
     }
 }
 
-impl std::error::Error for IpcError {}
+impl std::error::Error for IpcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Codec(err) => Some(err),
+            Self::AlreadyRunning | Self::NotRunning | Self::Io(_) => None,
+        }
+    }
+}
 
 impl From<IpcCodecError> for IpcError {
     fn from(err: IpcCodecError) -> Self {
@@ -51,11 +58,9 @@ impl From<IpcCodecError> for IpcError {
 impl From<IpcError> for PlatformError {
     fn from(err: IpcError) -> Self {
         match err {
-            IpcError::AlreadyRunning | IpcError::NotRunning => {
-                PlatformError::Unavailable(err.to_string())
-            }
-            IpcError::Codec(codec) => PlatformError::Io(codec.to_string()),
-            IpcError::Io(msg) => PlatformError::Io(msg),
+            IpcError::AlreadyRunning | IpcError::NotRunning => Self::Unavailable(err.to_string()),
+            IpcError::Codec(codec) => Self::Io(codec.to_string()),
+            IpcError::Io(msg) => Self::Io(msg),
         }
     }
 }
@@ -107,6 +112,7 @@ impl IpcServer {
     }
 
     /// Returns the socket path or pipe endpoint bound by this server.
+    #[must_use]
     pub fn endpoint(&self) -> &Path {
         &self.endpoint
     }
@@ -220,8 +226,10 @@ enum BoundedLine {
 
 fn read_bounded_line(stream: &mut Stream) -> io::Result<BoundedLine> {
     let mut reader = BufReader::new(stream);
-    let mut buf = Vec::new();
-    let max_read = (MAX_IPC_LINE_BYTES as u64).saturating_add(1);
+    let mut buf = Vec::with_capacity(256);
+    let max_read = u64::try_from(MAX_IPC_LINE_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
     reader.by_ref().take(max_read).read_until(b'\n', &mut buf)?;
 
     if buf.len() > MAX_IPC_LINE_BYTES {
@@ -234,6 +242,7 @@ fn read_bounded_line(stream: &mut Stream) -> io::Result<BoundedLine> {
 }
 
 fn configure_stream_timeouts(stream: &Stream, timeout: Duration) {
+    // Windows named pipes return ErrorKind::Unsupported for stream timeouts.
     let _ = stream.set_recv_timeout(Some(timeout));
     let _ = stream.set_send_timeout(Some(timeout));
 }
@@ -246,7 +255,7 @@ fn prepare_unix_socket_path(endpoint: &Path) -> Result<(), IpcError> {
         std::fs::create_dir_all(parent).map_err(|err| IpcError::Io(err.to_string()))?;
     }
 
-    if endpoint.exists() {
+    if endpoint.symlink_metadata().is_ok() {
         let name = to_local_socket_name(endpoint)?;
         match Stream::connect(name) {
             Ok(_live) => return Err(IpcError::AlreadyRunning),
@@ -436,9 +445,8 @@ mod tests {
         let _ = raw_client.write_all(&payload);
         let _ = raw_client.flush();
 
-        let resp_line = match read_bounded_line(&mut raw_client)? {
-            BoundedLine::Valid(s) => s,
-            _ => return Err("expected valid error response line".into()),
+        let BoundedLine::Valid(resp_line) = read_bounded_line(&mut raw_client)? else {
+            return Err("expected valid error response line".into());
         };
         let resp = decode_response(&resp_line)?;
         assert!(matches!(

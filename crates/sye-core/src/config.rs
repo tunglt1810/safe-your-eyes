@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// Current supported configuration schema version.
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
-/// Default short break exercises inspired by SafeEyes (13 exercises).
+/// Default short break exercises inspired by `SafeEyes` (13 exercises).
 pub const DEFAULT_SHORT_BREAK_NAMES: [&str; 13] = [
     "Gently close your eyes",
     "Take five slow, deep breaths",
@@ -27,7 +27,7 @@ pub const DEFAULT_SHORT_BREAK_NAMES: [&str; 13] = [
     "Have some water",
 ];
 
-/// Default long break exercises inspired by SafeEyes (6 exercises).
+/// Default long break exercises inspired by `SafeEyes` (6 exercises).
 pub const DEFAULT_LONG_BREAK_NAMES: [&str; 6] = [
     "Stand up and stretch your back and legs",
     "Lean back at your seat and relax",
@@ -57,6 +57,7 @@ pub struct BreakSpec {
 
 impl BreakSpec {
     /// Creates a break specification using tier-default timing.
+    #[must_use]
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -66,7 +67,7 @@ impl BreakSpec {
     }
 }
 
-/// SmartPause policy configuration.
+/// `SmartPause` policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SmartPauseConfig {
@@ -85,7 +86,7 @@ impl Default for SmartPauseConfig {
     }
 }
 
-/// DoNotDisturb policy configuration.
+/// `DoNotDisturb` policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DoNotDisturbConfig {
@@ -125,7 +126,7 @@ impl Default for AudibleAlertConfig {
     }
 }
 
-/// LimitConsecutiveSkipping policy configuration.
+/// `LimitConsecutiveSkipping` policy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SkipLimitConfig {
@@ -214,6 +215,8 @@ impl fmt::Display for ValidationError {
     }
 }
 
+impl std::error::Error for ValidationError {}
+
 /// Errors produced when loading, validating, or saving `Config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
@@ -252,6 +255,7 @@ impl std::error::Error for ConfigError {}
 
 impl Config {
     /// Returns a fresh default configuration.
+    #[must_use]
     pub fn reset_to_default() -> Self {
         Self::default()
     }
@@ -346,6 +350,7 @@ impl Config {
     ///
     /// Returns `(Config::default(), None)` when the file does not exist, and
     /// `(Config::default(), Some(err))` when reading, parsing, or validation fails.
+    #[must_use]
     pub fn load_or_default(path: &Path) -> (Self, Option<ConfigError>) {
         match fs::read_to_string(path) {
             Ok(content) => match Self::from_toml_str(&content) {
@@ -376,6 +381,14 @@ impl Config {
         fs::write(path, encoded).map_err(|err| ConfigError::Io {
             message: err.to_string(),
         })
+    }
+}
+
+impl std::str::FromStr for Config {
+    type Err = ConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_toml_str(s)
     }
 }
 

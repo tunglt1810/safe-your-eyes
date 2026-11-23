@@ -3,12 +3,12 @@
 
 use std::env;
 use std::error::Error;
-use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
 const EXPECTED_SIZE: u32 = 64;
+const EXPECTED_RGBA_LEN: usize = (EXPECTED_SIZE as usize) * (EXPECTED_SIZE as usize) * 4;
 
 const TRAY_ICONS: &[(&str, &str)] = &[
     ("COLOR_ENABLED_RLE", "tray-enabled.png"),
@@ -29,28 +29,29 @@ fn main() -> Result<(), Box<dyn Error>> {
         .join("tray");
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
 
-    let mut generated = String::new();
-    writeln!(generated, "const ICON_SIZE: u32 = {EXPECTED_SIZE};")?;
+    let out_file = File::create(out_dir.join("tray_icons.rs"))?;
+    let mut writer = BufWriter::new(out_file);
+    writeln!(writer, "const ICON_SIZE: u32 = {EXPECTED_SIZE};")?;
 
     for (const_name, filename) in TRAY_ICONS {
         let path = tray_dir.join(filename);
-        println!("cargo:rerun-if-changed={}", path.display());
+        println!("cargo::rerun-if-changed={}", path.display());
 
         let rgba = decode_rgba_png(&path)?;
         let rle = encode_rle(&rgba);
 
-        writeln!(generated, "const {const_name}: &[u8] = &[")?;
+        writeln!(writer, "const {const_name}: &[u8] = &[")?;
         for chunk in rle.chunks(20) {
-            generated.push_str("    ");
+            writer.write_all(b"    ")?;
             for byte in chunk {
-                write!(generated, "{byte}, ")?;
+                write!(writer, "{byte}, ")?;
             }
-            generated.push('\n');
+            writer.write_all(b"\n")?;
         }
-        writeln!(generated, "];")?;
+        writeln!(writer, "];")?;
     }
 
-    fs::write(out_dir.join("tray_icons.rs"), generated)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -81,7 +82,7 @@ fn decode_rgba_png(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     match info.color_type {
         png::ColorType::Rgba => Ok(buf),
         png::ColorType::Rgb => {
-            let mut rgba = Vec::with_capacity((EXPECTED_SIZE * EXPECTED_SIZE * 4) as usize);
+            let mut rgba = Vec::with_capacity(EXPECTED_RGBA_LEN);
             for &[r, g, b] in buf.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[r, g, b, 255]);
             }

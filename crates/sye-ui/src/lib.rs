@@ -52,11 +52,10 @@ impl From<sye_core::ConfigError> for UiError {
 }
 
 pub(crate) fn store_outcome<T>(sink: &std::sync::Mutex<Option<T>>, outcome: T) {
-    if let Ok(mut guard) = sink.lock()
-        && guard.is_none()
-    {
-        *guard = Some(outcome);
-    }
+    let mut guard = sink
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.get_or_insert(outcome);
 }
 
 #[cfg(test)]

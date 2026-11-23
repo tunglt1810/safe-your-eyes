@@ -6,18 +6,18 @@
 
 #![cfg_attr(not(target_os = "windows"), forbid(unsafe_code))]
 
-pub mod audio;
-pub mod autostart;
-pub mod clock;
-pub mod dnd;
-pub mod idle;
-pub mod ipc;
-pub mod notify;
-pub mod overlay;
-pub mod paths;
+mod audio;
+mod autostart;
+mod clock;
+mod dnd;
+mod idle;
+mod ipc;
+mod notify;
+mod overlay;
+mod paths;
 #[cfg(test)]
 mod test_util;
-pub mod tray;
+mod tray;
 
 pub use audio::OsAudioPlayer;
 pub use autostart::{

@@ -46,6 +46,7 @@ pub struct FakeClock {
 
 impl FakeClock {
     /// Creates a `FakeClock` initialized at the given monotonic and wall-clock durations.
+    #[must_use]
     pub fn new(mono: Duration, wall_unix: Duration) -> Self {
         Self {
             mono_ms: AtomicU64::new(duration_to_ms_u64(mono)),
@@ -112,17 +113,17 @@ impl Clock for FakeClock {
     }
 }
 
-impl Clock for &FakeClock {
+impl<C: Clock + ?Sized> Clock for &C {
     fn now_monotonic(&self) -> Duration {
-        (*self).now_monotonic()
+        (**self).now_monotonic()
     }
 
     fn now_wall_unix(&self) -> Duration {
-        (*self).now_wall_unix()
+        (**self).now_wall_unix()
     }
 }
 
-fn duration_to_ms_u64(d: Duration) -> u64 {
+pub(crate) fn duration_to_ms_u64(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
 }
 

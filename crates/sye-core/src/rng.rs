@@ -1,19 +1,20 @@
 //! Minimal deterministic PRNG (`SplitMix64`) for `BreakQueue` shuffling.
 
-/// Deterministic 64-bit SplitMix64 pseudo-random number generator.
+/// Deterministic 64-bit `SplitMix64` pseudo-random number generator.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SplitMix64 {
+pub(crate) struct SplitMix64 {
     state: u64,
 }
 
 impl SplitMix64 {
     /// Creates a new generator from an explicit seed.
-    pub const fn new(seed: u64) -> Self {
+    #[must_use]
+    pub(crate) const fn new(seed: u64) -> Self {
         Self { state: seed }
     }
 
     /// Generates the next pseudo-random `u64`.
-    pub fn next_u64(&mut self) -> u64 {
+    pub(crate) const fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.state;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
@@ -22,13 +23,13 @@ impl SplitMix64 {
     }
 
     /// Shuffles `slice` in place using the Fisher-Yates algorithm.
-    pub fn shuffle<T>(&mut self, slice: &mut [T]) {
+    pub(crate) fn shuffle<T>(&mut self, slice: &mut [T]) {
         if slice.len() <= 1 {
             return;
         }
         for i in (1..slice.len()).rev() {
-            let bound = (i + 1) as u64;
-            let j = (self.next_u64() % bound) as usize;
+            let bound = u64::try_from(i + 1).unwrap_or(u64::MAX);
+            let j = usize::try_from(self.next_u64() % bound).unwrap_or(0);
             slice.swap(i, j);
         }
     }

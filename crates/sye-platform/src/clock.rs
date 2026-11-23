@@ -5,13 +5,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sye_core::Clock;
 
 /// Monotonic and wall-clock time source backed by `std::time`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SystemClock {
     origin: Instant,
 }
 
 impl SystemClock {
     /// Creates a new `SystemClock` anchored at the current monotonic instant.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             origin: Instant::now(),
@@ -34,16 +35,6 @@ impl Clock for SystemClock {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
-    }
-}
-
-impl Clock for &SystemClock {
-    fn now_monotonic(&self) -> Duration {
-        (*self).now_monotonic()
-    }
-
-    fn now_wall_unix(&self) -> Duration {
-        (*self).now_wall_unix()
     }
 }
 

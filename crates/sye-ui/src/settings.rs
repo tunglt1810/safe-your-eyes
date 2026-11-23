@@ -1,7 +1,7 @@
 //! Cozy Settings window view model and Native Shell (`nsh`) renderer.
 //!
 //! Applies the Cozy Design System (<https://github.com/tunglt1810/cozy>) with Astryx layout rules:
-//! Floating Sage Sidebar with spring indicator, Pastel KPI summary cards, SegmentedControl theme
+//! Floating Sage Sidebar with spring indicator, Pastel KPI summary cards, `SegmentedControl` theme
 //! switcher, unified rounded Form Card with clipped sticky toolbar, and author support link.
 
 use std::cell::Cell;
@@ -75,6 +75,7 @@ pub struct SettingsViewModel {
 impl SettingsViewModel {
     /// Loads configuration from `config_path`, falling back to defaults with a non-fatal warning
     /// if the existing file is unreadable or invalid.
+    #[must_use]
     pub fn load(config_path: PathBuf) -> Self {
         let (config, load_err) = Config::load_or_default(&config_path);
         Self {
@@ -92,9 +93,8 @@ impl SettingsViewModel {
     }
 
     /// Appends a new break exercise to the chosen break tier.
-    pub fn add_exercise(&mut self, kind: BreakType, name: impl Into<String>) -> Result<(), String> {
-        let raw = name.into();
-        let trimmed = raw.trim();
+    pub fn add_exercise(&mut self, kind: BreakType, name: &str) -> Result<(), String> {
+        let trimmed = name.trim();
         if trimmed.is_empty() {
             return self.fail_validation("Exercise name must not be empty");
         }
@@ -110,10 +110,11 @@ impl SettingsViewModel {
         if total <= 1 {
             return self.fail_validation("At least one break exercise must remain configured");
         }
-        if index >= self.breaks_mut(kind).len() {
+        let list = self.breaks_mut(kind);
+        if index >= list.len() {
             return self.fail_validation(format!("Exercise index {index} out of bounds"));
         }
-        self.breaks_mut(kind).remove(index);
+        list.remove(index);
         self.validation_error = None;
         Ok(())
     }
@@ -143,7 +144,7 @@ impl SettingsViewModel {
     }
 
     /// Adds a non-empty window pattern to `do_not_disturb.skip_break_windows`.
-    pub fn add_skip_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
+    pub fn add_skip_window(&mut self, pattern: &str) -> Result<(), String> {
         self.add_window_pattern(WindowList::Skip, pattern)
     }
 
@@ -153,7 +154,7 @@ impl SettingsViewModel {
     }
 
     /// Adds a non-empty window pattern to `do_not_disturb.take_break_windows`.
-    pub fn add_take_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
+    pub fn add_take_window(&mut self, pattern: &str) -> Result<(), String> {
         self.add_window_pattern(WindowList::Take, pattern)
     }
 
@@ -203,13 +204,18 @@ impl SettingsViewModel {
     }
 
     /// Returns `true` when the settings window should close.
-    pub fn should_close(&self) -> bool {
+    #[must_use]
+    pub const fn should_close(&self) -> bool {
         self.outcome.is_some()
     }
 
     /// Returns the latched outcome, defaulting to `SettingsOutcome::Cancelled`.
-    pub fn resolved_outcome(&self) -> SettingsOutcome {
-        self.outcome.unwrap_or(SettingsOutcome::Cancelled)
+    #[must_use]
+    pub const fn resolved_outcome(&self) -> SettingsOutcome {
+        match self.outcome {
+            Some(outcome) => outcome,
+            None => SettingsOutcome::Cancelled,
+        }
     }
 
     fn fail_validation<T>(&mut self, msg: impl Into<String>) -> Result<T, String> {
@@ -232,13 +238,8 @@ impl SettingsViewModel {
         Ok(&mut self.breaks_mut(kind)[index])
     }
 
-    fn add_window_pattern(
-        &mut self,
-        list: WindowList,
-        pattern: impl Into<String>,
-    ) -> Result<(), String> {
-        let raw = pattern.into();
-        let trimmed = raw.trim();
+    fn add_window_pattern(&mut self, list: WindowList, pattern: &str) -> Result<(), String> {
+        let trimmed = pattern.trim();
         if trimmed.is_empty() {
             let label = list.label();
             return self.fail_validation(format!("{label} window pattern must not be empty"));
@@ -249,11 +250,12 @@ impl SettingsViewModel {
     }
 
     fn remove_window_pattern(&mut self, list: WindowList, index: usize) -> Result<(), String> {
-        if index >= self.window_list_mut(list).len() {
+        let entries = self.window_list_mut(list);
+        if index >= entries.len() {
             let label = list.label();
             return self.fail_validation(format!("{label} window index {index} out of bounds"));
         }
-        self.window_list_mut(list).remove(index);
+        entries.remove(index);
         self.validation_error = None;
         Ok(())
     }
@@ -265,7 +267,7 @@ impl SettingsViewModel {
         }
     }
 
-    fn draft_exercise(&self, kind: BreakType) -> &String {
+    fn draft_exercise(&self, kind: BreakType) -> &str {
         match kind {
             BreakType::Short => &self.draft_short_exercise,
             BreakType::Long => &self.draft_long_exercise,
@@ -559,14 +561,14 @@ fn exercise_tier_section(
                 .items_center()
                 .child(view().flex_1().child(cozy_input(
                     placeholder,
-                    move || vm.with(|m| m.draft_exercise(kind).clone()),
+                    move || vm.with(|m| m.draft_exercise(kind).to_owned()),
                     move |s: &str| vm.update(|m| *m.draft_exercise_mut(kind) = s.to_owned()),
                 )))
                 .child(secondary_button("Add", move || {
                     vm.update(|m| {
-                        let name = m.draft_exercise(kind).clone();
-                        if m.add_exercise(kind, name).is_ok() {
-                            m.draft_exercise_mut(kind).clear();
+                        let name = std::mem::take(m.draft_exercise_mut(kind));
+                        if m.add_exercise(kind, &name).is_err() {
+                            *m.draft_exercise_mut(kind) = name;
                         }
                     });
                 })),
@@ -717,7 +719,10 @@ pub(crate) fn build_settings_view(
     effect(move || {
         let current = active_tab.get();
         let previous = prev_tab.replace(Some(current));
-        if previous.is_some() && previous != Some(current) && !reduce_motion() {
+        if let Some(prev) = previous
+            && prev != current
+            && !reduce_motion()
+        {
             panel_opacity.set(0.0);
             panel_opacity.timing(1.0, motion::PANEL_ENTER_MS, motion::COZY_EASE);
 
@@ -793,7 +798,7 @@ pub(crate) fn build_settings_view(
         )
         .child(
             view().px_3().py_1().child(
-                text(format!("v{}", env!("CARGO_PKG_VERSION")))
+                text(concat!("v", env!("CARGO_PKG_VERSION")))
                     .text_xs()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(colors::SIDEBAR_TEXT_MUTED),
@@ -822,12 +827,7 @@ pub(crate) fn build_settings_view(
             })
         }))
         .child(pastel_kpi_card(KpiTone::Butter, "Exercises", move || {
-            vm.with(|m| {
-                format!(
-                    "{}",
-                    m.config.short_breaks.len() + m.config.long_breaks.len()
-                )
-            })
+            vm.with(|m| (m.config.short_breaks.len() + m.config.long_breaks.len()).to_string())
         }))
         .child(pastel_kpi_card(KpiTone::Mist, "Skip Limit", move || {
             vm.with(|m| {
@@ -983,16 +983,16 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
     let vm = SettingsViewModel::load(config_path);
     let outcome_sink = Arc::new(Mutex::new(None));
 
-    if let Ok(mut guard) = SETTINGS_LAUNCH.lock() {
-        *guard = Some(SettingsLaunch {
-            vm,
-            outcome_sink: Arc::clone(&outcome_sink),
-        });
-    } else {
+    let Ok(mut guard) = SETTINGS_LAUNCH.lock() else {
         return Err(UiError::WindowInit(
             "settings launch state lock poisoned".to_owned(),
         ));
-    }
+    };
+    *guard = Some(SettingsLaunch {
+        vm,
+        outcome_sink: Arc::clone(&outcome_sink),
+    });
+    drop(guard);
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {

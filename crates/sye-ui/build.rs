@@ -3,12 +3,12 @@
 
 use std::env;
 use std::error::Error;
-use std::fmt::Write as _;
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::fs::File;
+use std::io::{BufReader, BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 
 const EXPECTED_SIZE: u32 = 64;
+const EXPECTED_RGBA_LEN: usize = (EXPECTED_SIZE as usize) * (EXPECTED_SIZE as usize) * 4;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
@@ -21,25 +21,25 @@ fn main() -> Result<(), Box<dyn Error>> {
         .join("64x64")
         .join("apps")
         .join("safe-your-eyes.png");
-    println!("cargo:rerun-if-changed={}", icon_path.display());
+    println!("cargo::rerun-if-changed={}", icon_path.display());
 
     let rgba = decode_rgba_png(&icon_path)?;
     let rle = encode_rle(&rgba);
 
-    let mut generated = String::new();
-    writeln!(generated, "const APP_ICON_SIZE: u32 = {EXPECTED_SIZE};")?;
-    writeln!(generated, "const APP_ICON_RLE: &[u8] = &[")?;
-    for chunk in rle.chunks(20) {
-        generated.push_str("    ");
-        for byte in chunk {
-            write!(generated, "{byte}, ")?;
-        }
-        generated.push('\n');
-    }
-    writeln!(generated, "];")?;
-
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
-    fs::write(out_dir.join("app_icon.rs"), generated)?;
+    let out_file = File::create(out_dir.join("app_icon.rs"))?;
+    let mut writer = BufWriter::new(out_file);
+    writeln!(writer, "const APP_ICON_SIZE: u32 = {EXPECTED_SIZE};")?;
+    writeln!(writer, "const APP_ICON_RLE: &[u8] = &[")?;
+    for chunk in rle.chunks(20) {
+        writer.write_all(b"    ")?;
+        for byte in chunk {
+            write!(writer, "{byte}, ")?;
+        }
+        writer.write_all(b"\n")?;
+    }
+    writeln!(writer, "];")?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -70,7 +70,7 @@ fn decode_rgba_png(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     match info.color_type {
         png::ColorType::Rgba => Ok(buf),
         png::ColorType::Rgb => {
-            let mut rgba = Vec::with_capacity((EXPECTED_SIZE * EXPECTED_SIZE * 4) as usize);
+            let mut rgba = Vec::with_capacity(EXPECTED_RGBA_LEN);
             for &[r, g, b] in buf.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[r, g, b, 255]);
             }

@@ -18,18 +18,19 @@ const SIDEBAR_ITEM_GAP: f32 = 4.0;
 const SEGMENT_OPTION_WIDTH: f32 = 80.0;
 const SEGMENT_OPTION_HEIGHT: f32 = 32.0;
 
+const APP_ICON_RGBA_LEN: usize = (APP_ICON_SIZE as usize) * (APP_ICON_SIZE as usize) * 4;
+
 fn app_icon_rgba() -> Arc<[u8]> {
     static PIXELS: OnceLock<Arc<[u8]>> = OnceLock::new();
     Arc::clone(PIXELS.get_or_init(|| {
-        let expected = (APP_ICON_SIZE * APP_ICON_SIZE * 4) as usize;
-        let mut out = Vec::with_capacity(expected);
+        let mut out = Vec::with_capacity(APP_ICON_RGBA_LEN);
         for &[count, r, g, b, a] in APP_ICON_RLE.as_chunks::<5>().0 {
             let rgba = [r, g, b, a];
             for _ in 0..usize::from(count) {
                 out.extend_from_slice(&rgba);
             }
         }
-        out.resize(expected, 0);
+        out.resize(APP_ICON_RGBA_LEN, 0);
         Arc::from(out)
     }))
 }
@@ -51,7 +52,7 @@ pub(crate) enum KpiTone {
 }
 
 impl KpiTone {
-    fn bg(self) -> AdaptiveColor {
+    const fn bg(self) -> AdaptiveColor {
         match self {
             Self::Sage => crate::theme::kpi::SAGE_BG,
             Self::Peach => crate::theme::kpi::PEACH_BG,
@@ -60,7 +61,7 @@ impl KpiTone {
         }
     }
 
-    fn accent(self) -> AdaptiveColor {
+    const fn accent(self) -> AdaptiveColor {
         match self {
             Self::Sage => crate::theme::kpi::SAGE_ACCENT,
             Self::Peach => crate::theme::kpi::PEACH_ACCENT,
@@ -246,8 +247,8 @@ pub(crate) fn destructive_button(
         )
 }
 
-/// Astryx-style SegmentedControl pill track with spring-animated sliding thumb (`tunglt1810/cozy`).
-pub(crate) fn segmented_track(active_index: impl Fn() -> usize + 'static) -> View {
+/// Astryx-style `SegmentedControl` pill track with spring-animated sliding thumb (`tunglt1810/cozy`).
+pub(crate) fn segmented_track(active_index: impl Fn() -> u8 + 'static) -> View {
     let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
     let sliding_pill = view()
         .absolute()
@@ -260,7 +261,7 @@ pub(crate) fn segmented_track(active_index: impl Fn() -> usize + 'static) -> Vie
         .bg(colors::SEGMENT_ACTIVE)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
-        .translate_x(move || px(active_index() as f32 * SEGMENT_OPTION_WIDTH))
+        .translate_x(move || px(f32::from(active_index()) * SEGMENT_OPTION_WIDTH))
         .transition_transform()
         .ease_spring(motion::COZY_SPRING);
 
@@ -425,9 +426,7 @@ pub(crate) fn cozy_input(
 }
 
 /// Spring-animated sliding background indicator for the Floating Sage Sidebar (`tunglt1810/cozy`).
-pub(crate) fn sidebar_nav_indicator(
-    active_index: impl Fn() -> usize + 'static,
-) -> impl IntoElement {
+pub(crate) fn sidebar_nav_indicator(active_index: impl Fn() -> u8 + 'static) -> impl IntoElement {
     let step = SIDEBAR_ITEM_HEIGHT + SIDEBAR_ITEM_GAP;
     view()
         .absolute()
@@ -438,7 +437,7 @@ pub(crate) fn sidebar_nav_indicator(
         .h(px(SIDEBAR_ITEM_HEIGHT))
         .rounded(radii::NAV_ITEM)
         .bg(colors::SIDEBAR_ACTIVE)
-        .translate_y(move || px(active_index() as f32 * step))
+        .translate_y(move || px(f32::from(active_index()) * step))
         .transition_transform()
         .ease_spring(motion::COZY_SPRING)
 }
@@ -522,16 +521,21 @@ pub(crate) fn support_link(label: &'static str) -> impl IntoElement {
         )
 }
 
-/// Encodes `SUPPORT_URL` into a square boolean QR matrix (`true` = dark module).
-pub(crate) fn build_support_qr_matrix() -> Option<(usize, Vec<bool>)> {
-    let code = qrcode::QrCode::new(SUPPORT_URL.as_bytes()).ok()?;
-    let width = code.width();
-    let modules = code
-        .to_colors()
-        .into_iter()
-        .map(|c| c == qrcode::Color::Dark)
-        .collect();
-    Some((width, modules))
+/// Encodes `SUPPORT_URL` into a cached square boolean QR matrix (`true` = dark module).
+pub(crate) fn build_support_qr_matrix() -> Option<&'static (usize, Box<[bool]>)> {
+    static MATRIX: OnceLock<Option<(usize, Box<[bool]>)>> = OnceLock::new();
+    MATRIX
+        .get_or_init(|| {
+            let code = qrcode::QrCode::new(SUPPORT_URL.as_bytes()).ok()?;
+            let width = code.width();
+            let modules: Box<[bool]> = code
+                .into_colors()
+                .into_iter()
+                .map(|c| c == qrcode::Color::Dark)
+                .collect();
+            Some((width, modules))
+        })
+        .as_ref()
 }
 
 /// Scannable Buy Me a Coffee QR code component with Cozy warm cream quiet zone and espresso modules.
@@ -542,13 +546,9 @@ pub(crate) fn support_qr_card() -> impl IntoElement {
 
     let mut grid = view().gap(px(0.0));
     if let Some((width, modules)) = build_support_qr_matrix() {
-        for row_idx in 0..width {
+        for row_modules in modules.chunks_exact(*width) {
             let mut row = view().flex_row().gap(px(0.0));
-            for col_idx in 0..width {
-                let is_dark = modules
-                    .get(row_idx * width + col_idx)
-                    .copied()
-                    .unwrap_or(false);
+            for &is_dark in row_modules {
                 row = row.child(view().w(px(module_px)).h(px(module_px)).bg(if is_dark {
                     qr_fg
                 } else {
@@ -589,8 +589,11 @@ mod tests {
         let matrix = build_support_qr_matrix();
         assert!(matrix.is_some());
         if let Some((width, modules)) = matrix {
-            assert!(width >= 21, "QR code width must be at least Version 1 (21)");
-            assert_eq!(modules.len(), width * width);
+            assert!(
+                *width >= 21,
+                "QR code width must be at least Version 1 (21)"
+            );
+            assert_eq!(modules.len(), *width * *width);
             // Top-left finder pattern corner (0, 0) is always dark in standard QR codes.
             assert_eq!(modules.first().copied(), Some(true));
         }
@@ -599,7 +602,7 @@ mod tests {
     #[test]
     fn embedded_app_icon_decodes_to_exact_rgba_buffer() {
         let pixels = app_icon_rgba();
-        assert_eq!(pixels.len(), (APP_ICON_SIZE * APP_ICON_SIZE * 4) as usize);
+        assert_eq!(pixels.len(), APP_ICON_RGBA_LEN);
         assert!(pixels.as_chunks::<4>().0.iter().any(|&[_, _, _, a]| a > 0));
     }
 }

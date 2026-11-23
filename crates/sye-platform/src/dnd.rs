@@ -1,6 +1,8 @@
 //! Cross-platform Do-Not-Disturb context provider (`sye_core::DndProvider`).
 
+#[cfg(any(target_os = "linux", test))]
 use std::fs;
+#[cfg(any(target_os = "linux", test))]
 use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
@@ -24,7 +26,8 @@ impl std::fmt::Debug for SystemDndProvider {
 
 impl SystemDndProvider {
     /// Creates a new `SystemDndProvider`.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             #[cfg(target_os = "linux")]
             x11: Mutex::new(None),
@@ -60,20 +63,29 @@ impl DndProvider for SystemDndProvider {
 }
 
 /// Parses an X11 `WM_CLASS` property (`res_name\0res_class\0`), preferring `res_class`.
-pub fn parse_wm_class(raw: &[u8]) -> Option<String> {
+#[cfg(any(target_os = "linux", test))]
+fn parse_wm_class(raw: &[u8]) -> Option<String> {
     let mut parts = raw
         .split(|&b| b == 0)
-        .map(|slice| String::from_utf8_lossy(slice).trim().to_owned())
-        .filter(|s| !s.is_empty());
+        .filter(|slice| !slice.is_empty())
+        .filter_map(|slice| {
+            let text = String::from_utf8_lossy(slice);
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        });
 
     let first = parts.next();
     let second = parts.next();
-    second.or(first)
+    second.or(first).map(|text| text.trim().to_owned())
 }
 
 /// Returns `true` if any battery entry under `power_supply_dir` has `type == Battery` and
 /// `status == Discharging` (case-insensitive).
-pub fn is_battery_discharging_in(power_supply_dir: &Path) -> bool {
+#[cfg(any(target_os = "linux", test))]
+fn is_battery_discharging_in(power_supply_dir: &Path) -> bool {
     let Ok(entries) = fs::read_dir(power_supply_dir) else {
         return false;
     };
@@ -97,7 +109,8 @@ pub fn is_battery_discharging_in(power_supply_dir: &Path) -> bool {
 }
 
 /// Parses `pmset -g batt` output on macOS and returns `true` when running on discharging battery.
-pub fn parse_macos_pmset_discharging(output: &str) -> bool {
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_pmset_discharging(output: &str) -> bool {
     if output.contains("'Battery Power'") {
         return true;
     }
@@ -111,7 +124,8 @@ pub fn parse_macos_pmset_discharging(output: &str) -> bool {
 }
 
 /// Parses two-line `osascript` output (`<app_name>\n<true|false>`) on macOS.
-pub fn parse_macos_frontmost_output(output: &str) -> (bool, Option<String>) {
+#[cfg(any(target_os = "macos", test))]
+fn parse_macos_frontmost_output(output: &str) -> (bool, Option<String>) {
     let mut lines = output.lines();
     let app_name = lines
         .next()
@@ -128,7 +142,7 @@ pub fn parse_macos_frontmost_output(output: &str) -> (bool, Option<String>) {
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::{Mutex, PoisonError};
 
     use sye_core::DndContext;
     use x11rb::connection::Connection as _;
@@ -149,24 +163,14 @@ mod linux_impl {
         fn connect() -> Option<Self> {
             let (conn, screen_num) = RustConnection::connect(None).ok()?;
             let root = conn.setup().roots.get(screen_num)?.root;
-            let atom_active_window = conn
-                .intern_atom(false, b"_NET_ACTIVE_WINDOW")
-                .ok()?
-                .reply()
-                .ok()?
-                .atom;
-            let atom_wm_state = conn
-                .intern_atom(false, b"_NET_WM_STATE")
-                .ok()?
-                .reply()
-                .ok()?
-                .atom;
-            let atom_wm_state_fullscreen = conn
-                .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")
-                .ok()?
-                .reply()
-                .ok()?
-                .atom;
+            // Pipeline all three InternAtom requests into a single X11 round trip.
+            let active_cookie = conn.intern_atom(false, b"_NET_ACTIVE_WINDOW").ok()?;
+            let wm_state_cookie = conn.intern_atom(false, b"_NET_WM_STATE").ok()?;
+            let fullscreen_cookie = conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN").ok()?;
+
+            let atom_active_window = active_cookie.reply().ok()?.atom;
+            let atom_wm_state = wm_state_cookie.reply().ok()?.atom;
+            let atom_wm_state_fullscreen = fullscreen_cookie.reply().ok()?.atom;
 
             Some(Self {
                 conn,
@@ -197,21 +201,12 @@ mod linux_impl {
                 return Some((false, None));
             }
 
-            let state_reply = self
+            // Pipeline both window property queries into a single X11 round trip.
+            let state_cookie = self
                 .conn
                 .get_property(false, active_win, self.atom_wm_state, AtomEnum::ATOM, 0, 64)
-                .ok()
-                .and_then(|cookie| cookie.reply().ok());
-
-            let is_fullscreen = state_reply
-                .and_then(|reply| {
-                    reply
-                        .value32()
-                        .map(|mut atoms| atoms.any(|a| a == self.atom_wm_state_fullscreen))
-                })
-                .unwrap_or(false);
-
-            let class_reply = self
+                .ok();
+            let class_cookie = self
                 .conn
                 .get_property(
                     false,
@@ -221,10 +216,20 @@ mod linux_impl {
                     0,
                     1024,
                 )
-                .ok()
-                .and_then(|cookie| cookie.reply().ok());
+                .ok();
 
-            let active_window_class = class_reply.and_then(|reply| parse_wm_class(&reply.value));
+            let is_fullscreen = state_cookie
+                .and_then(|cookie| cookie.reply().ok())
+                .and_then(|reply| {
+                    reply
+                        .value32()
+                        .map(|mut atoms| atoms.any(|a| a == self.atom_wm_state_fullscreen))
+                })
+                .unwrap_or(false);
+
+            let active_window_class = class_cookie
+                .and_then(|cookie| cookie.reply().ok())
+                .and_then(|reply| parse_wm_class(&reply.value));
 
             Some((is_fullscreen, active_window_class))
         }
@@ -244,9 +249,7 @@ mod linux_impl {
     }
 
     fn query_x11_window_state(cache: &Mutex<Option<X11DndState>>) -> (bool, Option<String>) {
-        let mut guard = cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
 
         if let Some(existing) = guard.as_ref()
             && let Some(result) = existing.query_active_window()
@@ -315,11 +318,10 @@ end tell
             .output()
             .ok()
             .filter(|out| out.status.success())
-            .map(|out| {
+            .map_or((false, None), |out| {
                 let stdout = String::from_utf8_lossy(&out.stdout);
                 parse_macos_frontmost_output(&stdout)
-            })
-            .unwrap_or((false, None));
+            });
 
         DndContext {
             is_fullscreen,
@@ -332,7 +334,7 @@ end tell
 
 #[cfg(target_os = "windows")]
 mod windows_impl {
-    use std::mem::{size_of, zeroed};
+    use std::mem::{MaybeUninit, size_of};
 
     use sye_core::DndContext;
     use windows_sys::Win32::Foundation::RECT;
@@ -345,6 +347,15 @@ mod windows_impl {
     };
 
     const IGNORED_SHELL_CLASSES: &[&str] = &["Progman", "WorkerW", "Shell_TrayWnd"];
+    const CLASS_BUF_LEN: usize = 256;
+    const CLASS_BUF_LEN_I32: i32 = const {
+        assert!(CLASS_BUF_LEN <= i32::MAX as usize);
+        CLASS_BUF_LEN as i32
+    };
+    const MONITORINFO_SIZE_U32: u32 = const {
+        assert!(size_of::<MONITORINFO>() <= u32::MAX as usize);
+        size_of::<MONITORINFO>() as u32
+    };
 
     pub(super) fn query_dnd_context() -> DndContext {
         let on_battery = query_on_battery();
@@ -357,40 +368,47 @@ mod windows_impl {
         }
     }
 
-    #[expect(unsafe_code, reason = "Win32 FFI")]
     fn query_on_battery() -> bool {
-        // SAFETY: `SYSTEM_POWER_STATUS` is a plain-old-data C struct valid when zeroed.
-        let mut sps: SYSTEM_POWER_STATUS = unsafe { zeroed() };
-        // SAFETY: `sps` is a valid mutable pointer to `SYSTEM_POWER_STATUS`.
-        let ok = unsafe { GetSystemPowerStatus(&mut sps) };
+        let mut sps = MaybeUninit::<SYSTEM_POWER_STATUS>::uninit();
+        // SAFETY: `sps.as_mut_ptr()` points to valid writable storage for `SYSTEM_POWER_STATUS`.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let ok = unsafe { GetSystemPowerStatus(sps.as_mut_ptr()) };
         if ok == 0 {
             return false;
         }
+        // SAFETY: `GetSystemPowerStatus` returned non-zero, initializing all fields of `sps`.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let sps = unsafe { sps.assume_init() };
         sps.ACLineStatus == 0 && (sps.BatteryFlag & 128) == 0 && sps.BatteryFlag != 255
     }
 
-    #[expect(unsafe_code, reason = "Win32 FFI")]
     fn query_foreground_window() -> (bool, Option<String>) {
         // SAFETY: `GetForegroundWindow` takes no parameters and returns a handle or null.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.is_null() {
             return (false, None);
         }
 
-        let mut class_buf = [0u16; 256];
-        // SAFETY: `class_buf` has capacity 256 `u16` elements matching `nMaxCount`.
-        let len = unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
-        let class_name = if len > 0 {
-            let name = String::from_utf16_lossy(&class_buf[..len as usize]);
-            let trimmed = name.trim().to_owned();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        } else {
-            None
-        };
+        let mut class_buf = [0u16; CLASS_BUF_LEN];
+        // SAFETY: `class_buf` has capacity `CLASS_BUF_LEN_I32` matching `nMaxCount`.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let len = unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), CLASS_BUF_LEN_I32) };
+        let class_name = usize::try_from(len)
+            .ok()
+            .filter(|&n| n > 0)
+            .and_then(|n| class_buf.get(..n))
+            .and_then(|slice| {
+                let name = String::from_utf16_lossy(slice);
+                let trimmed = name.trim();
+                if trimmed.is_empty() {
+                    None
+                } else if trimmed.len() == name.len() {
+                    Some(name)
+                } else {
+                    Some(trimmed.to_owned())
+                }
+            });
 
         if class_name
             .as_deref()
@@ -406,18 +424,21 @@ mod windows_impl {
             bottom: 0,
         };
         // SAFETY: `win_rect` is a valid writable `RECT`.
-        if unsafe { GetWindowRect(hwnd, &mut win_rect) } == 0 {
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let has_rect = unsafe { GetWindowRect(hwnd, &mut win_rect) } != 0;
+        if !has_rect {
             return (false, class_name);
         }
 
         // SAFETY: `hwnd` is non-null; returns monitor handle or null.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
         if monitor.is_null() {
             return (false, class_name);
         }
 
         let mut info = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
+            cbSize: MONITORINFO_SIZE_U32,
             rcMonitor: RECT {
                 left: 0,
                 top: 0,
@@ -432,8 +453,10 @@ mod windows_impl {
             },
             dwFlags: 0,
         };
-        // SAFETY: `info.cbSize` is initialized to `size_of::<MONITORINFO>()` and `monitor` is non-null.
-        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+        // SAFETY: `info.cbSize` is initialized to `MONITORINFO_SIZE_U32` and `monitor` is non-null.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let has_info = unsafe { GetMonitorInfoW(monitor, &mut info) } != 0;
+        if !has_info {
             return (false, class_name);
         }
 

@@ -182,11 +182,13 @@ impl TrayHandle {
     }
 
     /// Creates a no-op tray handle for headless mode or environments without a tray host.
+    #[must_use]
     pub const fn unavailable() -> Self {
         Self { active: None }
     }
 
     /// Returns `true` if a live OS tray icon is registered.
+    #[must_use]
     pub const fn is_available(&self) -> bool {
         self.active.is_some()
     }
@@ -223,10 +225,12 @@ impl TrayHandle {
         if next_icon_state != active.icon_state {
             let icon = build_tray_icon(next_icon_state)?;
             #[cfg(target_os = "macos")]
-            let _ = active.tray_icon.set_icon_templated(Some(icon));
+            let updated = active.tray_icon.set_icon_templated(Some(icon)).is_ok();
             #[cfg(not(target_os = "macos"))]
-            let _ = active.tray_icon.set_icon(Some(icon));
-            active.icon_state = next_icon_state;
+            let updated = active.tray_icon.set_icon(Some(icon)).is_ok();
+            if updated {
+                active.icon_state = next_icon_state;
+            }
         }
 
         Ok(())
@@ -234,6 +238,7 @@ impl TrayHandle {
 }
 
 /// Maps a `TraySnapshot` to its corresponding `TrayIconState`.
+#[must_use]
 pub const fn icon_state_for_snapshot(snapshot: &TraySnapshot) -> TrayIconState {
     if !snapshot.enabled {
         TrayIconState::Disabled
@@ -248,6 +253,7 @@ pub const fn icon_state_for_snapshot(snapshot: &TraySnapshot) -> TrayIconState {
 }
 
 /// Maps a tray menu item ID to a strongly-typed `TrayEvent`.
+#[must_use]
 pub fn map_menu_id_to_event(id: &str) -> Option<TrayEvent> {
     match id {
         MENU_ID_ENABLE => Some(TrayEvent::Enable),
@@ -270,6 +276,7 @@ pub fn map_menu_id_to_event(id: &str) -> Option<TrayEvent> {
 }
 
 /// Formats the top status menu line for the system tray.
+#[must_use]
 pub fn format_status_label(snapshot: &TraySnapshot) -> String {
     if !snapshot.has_breaks {
         return "No breaks configured".to_owned();
@@ -288,16 +295,14 @@ pub fn format_status_label(snapshot: &TraySnapshot) -> String {
                 Some(BreakType::Long) => "long break",
                 None => "break",
             };
-            format!(
-                "Next {kind} in {}",
-                format_countdown(snapshot.seconds_until_next_break)
-            )
+            let mins = snapshot.seconds_until_next_break / 60;
+            let secs = snapshot.seconds_until_next_break % 60;
+            format!("Next {kind} in {mins:02}:{secs:02}")
         }
         SchedulerState::PreBreak => {
-            format!(
-                "Break starting in {}",
-                format_countdown(snapshot.seconds_until_next_break)
-            )
+            let mins = snapshot.seconds_until_next_break / 60;
+            let secs = snapshot.seconds_until_next_break % 60;
+            format!("Break starting in {mins:02}:{secs:02}")
         }
         SchedulerState::Break => "Break in progress".to_owned(),
         SchedulerState::Resting => "Paused (idle/resting)".to_owned(),
@@ -308,14 +313,9 @@ pub fn format_status_label(snapshot: &TraySnapshot) -> String {
 }
 
 /// Formats the hover tooltip for the system tray icon.
+#[must_use]
 pub fn format_tooltip(snapshot: &TraySnapshot) -> String {
     format!("Safe Your Eyes — {}", format_status_label(snapshot))
-}
-
-fn format_countdown(total_secs: u64) -> String {
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    format!("{mins:02}:{secs:02}")
 }
 
 fn build_tray_icon(state: TrayIconState) -> Result<Icon, PlatformError> {
@@ -326,12 +326,14 @@ fn build_tray_icon(state: TrayIconState) -> Result<Icon, PlatformError> {
 /// Returns the platform-appropriate 64x64 RGBA tray icon for the given `TrayIconState`.
 ///
 /// Uses monochrome template icons on macOS and Cozy colored icons on Linux and Windows.
+#[must_use]
 pub fn render_eye_icon_rgba(state: TrayIconState) -> (Vec<u8>, u32, u32) {
     render_tray_icon_rgba(state, cfg!(target_os = "macos"))
 }
 
 /// Returns the 64x64 RGBA tray icon for `state`, choosing either the monochrome macOS template
 /// variant (`template == true`) or the Cozy colored variant (`template == false`).
+#[must_use]
 pub fn render_tray_icon_rgba(state: TrayIconState, template: bool) -> (Vec<u8>, u32, u32) {
     let encoded = match (template, state) {
         (false, TrayIconState::Enabled) => COLOR_ENABLED_RLE,
@@ -344,16 +346,17 @@ pub fn render_tray_icon_rgba(state: TrayIconState, template: bool) -> (Vec<u8>, 
     (decode_rle_rgba(encoded), ICON_SIZE, ICON_SIZE)
 }
 
+const ICON_RGBA_LEN: usize = (ICON_SIZE as usize) * (ICON_SIZE as usize) * 4;
+
 fn decode_rle_rgba(encoded: &[u8]) -> Vec<u8> {
-    let expected_len = (ICON_SIZE * ICON_SIZE * 4) as usize;
-    let mut pixels = Vec::with_capacity(expected_len);
+    let mut pixels = Vec::with_capacity(ICON_RGBA_LEN);
     for &[count, r, g, b, a] in encoded.as_chunks::<5>().0 {
         let rgba = [r, g, b, a];
         for _ in 0..usize::from(count) {
             pixels.extend_from_slice(&rgba);
         }
     }
-    pixels.resize(expected_len, 0);
+    pixels.resize(ICON_RGBA_LEN, 0);
     pixels
 }
 

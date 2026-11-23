@@ -135,15 +135,17 @@ pub fn decode_response(line: &str) -> Result<IpcResponse, IpcCodecError> {
     serde_json::from_str(trimmed).map_err(|err| IpcCodecError::Deserialize(err.to_string()))
 }
 
+#[derive(Deserialize)]
+struct CmdProbe<'a> {
+    #[serde(borrow)]
+    cmd: &'a str,
+}
+
 fn classify_command_error(trimmed: &str) -> IpcErrorCode {
-    let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(trimmed)
-    else {
+    let Ok(probe) = serde_json::from_str::<CmdProbe<'_>>(trimmed) else {
         return IpcErrorCode::InvalidRequest;
     };
-    let Some(serde_json::Value::String(cmd)) = map.get("cmd") else {
-        return IpcErrorCode::InvalidRequest;
-    };
-    match cmd.as_str() {
+    match probe.cmd {
         "status" | "enable" | "disable" | "take_break" | "open_settings" | "quit" => {
             IpcErrorCode::InvalidRequest
         }

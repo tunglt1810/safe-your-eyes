@@ -11,7 +11,7 @@ pub struct MonitorRect {
 }
 
 impl MonitorRect {
-    fn is_valid(&self) -> bool {
+    const fn is_valid(&self) -> bool {
         self.x.is_finite()
             && self.y.is_finite()
             && self.width.is_finite()
@@ -22,41 +22,35 @@ impl MonitorRect {
 }
 
 /// Planned root (primary) and secondary overlay viewports derived from detected monitors.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct OverlayViewportPlan {
     pub primary: Option<MonitorRect>,
     pub secondaries: Vec<MonitorRect>,
 }
 
 /// Filters invalid monitor rectangles and assigns the primary and secondary overlay viewports.
+#[must_use]
 pub fn plan_overlay_viewports(monitors: &[MonitorRect]) -> OverlayViewportPlan {
-    let valid: Vec<MonitorRect> = monitors
+    let mut valid: Vec<MonitorRect> = monitors
         .iter()
         .copied()
         .filter(MonitorRect::is_valid)
         .collect();
     if valid.is_empty() {
-        return OverlayViewportPlan {
-            primary: None,
-            secondaries: Vec::new(),
-        };
+        return OverlayViewportPlan::default();
     }
 
     let primary_idx = valid.iter().position(|m| m.is_primary).unwrap_or(0);
-    let primary = Some(valid[primary_idx]);
-    let secondaries = valid
-        .into_iter()
-        .enumerate()
-        .filter_map(|(idx, rect)| (idx != primary_idx).then_some(rect))
-        .collect();
+    let primary = Some(valid.remove(primary_idx));
 
     OverlayViewportPlan {
         primary,
-        secondaries,
+        secondaries: valid,
     }
 }
 
 /// Parses `xrandr --listmonitors` stdout into a list of valid `MonitorRect` entries.
+#[must_use]
 pub fn parse_xrandr_monitors(stdout: &str) -> Vec<MonitorRect> {
     let mut monitors = Vec::new();
     for line in stdout.lines() {
@@ -128,6 +122,7 @@ fn parse_dimension_px(raw: &str) -> Option<f32> {
 ///
 /// On Linux X11 sessions (when `DISPLAY` is set), queries `xrandr --listmonitors`.
 /// Returns an empty list on any failure or unsupported environment.
+#[must_use]
 pub fn detect_monitors() -> Vec<MonitorRect> {
     #[cfg(target_os = "linux")]
     {

@@ -41,32 +41,32 @@ impl AppPaths {
         config_override: Option<PathBuf>,
         socket_override: Option<PathBuf>,
     ) -> Result<Self, PlatformError> {
-        let mut paths = match Self::resolve() {
-            Ok(p) => p,
-            Err(err) => {
-                if let (Some(cfg), Some(sock)) = (&config_override, &socket_override) {
-                    return Ok(Self {
-                        config_file: cfg.clone(),
-                        session_file: session_path_for_config(cfg),
-                        socket_path: sock.clone(),
-                    });
-                }
-                return Err(err);
+        match (config_override, socket_override) {
+            (Some(config_file), Some(socket_path)) => {
+                let session_file = session_path_for_config(&config_file);
+                Ok(Self {
+                    config_file,
+                    session_file,
+                    socket_path,
+                })
             }
-        };
-
-        if let Some(cfg) = config_override {
-            paths.session_file = session_path_for_config(&cfg);
-            paths.config_file = cfg;
+            (config_override, socket_override) => {
+                let mut paths = Self::resolve()?;
+                if let Some(cfg) = config_override {
+                    paths.session_file = session_path_for_config(&cfg);
+                    paths.config_file = cfg;
+                }
+                if let Some(sock) = socket_override {
+                    paths.socket_path = sock;
+                }
+                Ok(paths)
+            }
         }
-        if let Some(sock) = socket_override {
-            paths.socket_path = sock;
-        }
-        Ok(paths)
     }
 }
 
 /// Computes a sibling `session.toml` path next to an overridden config file.
+#[must_use]
 pub fn session_path_for_config(config_path: &Path) -> PathBuf {
     match config_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join("session.toml"),

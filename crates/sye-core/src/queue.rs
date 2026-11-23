@@ -39,6 +39,7 @@ impl BreakQueue {
     /// Builds a `BreakQueue` from `config` and an explicit PRNG seed.
     ///
     /// Returns `None` if neither tier contains any valid exercise.
+    #[must_use]
     pub fn from_config(config: &Config, seed: u64) -> Option<Self> {
         let mut short_breaks = resolve_tier(
             BreakType::Short,
@@ -64,27 +65,28 @@ impl BreakQueue {
         }
 
         let long_remaining_secs = long_breaks.first().map_or(0, |b| b.interval_secs);
-        let mut queue = Self {
+        let mut short_index = 0;
+        let mut long_index = 0;
+        let current = select_next_break(
+            &mut short_breaks,
+            &mut short_index,
+            &mut long_breaks,
+            &mut long_index,
+            long_remaining_secs,
+            config.random_order,
+            &mut rng,
+        )?;
+        Some(Self {
             short_breaks,
             long_breaks,
-            short_index: 0,
-            long_index: 0,
+            short_index,
+            long_index,
             long_remaining_secs,
             random_order: config.random_order,
             rng,
-            current: QueuedBreak {
-                spec: ResolvedBreak {
-                    break_type: BreakType::Short,
-                    name: String::new(),
-                    interval_secs: 1,
-                    duration_secs: 1,
-                },
-                wait_secs: 1,
-            },
+            current,
             manual_short_override: false,
-        };
-        queue.current = queue.select_next();
-        Some(queue)
+        })
     }
 
     /// Restores persisted queue indices and remaining long-break countdown safely.
@@ -110,21 +112,25 @@ impl BreakQueue {
     }
 
     /// Returns the currently staged break.
-    pub fn current(&self) -> &QueuedBreak {
+    #[must_use]
+    pub const fn current(&self) -> &QueuedBreak {
         &self.current
     }
 
     /// Returns the current short-break index (next slot after the staged break).
+    #[must_use]
     pub const fn short_index(&self) -> usize {
         self.short_index
     }
 
     /// Returns the current long-break index (next slot after the staged break).
+    #[must_use]
     pub const fn long_index(&self) -> usize {
         self.long_index
     }
 
     /// Returns the short-break index to persist so restoring resumes at the staged break.
+    #[must_use]
     pub fn persisted_short_index(&self) -> usize {
         persisted_index(
             self.short_index,
@@ -134,6 +140,7 @@ impl BreakQueue {
     }
 
     /// Returns the long-break index to persist so restoring resumes at the staged break.
+    #[must_use]
     pub fn persisted_long_index(&self) -> usize {
         persisted_index(
             self.long_index,
@@ -143,7 +150,8 @@ impl BreakQueue {
     }
 
     /// Returns remaining seconds until the next long break (if long breaks exist).
-    pub fn long_remaining_secs(&self) -> Option<u64> {
+    #[must_use]
+    pub const fn long_remaining_secs(&self) -> Option<u64> {
         if self.long_breaks.is_empty() {
             None
         } else {
@@ -152,6 +160,7 @@ impl BreakQueue {
     }
 
     /// Returns the duration of the next long break (if any long break is configured).
+    #[must_use]
     pub fn next_long_duration_secs(&self) -> Option<u64> {
         if self.current.spec.break_type == BreakType::Long {
             return Some(self.current.spec.duration_secs);
@@ -162,7 +171,8 @@ impl BreakQueue {
     }
 
     /// Returns whether the queue has at least one break of `kind`.
-    pub fn has_break_type(&self, kind: BreakType) -> bool {
+    #[must_use]
+    pub const fn has_break_type(&self, kind: BreakType) -> bool {
         match kind {
             BreakType::Short => !self.short_breaks.is_empty(),
             BreakType::Long => !self.long_breaks.is_empty(),
@@ -237,45 +247,26 @@ impl BreakQueue {
 
         self.long_remaining_secs = self.long_breaks[self.long_index].interval_secs;
 
-        if self.current.spec.break_type == BreakType::Long {
-            if !self.short_breaks.is_empty() {
-                let spec = self.take_next_short();
-                let wait_secs = spec.interval_secs;
-                self.current = QueuedBreak { spec, wait_secs };
-            } else {
-                self.current.wait_secs = self.current.spec.interval_secs;
-            }
+        if self.current.spec.break_type == BreakType::Long && !self.short_breaks.is_empty() {
+            let spec = self.take_next_short();
+            let wait_secs = spec.interval_secs;
+            self.current = QueuedBreak { spec, wait_secs };
         } else {
             self.current.wait_secs = self.current.spec.interval_secs;
         }
     }
 
     fn select_next(&mut self) -> QueuedBreak {
-        match (self.short_breaks.is_empty(), self.long_breaks.is_empty()) {
-            (false, true) => {
-                let spec = self.take_next_short();
-                let wait_secs = spec.interval_secs;
-                QueuedBreak { spec, wait_secs }
-            }
-            (true, false) => {
-                let spec = self.take_next_long();
-                let wait_secs = spec.interval_secs;
-                QueuedBreak { spec, wait_secs }
-            }
-            (false, false) => {
-                let next_short_interval = self.short_breaks[self.short_index].interval_secs;
-                if self.long_remaining_secs <= next_short_interval {
-                    let spec = self.take_next_long();
-                    let wait_secs = self.long_remaining_secs.max(1);
-                    QueuedBreak { spec, wait_secs }
-                } else {
-                    let spec = self.take_next_short();
-                    let wait_secs = spec.interval_secs;
-                    QueuedBreak { spec, wait_secs }
-                }
-            }
-            (true, true) => self.current.clone(),
-        }
+        select_next_break(
+            &mut self.short_breaks,
+            &mut self.short_index,
+            &mut self.long_breaks,
+            &mut self.long_index,
+            self.long_remaining_secs,
+            self.random_order,
+            &mut self.rng,
+        )
+        .unwrap_or_else(|| self.current.clone())
     }
 
     fn take_next_short(&mut self) -> ResolvedBreak {
@@ -297,9 +288,48 @@ impl BreakQueue {
     }
 }
 
-fn persisted_index(index: usize, len: usize, is_current_tier: bool) -> usize {
+fn select_next_break(
+    short_breaks: &mut [ResolvedBreak],
+    short_index: &mut usize,
+    long_breaks: &mut [ResolvedBreak],
+    long_index: &mut usize,
+    long_remaining_secs: u64,
+    random_order: bool,
+    rng: &mut SplitMix64,
+) -> Option<QueuedBreak> {
+    match (short_breaks.is_empty(), long_breaks.is_empty()) {
+        (false, true) => {
+            let spec = take_next_from(short_breaks, short_index, random_order, rng);
+            let wait_secs = spec.interval_secs;
+            Some(QueuedBreak { spec, wait_secs })
+        }
+        (true, false) => {
+            let spec = take_next_from(long_breaks, long_index, random_order, rng);
+            let wait_secs = spec.interval_secs;
+            Some(QueuedBreak { spec, wait_secs })
+        }
+        (false, false) => {
+            let next_short_interval = short_breaks[*short_index].interval_secs;
+            if long_remaining_secs <= next_short_interval {
+                let spec = take_next_from(long_breaks, long_index, random_order, rng);
+                let wait_secs = long_remaining_secs.max(1);
+                Some(QueuedBreak { spec, wait_secs })
+            } else {
+                let spec = take_next_from(short_breaks, short_index, random_order, rng);
+                let wait_secs = spec.interval_secs;
+                Some(QueuedBreak { spec, wait_secs })
+            }
+        }
+        (true, true) => None,
+    }
+}
+
+const fn persisted_index(index: usize, len: usize, is_current_tier: bool) -> usize {
     if is_current_tier && len > 0 {
-        (index + len - 1) % len
+        match index.checked_sub(1) {
+            Some(prev) => prev,
+            None => len - 1,
+        }
     } else {
         index
     }
@@ -328,23 +358,22 @@ fn resolve_tier(
     default_interval_secs: u64,
     default_duration_secs: u64,
 ) -> Vec<ResolvedBreak> {
-    specs
-        .iter()
-        .filter_map(|spec| {
-            let trimmed = spec.name.trim();
-            let interval_secs = spec.interval_secs.unwrap_or(default_interval_secs);
-            let duration_secs = spec.duration_secs.unwrap_or(default_duration_secs);
-            if trimmed.is_empty() || interval_secs == 0 || duration_secs == 0 {
-                return None;
-            }
-            Some(ResolvedBreak {
-                break_type,
-                name: trimmed.to_owned(),
-                interval_secs,
-                duration_secs,
-            })
-        })
-        .collect()
+    let mut out = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let trimmed = spec.name.trim();
+        let interval_secs = spec.interval_secs.unwrap_or(default_interval_secs);
+        let duration_secs = spec.duration_secs.unwrap_or(default_duration_secs);
+        if trimmed.is_empty() || interval_secs == 0 || duration_secs == 0 {
+            continue;
+        }
+        out.push(ResolvedBreak {
+            break_type,
+            name: trimmed.to_owned(),
+            interval_secs,
+            duration_secs,
+        });
+    }
+    out
 }
 
 #[cfg(test)]

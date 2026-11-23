@@ -28,6 +28,7 @@ pub enum OverlayKey {
 }
 
 /// Formats a non-negative number of seconds as `MM:SS` without overflow.
+#[must_use]
 pub fn format_mm_ss(total_secs: u64) -> String {
     format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
 }
@@ -42,7 +43,8 @@ pub struct OverlayViewModel {
 
 impl OverlayViewModel {
     /// Creates a new overlay view model at `elapsed = 0`.
-    pub fn new(request: OverlayRequest) -> Self {
+    #[must_use]
+    pub const fn new(request: OverlayRequest) -> Self {
         Self {
             request,
             elapsed: Duration::ZERO,
@@ -51,12 +53,14 @@ impl OverlayViewModel {
     }
 
     /// Returns the underlying `OverlayRequest`.
-    pub fn request(&self) -> &OverlayRequest {
+    #[must_use]
+    pub const fn request(&self) -> &OverlayRequest {
         &self.request
     }
 
     /// Returns the elapsed duration since the overlay opened.
-    pub fn elapsed(&self) -> Duration {
+    #[must_use]
+    pub const fn elapsed(&self) -> Duration {
         self.elapsed
     }
 
@@ -75,21 +79,25 @@ impl OverlayViewModel {
     }
 
     /// Remaining break duration (saturating at zero).
-    pub fn remaining(&self) -> Duration {
+    #[must_use]
+    pub const fn remaining(&self) -> Duration {
         Duration::from_secs(self.request.duration_secs).saturating_sub(self.elapsed)
     }
 
     /// Remaining seconds rounded up so `15s` displays `00:15` until a full second passes.
-    pub fn remaining_secs_ceil(&self) -> u64 {
+    #[must_use]
+    pub const fn remaining_secs_ceil(&self) -> u64 {
         duration_secs_ceil(self.remaining())
     }
 
     /// Remaining countdown formatted as `MM:SS`.
+    #[must_use]
     pub fn formatted_remaining(&self) -> String {
         format_mm_ss(self.remaining_secs_ceil())
     }
 
     /// Fade-in opacity factor in `0.0..=1.0`.
+    #[must_use]
     pub fn fade_in_alpha(&self) -> f32 {
         if self.request.fade_in_ms == 0 {
             return 1.0;
@@ -99,6 +107,7 @@ impl OverlayViewModel {
     }
 
     /// Completion progress in `0.0..=1.0`.
+    #[must_use]
     pub fn progress(&self) -> f32 {
         if self.request.duration_secs == 0 {
             return 1.0;
@@ -107,38 +116,45 @@ impl OverlayViewModel {
     }
 
     /// Returns `true` while accidental-input shortcut protection is still active.
+    #[must_use]
     pub fn is_shortcut_locked(&self) -> bool {
         self.elapsed < Duration::from_secs(self.request.shortcut_disable_secs)
     }
 
     /// Remaining shortcut-lock seconds (rounded up).
-    pub fn lock_remaining_secs(&self) -> u64 {
+    #[must_use]
+    pub const fn lock_remaining_secs(&self) -> u64 {
         duration_secs_ceil(
             Duration::from_secs(self.request.shortcut_disable_secs).saturating_sub(self.elapsed),
         )
     }
 
     /// Whether the Skip control should be shown.
-    pub fn show_skip_button(&self) -> bool {
+    #[must_use]
+    pub const fn show_skip_button(&self) -> bool {
         !self.request.strict_break
     }
 
     /// Whether skipping is currently permitted.
+    #[must_use]
     pub fn can_skip(&self) -> bool {
         self.outcome.is_none() && !self.request.strict_break && !self.is_shortcut_locked()
     }
 
     /// Whether the Postpone control should be shown.
-    pub fn show_postpone_button(&self) -> bool {
+    #[must_use]
+    pub const fn show_postpone_button(&self) -> bool {
         self.request.allow_postpone
     }
 
     /// Whether postponing is currently permitted.
+    #[must_use]
     pub fn can_postpone(&self) -> bool {
         self.outcome.is_none() && self.request.allow_postpone && !self.is_shortcut_locked()
     }
 
     /// Optional non-empty trimmed status note to display on the overlay.
+    #[must_use]
     pub fn status_note(&self) -> Option<&str> {
         self.request
             .status_note
@@ -182,18 +198,24 @@ impl OverlayViewModel {
     }
 
     /// Returns `true` once a terminal outcome has been latched.
-    pub fn should_close(&self) -> bool {
+    #[must_use]
+    pub const fn should_close(&self) -> bool {
         self.outcome.is_some()
     }
 
     /// Returns the latched outcome, if any.
-    pub fn outcome(&self) -> Option<&OverlayOutcome> {
+    #[must_use]
+    pub const fn outcome(&self) -> Option<&OverlayOutcome> {
         self.outcome.as_ref()
     }
 
     /// Returns the latched outcome or `OverlayOutcome::Closed` if closed before latching.
-    pub fn resolved_outcome(&self) -> OverlayOutcome {
-        self.outcome.clone().unwrap_or(OverlayOutcome::Closed)
+    #[must_use]
+    pub const fn resolved_outcome(&self) -> OverlayOutcome {
+        match self.outcome {
+            Some(outcome) => outcome,
+            None => OverlayOutcome::Closed,
+        }
     }
 
     fn check_completion(&mut self) {
@@ -204,7 +226,7 @@ impl OverlayViewModel {
     }
 }
 
-fn duration_secs_ceil(rem: Duration) -> u64 {
+const fn duration_secs_ceil(rem: Duration) -> u64 {
     if rem.subsec_nanos() > 0 {
         rem.as_secs().saturating_add(1)
     } else {
@@ -227,15 +249,12 @@ pub(crate) fn build_overlay_view(
 ) -> impl IntoElement {
     let vm = signal(OverlayViewModel::new(request));
 
-    let finish_if_ready = {
-        let sink = Arc::clone(&outcome_sink);
-        move || {
-            let terminal = vm.with(|m| m.outcome().cloned());
-            if let Some(outcome) = terminal {
-                crate::store_outcome(&sink, outcome);
-                if quit_on_finish {
-                    quit();
-                }
+    let finish_if_ready = move || {
+        let terminal = vm.with(|m| m.outcome().copied());
+        if let Some(outcome) = terminal {
+            crate::store_outcome(&outcome_sink, outcome);
+            if quit_on_finish {
+                quit();
             }
         }
     };
@@ -271,8 +290,8 @@ pub(crate) fn build_overlay_view(
     });
     let exercise_title = vm.with(|m| m.request().title.clone());
     let status_note = vm.with(|m| m.status_note().map(str::to_owned));
-    let show_skip = vm.with(|m| m.show_skip_button());
-    let show_postpone = vm.with(|m| m.show_postpone_button());
+    let show_skip = vm.with(OverlayViewModel::show_skip_button);
+    let show_postpone = vm.with(OverlayViewModel::show_postpone_button);
 
     let finish_skip = finish_if_ready.clone();
     let finish_postpone = finish_if_ready;
@@ -463,16 +482,16 @@ fn BreakOverlayRoot() -> impl IntoElement {
 /// Runs the Cozy fullscreen break overlay using Native Shell (`nsh`) and returns `OverlayOutcome`.
 pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
     let outcome_sink = Arc::new(Mutex::new(None));
-    if let Ok(mut guard) = OVERLAY_LAUNCH.lock() {
-        *guard = Some(OverlayLaunch {
-            request,
-            outcome_sink: Arc::clone(&outcome_sink),
-        });
-    } else {
+    let Ok(mut guard) = OVERLAY_LAUNCH.lock() else {
         return Err(UiError::WindowInit(
             "overlay launch state lock poisoned".to_owned(),
         ));
-    }
+    };
+    *guard = Some(OverlayLaunch {
+        request,
+        outcome_sink: Arc::clone(&outcome_sink),
+    });
+    drop(guard);
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {

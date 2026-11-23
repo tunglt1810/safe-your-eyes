@@ -21,9 +21,19 @@ pub enum ChimeKind {
     PostBreak,
 }
 
+const BYTES_PER_SAMPLE: u16 = CHIME_BITS_PER_SAMPLE / 8;
+const BLOCK_ALIGN: u16 = CHIME_CHANNELS * BYTES_PER_SAMPLE;
+const BYTE_RATE: u32 = CHIME_SAMPLE_RATE * (BLOCK_ALIGN as u32);
+const WAV_HEADER_BYTES: usize = 44;
+
+const fn note_samples(dur_ms: u32) -> u32 {
+    ((CHIME_SAMPLE_RATE as u64 * dur_ms as u64) / 1000) as u32
+}
+
 /// Synthesizes a complete RIFF/WAVE 16-bit mono PCM chime in memory.
 ///
 /// `volume` is clamped to `0..=100`. A volume of `0` yields a valid silent WAV file.
+#[must_use]
 pub fn synthesize_chime_wav(kind: ChimeKind, volume: u8) -> Vec<u8> {
     let notes: &[(f64, u32)] = match kind {
         // Gentle ascending two-tone chime (C5 -> E5, 360 ms total).
@@ -32,20 +42,12 @@ pub fn synthesize_chime_wav(kind: ChimeKind, volume: u8) -> Vec<u8> {
         ChimeKind::PostBreak => &[(783.99, 160), (523.25, 240)],
     };
 
-    let gain = f64::from(volume.min(100)) / 100.0;
-    let max_amplitude = 0.75 * f64::from(i16::MAX) * gain;
-
-    let total_samples: usize = notes
-        .iter()
-        .map(|&(_, dur_ms)| ((u64::from(CHIME_SAMPLE_RATE) * u64::from(dur_ms)) / 1000) as usize)
-        .sum();
-    let data_bytes = (total_samples * 2) as u32;
+    let total_samples: u32 = notes.iter().map(|&(_, dur_ms)| note_samples(dur_ms)).sum();
+    let data_bytes = total_samples.saturating_mul(u32::from(BLOCK_ALIGN));
     let riff_chunk_size = 36u32.saturating_add(data_bytes);
-    let byte_rate =
-        CHIME_SAMPLE_RATE * u32::from(CHIME_CHANNELS) * u32::from(CHIME_BITS_PER_SAMPLE / 8);
-    let block_align = CHIME_CHANNELS * (CHIME_BITS_PER_SAMPLE / 8);
+    let data_len_usize = usize::try_from(data_bytes).unwrap_or(0);
 
-    let mut wav = Vec::with_capacity(44 + data_bytes as usize);
+    let mut wav = Vec::with_capacity(WAV_HEADER_BYTES + data_len_usize);
     wav.extend_from_slice(b"RIFF");
     wav.extend_from_slice(&riff_chunk_size.to_le_bytes());
     wav.extend_from_slice(b"WAVE");
@@ -54,24 +56,27 @@ pub fn synthesize_chime_wav(kind: ChimeKind, volume: u8) -> Vec<u8> {
     wav.extend_from_slice(&1u16.to_le_bytes());
     wav.extend_from_slice(&CHIME_CHANNELS.to_le_bytes());
     wav.extend_from_slice(&CHIME_SAMPLE_RATE.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&BYTE_RATE.to_le_bytes());
+    wav.extend_from_slice(&BLOCK_ALIGN.to_le_bytes());
     wav.extend_from_slice(&CHIME_BITS_PER_SAMPLE.to_le_bytes());
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_bytes.to_le_bytes());
 
-    let attack_samples = ((u64::from(CHIME_SAMPLE_RATE) * 12) / 1000).max(1) as f64;
+    if volume == 0 {
+        wav.resize(WAV_HEADER_BYTES + data_len_usize, 0);
+        return wav;
+    }
+
+    let gain = f64::from(volume.min(100)) / 100.0;
+    let max_amplitude = 0.75 * f64::from(i16::MAX) * gain;
+    let attack_samples = f64::from(note_samples(12).max(1));
     let sample_rate_f64 = f64::from(CHIME_SAMPLE_RATE);
 
     for &(freq_hz, dur_ms) in notes {
-        let note_samples = ((u64::from(CHIME_SAMPLE_RATE) * u64::from(dur_ms)) / 1000) as usize;
-        let note_len_f64 = (note_samples.max(1)) as f64;
-        for idx in 0..note_samples {
-            if volume == 0 {
-                wav.extend_from_slice(&0i16.to_le_bytes());
-                continue;
-            }
-            let idx_f64 = idx as f64;
+        let count = note_samples(dur_ms);
+        let note_len_f64 = f64::from(count.max(1));
+        for idx in 0..count {
+            let idx_f64 = f64::from(idx);
             let t = idx_f64 / sample_rate_f64;
             let t_norm = idx_f64 / note_len_f64;
             let attack = (idx_f64 / attack_samples).min(1.0);
@@ -80,7 +85,10 @@ pub fn synthesize_chime_wav(kind: ChimeKind, volume: u8) -> Vec<u8> {
             let tail = ((note_len_f64 - idx_f64) / attack_samples).min(1.0);
             let envelope = attack * decay * tail;
 
-            let wave = 0.8 * (TAU * freq_hz * t).sin() + 0.2 * (TAU * (2.0 * freq_hz) * t).sin();
+            let wave = 0.2f64.mul_add(
+                (TAU * (2.0 * freq_hz) * t).sin(),
+                0.8 * (TAU * freq_hz * t).sin(),
+            );
             let scaled =
                 (wave * envelope * max_amplitude).clamp(f64::from(i16::MIN), f64::from(i16::MAX));
             let sample = scaled.round() as i16;

@@ -1,7 +1,7 @@
 //! Cross-platform desktop pre-break notification adapter (`sye_core::Notifier`).
 
 #[cfg(all(unix, not(target_os = "macos")))]
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use notify_rust::{Notification, Timeout};
 use sye_core::{BreakType, Notifier, PlatformError};
@@ -26,7 +26,8 @@ impl std::fmt::Debug for OsNotifier {
 
 impl OsNotifier {
     /// Creates an active OS notifier.
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             enabled: true,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -35,7 +36,8 @@ impl OsNotifier {
     }
 
     /// Creates a no-op notifier for `--headless` mode or tests.
-    pub fn noop() -> Self {
+    #[must_use]
+    pub const fn noop() -> Self {
         Self {
             enabled: false,
             #[cfg(all(unix, not(target_os = "macos")))]
@@ -51,6 +53,7 @@ impl Default for OsNotifier {
 }
 
 /// Formats the `(summary, body)` pair for a pre-break notification.
+#[must_use]
 pub fn format_pre_break_notification(
     break_type: BreakType,
     title: &str,
@@ -61,10 +64,11 @@ pub fn format_pre_break_notification(
         BreakType::Long => "Long break",
     };
     let summary = format!("Safe Your Eyes — {kind_label} in {warning_secs}s");
-    let body = if title.trim().is_empty() {
+    let trimmed = title.trim();
+    let body = if trimmed.is_empty() {
         "Prepare to rest your eyes.".to_owned()
     } else {
-        title.trim().to_owned()
+        trimmed.to_owned()
     };
     (summary, body)
 }
@@ -98,11 +102,9 @@ impl Notifier for OsNotifier {
             let handle = notification
                 .show()
                 .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
-            let mut guard = self
-                .active
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
             *guard = Some(handle);
+            drop(guard);
             Ok(())
         }
 
@@ -123,10 +125,7 @@ impl Notifier for OsNotifier {
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             let handle = {
-                let mut guard = self
-                    .active
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
                 guard.take()
             };
             if let Some(active) = handle {

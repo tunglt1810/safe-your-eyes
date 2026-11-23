@@ -85,6 +85,7 @@ impl SessionState {
     }
 
     /// Loads `SessionState` from `path`, falling back to defaults on missing or corrupt files.
+    #[must_use]
     pub fn load_or_default(path: &Path) -> (Self, Option<SessionError>) {
         match fs::read_to_string(path) {
             Ok(content) => match Self::from_toml_str(&content) {
@@ -114,6 +115,14 @@ impl SessionState {
         fs::write(path, encoded).map_err(|err| SessionError::Io {
             message: err.to_string(),
         })
+    }
+}
+
+impl std::str::FromStr for SessionState {
+    type Err = SessionError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_toml_str(s)
     }
 }
 

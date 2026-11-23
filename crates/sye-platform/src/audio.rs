@@ -10,10 +10,10 @@ use sye_core::{AudioPlayer, ChimeKind, PlatformError, synthesize_chime_wav};
 
 static AUDIO_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct PlayerSpec {
-    program: String,
-    args: Vec<String>,
+    program: &'static str,
+    args: &'static [&'static str],
 }
 
 /// Non-blocking OS audio player for synthesized WAV chimes.
@@ -24,25 +24,27 @@ struct PlayerSpec {
 #[derive(Debug, Clone)]
 pub struct OsAudioPlayer {
     temp_dir: PathBuf,
-    players: Vec<PlayerSpec>,
+    players: &'static [PlayerSpec],
 }
 
 impl OsAudioPlayer {
     /// Creates an `OsAudioPlayer` using the OS runtime/temp directory and default platform players.
+    #[must_use]
     pub fn new() -> Self {
         Self::with_temp_dir(default_audio_temp_dir())
     }
 
     /// Creates an `OsAudioPlayer` writing temporary WAV files under `temp_dir`.
-    pub fn with_temp_dir(temp_dir: PathBuf) -> Self {
+    #[must_use]
+    pub const fn with_temp_dir(temp_dir: PathBuf) -> Self {
         Self {
             temp_dir,
-            players: default_player_specs(),
+            players: DEFAULT_PLAYER_SPECS,
         }
     }
 
     #[cfg(test)]
-    fn with_players(temp_dir: PathBuf, players: Vec<PlayerSpec>) -> Self {
+    const fn with_players(temp_dir: PathBuf, players: &'static [PlayerSpec]) -> Self {
         Self { temp_dir, players }
     }
 
@@ -79,7 +81,7 @@ impl AudioPlayer for OsAudioPlayer {
             .join(format!("sye-chime-{}-{seq}.wav", std::process::id()));
         fs::write(&path, wav_bytes).map_err(|err| PlatformError::Io(err.to_string()))?;
 
-        match spawn_first_available_player(&self.players, &path) {
+        match spawn_first_available_player(self.players, &path) {
             Ok(mut child) => {
                 let cleanup_path = path.clone();
                 if thread::Builder::new()
@@ -114,55 +116,49 @@ fn default_audio_temp_dir() -> PathBuf {
     std::env::temp_dir().join("safe-your-eyes")
 }
 
-fn default_player_specs() -> Vec<PlayerSpec> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![PlayerSpec {
-            program: "afplay".to_owned(),
-            args: Vec::new(),
-        }]
-    }
-    #[cfg(target_os = "windows")]
-    {
-        vec![PlayerSpec {
-            program: "powershell.exe".to_owned(),
-            args: vec![
-                "-NoProfile".to_owned(),
-                "-NonInteractive".to_owned(),
-                "-WindowStyle".to_owned(),
-                "Hidden".to_owned(),
-                "-Command".to_owned(),
-            ],
-        }]
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        vec![
-            PlayerSpec {
-                program: "pw-play".to_owned(),
-                args: Vec::new(),
-            },
-            PlayerSpec {
-                program: "paplay".to_owned(),
-                args: Vec::new(),
-            },
-            PlayerSpec {
-                program: "aplay".to_owned(),
-                args: vec!["-q".to_owned()],
-            },
-        ]
-    }
-}
+#[cfg(target_os = "macos")]
+const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
+    program: "afplay",
+    args: &[],
+}];
+
+#[cfg(target_os = "windows")]
+const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
+    program: "powershell.exe",
+    args: &[
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-Command",
+    ],
+}];
+
+#[cfg(all(unix, not(target_os = "macos")))]
+const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[
+    PlayerSpec {
+        program: "pw-play",
+        args: &[],
+    },
+    PlayerSpec {
+        program: "paplay",
+        args: &[],
+    },
+    PlayerSpec {
+        program: "aplay",
+        args: &["-q"],
+    },
+];
 
 fn spawn_first_available_player(
     players: &[PlayerSpec],
     wav_path: &Path,
 ) -> Result<Child, PlatformError> {
-    let mut last_error = String::from("no audio playback backend configured");
+    let mut last_error: Option<String> = None;
 
     for spec in players {
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args);
+        let mut cmd = Command::new(spec.program);
+        cmd.args(spec.args);
 
         #[cfg(target_os = "windows")]
         if spec.program.eq_ignore_ascii_case("powershell.exe") {
@@ -186,13 +182,16 @@ fn spawn_first_available_player(
         match cmd.spawn() {
             Ok(child) => return Ok(child),
             Err(err) => {
-                last_error = format!("{}: {err}", spec.program);
+                last_error = Some(format!("{}: {err}", spec.program));
             }
         }
     }
 
+    let detail = last_error
+        .as_deref()
+        .unwrap_or("no audio playback backend configured");
     Err(PlatformError::Unavailable(format!(
-        "no OS audio player available ({last_error})"
+        "no OS audio player available ({detail})"
     )))
 }
 
@@ -220,14 +219,12 @@ mod tests {
     #[test]
     fn missing_player_returns_unavailable_and_cleans_temp_file()
     -> Result<(), Box<dyn std::error::Error>> {
+        const MISSING_PLAYER: &[PlayerSpec] = &[PlayerSpec {
+            program: "sye-nonexistent-audio-player-binary",
+            args: &[],
+        }];
         let tmp = TestTempDir::new("audio-missing")?;
-        let player = OsAudioPlayer::with_players(
-            tmp.path().to_path_buf(),
-            vec![PlayerSpec {
-                program: "sye-nonexistent-audio-player-binary".to_owned(),
-                args: Vec::new(),
-            }],
-        );
+        let player = OsAudioPlayer::with_players(tmp.path().to_path_buf(), MISSING_PLAYER);
 
         let result = player.play_chime(ChimeKind::PreBreak, 80);
         assert!(matches!(result, Err(PlatformError::Unavailable(_))));
@@ -241,14 +238,12 @@ mod tests {
     #[test]
     fn successful_spawn_cleans_up_temp_wav_asynchronously() -> Result<(), Box<dyn std::error::Error>>
     {
+        const TRUE_PLAYER: &[PlayerSpec] = &[PlayerSpec {
+            program: "true",
+            args: &[],
+        }];
         let tmp = TestTempDir::new("audio-ok")?;
-        let player = OsAudioPlayer::with_players(
-            tmp.path().to_path_buf(),
-            vec![PlayerSpec {
-                program: "true".to_owned(),
-                args: Vec::new(),
-            }],
-        );
+        let player = OsAudioPlayer::with_players(tmp.path().to_path_buf(), TRUE_PLAYER);
 
         // Volume > 100 must clamp cleanly without error.
         player.play_chime(ChimeKind::PostBreak, 250)?;

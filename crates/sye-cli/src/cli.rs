@@ -71,25 +71,21 @@ OPTIONS:
     -h, --help                Print help information
 ";
 
-/// Parses CLI arguments (excluding argv[0]).
+/// Parses CLI arguments (excluding `argv[0]`).
 pub(crate) fn parse_args<I, S>(args: I) -> Result<CliArgs, CliParseError>
 where
     I: IntoIterator<Item = S>,
     S: Into<String>,
 {
-    let items: Vec<String> = args.into_iter().map(Into::into).collect();
+    let mut iter = args.into_iter().map(Into::into).peekable();
     let mut config: Option<PathBuf> = None;
     let mut socket: Option<PathBuf> = None;
     let mut headless = false;
     let mut json_flag = false;
-    let mut short_break = false;
-    let mut long_break = false;
     let mut mode: Option<CommandMode> = None;
 
-    let mut idx = 0;
-    while idx < items.len() {
-        let arg = items[idx].as_str();
-        match arg {
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
             "-h" | "--help" => {
                 return Ok(CliArgs {
                     config,
@@ -106,48 +102,34 @@ where
                     mode: CommandMode::Version,
                 });
             }
-            "--headless" => {
-                headless = true;
-            }
-            "--json" => {
-                json_flag = true;
-            }
+            "--headless" => headless = true,
+            "--json" => json_flag = true,
             "--config" => {
-                idx += 1;
-                let value = items.get(idx).ok_or_else(|| CliParseError {
+                let value = iter.next().ok_or_else(|| CliParseError {
                     message: "Missing value for --config".to_owned(),
                 })?;
-                config = Some(parse_non_empty_path("--config", value)?);
+                config = Some(parse_non_empty_path("--config", &value)?);
             }
             "--socket" => {
-                idx += 1;
-                let value = items.get(idx).ok_or_else(|| CliParseError {
+                let value = iter.next().ok_or_else(|| CliParseError {
                     message: "Missing value for --socket".to_owned(),
                 })?;
-                socket = Some(parse_non_empty_path("--socket", value)?);
+                socket = Some(parse_non_empty_path("--socket", &value)?);
             }
-            "--status" => {
-                set_mode(&mut mode, CommandMode::Status { json: false })?;
-            }
-            "-e" | "--enable" => {
-                set_mode(&mut mode, CommandMode::Enable)?;
-            }
+            "--status" => set_mode(&mut mode, CommandMode::Status { json: false })?,
+            "-e" | "--enable" => set_mode(&mut mode, CommandMode::Enable)?,
             "-d" | "--disable" => {
-                let mut minutes: Option<u64> = None;
-                if let Some(next) = items.get(idx + 1)
-                    && !next.starts_with('-')
-                {
-                    minutes = Some(parse_disable_minutes(next)?);
-                    idx += 1;
-                }
+                let minutes = if iter.peek().is_some_and(|next| !next.starts_with('-')) {
+                    let next = iter.next().unwrap_or_default();
+                    Some(parse_disable_minutes(&next)?)
+                } else {
+                    None
+                };
                 set_mode(&mut mode, CommandMode::Disable { minutes })?;
             }
-            "-t" | "--take-break" => {
-                set_mode(&mut mode, CommandMode::TakeBreak)?;
-            }
+            "-t" | "--take-break" => set_mode(&mut mode, CommandMode::TakeBreak)?,
             "-b" | "--short-break" => {
-                short_break = true;
-                if long_break {
+                if matches!(mode, Some(CommandMode::LongBreak)) {
                     return Err(CliParseError {
                         message: "Cannot combine -b/--short-break with -l/--long-break".to_owned(),
                     });
@@ -155,41 +137,24 @@ where
                 set_mode(&mut mode, CommandMode::ShortBreak)?;
             }
             "-l" | "--long-break" => {
-                long_break = true;
-                if short_break {
+                if matches!(mode, Some(CommandMode::ShortBreak)) {
                     return Err(CliParseError {
                         message: "Cannot combine -b/--short-break with -l/--long-break".to_owned(),
                     });
                 }
                 set_mode(&mut mode, CommandMode::LongBreak)?;
             }
-            "-s" | "--settings" => {
-                set_mode(&mut mode, CommandMode::Settings)?;
-            }
-            "-q" | "--quit" => {
-                set_mode(&mut mode, CommandMode::Quit)?;
-            }
-            "--print-default-config" => {
-                set_mode(&mut mode, CommandMode::PrintDefaultConfig)?;
-            }
-            "--validate-config" => {
-                set_mode(&mut mode, CommandMode::ValidateConfig)?;
-            }
+            "-s" | "--settings" => set_mode(&mut mode, CommandMode::Settings)?,
+            "-q" | "--quit" => set_mode(&mut mode, CommandMode::Quit)?,
+            "--print-default-config" => set_mode(&mut mode, CommandMode::PrintDefaultConfig)?,
+            "--validate-config" => set_mode(&mut mode, CommandMode::ValidateConfig)?,
             "--internal-overlay" => {
-                idx += 1;
-                let payload = items.get(idx).ok_or_else(|| CliParseError {
+                let payload_json = iter.next().ok_or_else(|| CliParseError {
                     message: "Missing JSON payload for --internal-overlay".to_owned(),
                 })?;
-                set_mode(
-                    &mut mode,
-                    CommandMode::InternalOverlay {
-                        payload_json: payload.clone(),
-                    },
-                )?;
+                set_mode(&mut mode, CommandMode::InternalOverlay { payload_json })?;
             }
-            "--internal-settings" => {
-                set_mode(&mut mode, CommandMode::InternalSettings)?;
-            }
+            "--internal-settings" => set_mode(&mut mode, CommandMode::InternalSettings)?,
             other => {
                 if let Some(val) = other.strip_prefix("--config=") {
                     config = Some(parse_non_empty_path("--config", val)?);
@@ -209,7 +174,6 @@ where
                 }
             }
         }
-        idx += 1;
     }
 
     let resolved_mode = match mode {

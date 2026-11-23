@@ -144,22 +144,22 @@ impl SettingsViewModel {
 
     /// Adds a non-empty window pattern to `do_not_disturb.skip_break_windows`.
     pub fn add_skip_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
-        self.add_window_pattern(true, pattern)
+        self.add_window_pattern(WindowList::Skip, pattern)
     }
 
     /// Removes the pattern at `index` from `do_not_disturb.skip_break_windows`.
     pub fn remove_skip_window(&mut self, index: usize) -> Result<(), String> {
-        self.remove_window_pattern(true, index)
+        self.remove_window_pattern(WindowList::Skip, index)
     }
 
     /// Adds a non-empty window pattern to `do_not_disturb.take_break_windows`.
     pub fn add_take_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
-        self.add_window_pattern(false, pattern)
+        self.add_window_pattern(WindowList::Take, pattern)
     }
 
     /// Removes the pattern at `index` from `do_not_disturb.take_break_windows`.
     pub fn remove_take_window(&mut self, index: usize) -> Result<(), String> {
-        self.remove_window_pattern(false, index)
+        self.remove_window_pattern(WindowList::Take, index)
     }
 
     /// Validates the current in-memory configuration and updates `validation_error`.
@@ -234,35 +234,63 @@ impl SettingsViewModel {
 
     fn add_window_pattern(
         &mut self,
-        is_skip: bool,
+        list: WindowList,
         pattern: impl Into<String>,
     ) -> Result<(), String> {
         let raw = pattern.into();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            let label = if is_skip { "Skip-break" } else { "Take-break" };
+            let label = list.label();
             return self.fail_validation(format!("{label} window pattern must not be empty"));
         }
-        self.window_list_mut(is_skip).push(trimmed.to_owned());
+        self.window_list_mut(list).push(trimmed.to_owned());
         self.validation_error = None;
         Ok(())
     }
 
-    fn remove_window_pattern(&mut self, is_skip: bool, index: usize) -> Result<(), String> {
-        if index >= self.window_list_mut(is_skip).len() {
-            let label = if is_skip { "Skip-break" } else { "Take-break" };
+    fn remove_window_pattern(&mut self, list: WindowList, index: usize) -> Result<(), String> {
+        if index >= self.window_list_mut(list).len() {
+            let label = list.label();
             return self.fail_validation(format!("{label} window index {index} out of bounds"));
         }
-        self.window_list_mut(is_skip).remove(index);
+        self.window_list_mut(list).remove(index);
         self.validation_error = None;
         Ok(())
     }
 
-    fn window_list_mut(&mut self, is_skip: bool) -> &mut Vec<String> {
-        if is_skip {
-            &mut self.config.do_not_disturb.skip_break_windows
-        } else {
-            &mut self.config.do_not_disturb.take_break_windows
+    fn window_list_mut(&mut self, list: WindowList) -> &mut Vec<String> {
+        match list {
+            WindowList::Skip => &mut self.config.do_not_disturb.skip_break_windows,
+            WindowList::Take => &mut self.config.do_not_disturb.take_break_windows,
+        }
+    }
+
+    fn draft_exercise(&self, kind: BreakType) -> &String {
+        match kind {
+            BreakType::Short => &self.draft_short_exercise,
+            BreakType::Long => &self.draft_long_exercise,
+        }
+    }
+
+    fn draft_exercise_mut(&mut self, kind: BreakType) -> &mut String {
+        match kind {
+            BreakType::Short => &mut self.draft_short_exercise,
+            BreakType::Long => &mut self.draft_long_exercise,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WindowList {
+    Skip,
+    Take,
+}
+
+impl WindowList {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Skip => "Skip-break",
+            Self::Take => "Take-break",
         }
     }
 }
@@ -531,30 +559,14 @@ fn exercise_tier_section(
                 .items_center()
                 .child(view().flex_1().child(cozy_input(
                     placeholder,
-                    move || {
-                        vm.with(|m| match kind {
-                            BreakType::Short => m.draft_short_exercise.clone(),
-                            BreakType::Long => m.draft_long_exercise.clone(),
-                        })
-                    },
-                    move |s: &str| {
-                        vm.update(|m| match kind {
-                            BreakType::Short => m.draft_short_exercise = s.to_owned(),
-                            BreakType::Long => m.draft_long_exercise = s.to_owned(),
-                        });
-                    },
+                    move || vm.with(|m| m.draft_exercise(kind).clone()),
+                    move |s: &str| vm.update(|m| *m.draft_exercise_mut(kind) = s.to_owned()),
                 )))
                 .child(secondary_button("Add", move || {
                     vm.update(|m| {
-                        let name = match kind {
-                            BreakType::Short => m.draft_short_exercise.clone(),
-                            BreakType::Long => m.draft_long_exercise.clone(),
-                        };
+                        let name = m.draft_exercise(kind).clone();
                         if m.add_exercise(kind, name).is_ok() {
-                            match kind {
-                                BreakType::Short => m.draft_short_exercise.clear(),
-                                BreakType::Long => m.draft_long_exercise.clear(),
-                            }
+                            m.draft_exercise_mut(kind).clear();
                         }
                     });
                 })),

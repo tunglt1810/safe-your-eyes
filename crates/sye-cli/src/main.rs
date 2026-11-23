@@ -88,27 +88,37 @@ fn main() -> ExitCode {
         }
         CommandMode::InternalSettings => run_settings_and_sync_autostart(&paths.config_file),
         CommandMode::Daemon => daemon::run_daemon(paths, args.headless),
-        CommandMode::Status { json } => send_ipc_command(&paths, IpcCommand::Status, json),
-        CommandMode::Enable => send_ipc_command(&paths, IpcCommand::Enable, false),
+        CommandMode::Status { json } => send_ipc_command(
+            &paths,
+            IpcCommand::Status,
+            if json {
+                StatusFormat::Json
+            } else {
+                StatusFormat::Human
+            },
+        ),
+        CommandMode::Enable => send_ipc_command(&paths, IpcCommand::Enable, StatusFormat::Human),
         CommandMode::Disable { minutes } => {
-            send_ipc_command(&paths, IpcCommand::Disable { minutes }, false)
+            send_ipc_command(&paths, IpcCommand::Disable { minutes }, StatusFormat::Human)
         }
-        CommandMode::TakeBreak => {
-            send_ipc_command(&paths, IpcCommand::TakeBreak { kind: None }, false)
-        }
+        CommandMode::TakeBreak => send_ipc_command(
+            &paths,
+            IpcCommand::TakeBreak { kind: None },
+            StatusFormat::Human,
+        ),
         CommandMode::ShortBreak => send_ipc_command(
             &paths,
             IpcCommand::TakeBreak {
                 kind: Some(BreakType::Short),
             },
-            false,
+            StatusFormat::Human,
         ),
         CommandMode::LongBreak => send_ipc_command(
             &paths,
             IpcCommand::TakeBreak {
                 kind: Some(BreakType::Long),
             },
-            false,
+            StatusFormat::Human,
         ),
         CommandMode::Settings => {
             match IpcClient::send_command(&paths.socket_path, &IpcCommand::OpenSettings) {
@@ -124,7 +134,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        CommandMode::Quit => send_ipc_command(&paths, IpcCommand::Quit, false),
+        CommandMode::Quit => send_ipc_command(&paths, IpcCommand::Quit, StatusFormat::Human),
     }
 }
 
@@ -147,10 +157,16 @@ fn run_settings_and_sync_autostart(config_file: &std::path::Path) -> ExitCode {
     }
 }
 
-fn send_ipc_command(paths: &AppPaths, cmd: IpcCommand, json_status: bool) -> ExitCode {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StatusFormat {
+    Human,
+    Json,
+}
+
+fn send_ipc_command(paths: &AppPaths, cmd: IpcCommand, status_format: StatusFormat) -> ExitCode {
     match IpcClient::send_command(&paths.socket_path, &cmd) {
         Ok(IpcResponse::Status(snapshot)) => {
-            if json_status {
+            if status_format == StatusFormat::Json {
                 match serde_json::to_string(&snapshot) {
                     Ok(line) => {
                         println!("{line}");

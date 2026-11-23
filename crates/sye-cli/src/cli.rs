@@ -117,24 +117,14 @@ where
                 let value = items.get(idx).ok_or_else(|| CliParseError {
                     message: "Missing value for --config".to_owned(),
                 })?;
-                if value.trim().is_empty() {
-                    return Err(CliParseError {
-                        message: "--config path must not be empty".to_owned(),
-                    });
-                }
-                config = Some(PathBuf::from(value));
+                config = Some(parse_non_empty_path("--config", value)?);
             }
             "--socket" => {
                 idx += 1;
                 let value = items.get(idx).ok_or_else(|| CliParseError {
                     message: "Missing value for --socket".to_owned(),
                 })?;
-                if value.trim().is_empty() {
-                    return Err(CliParseError {
-                        message: "--socket path must not be empty".to_owned(),
-                    });
-                }
-                socket = Some(PathBuf::from(value));
+                socket = Some(parse_non_empty_path("--socket", value)?);
             }
             "--status" => {
                 set_mode(&mut mode, CommandMode::Status { json: false })?;
@@ -147,10 +137,7 @@ where
                 if let Some(next) = items.get(idx + 1)
                     && !next.starts_with('-')
                 {
-                    let parsed = next.parse::<u64>().map_err(|_| CliParseError {
-                        message: format!("Invalid minutes value for --disable: '{next}'"),
-                    })?;
-                    minutes = Some(parsed);
+                    minutes = Some(parse_disable_minutes(next)?);
                     idx += 1;
                 }
                 set_mode(&mut mode, CommandMode::Disable { minutes })?;
@@ -205,27 +192,14 @@ where
             }
             other => {
                 if let Some(val) = other.strip_prefix("--config=") {
-                    if val.trim().is_empty() {
-                        return Err(CliParseError {
-                            message: "--config path must not be empty".to_owned(),
-                        });
-                    }
-                    config = Some(PathBuf::from(val));
+                    config = Some(parse_non_empty_path("--config", val)?);
                 } else if let Some(val) = other.strip_prefix("--socket=") {
-                    if val.trim().is_empty() {
-                        return Err(CliParseError {
-                            message: "--socket path must not be empty".to_owned(),
-                        });
-                    }
-                    socket = Some(PathBuf::from(val));
+                    socket = Some(parse_non_empty_path("--socket", val)?);
                 } else if let Some(val) = other.strip_prefix("--disable=") {
-                    let parsed = val.parse::<u64>().map_err(|_| CliParseError {
-                        message: format!("Invalid minutes value for --disable: '{val}'"),
-                    })?;
                     set_mode(
                         &mut mode,
                         CommandMode::Disable {
-                            minutes: Some(parsed),
+                            minutes: Some(parse_disable_minutes(val)?),
                         },
                     )?;
                 } else {
@@ -240,21 +214,13 @@ where
 
     let resolved_mode = match mode {
         Some(CommandMode::Status { .. }) => CommandMode::Status { json: json_flag },
-        Some(other) => {
+        other => {
             if json_flag {
                 return Err(CliParseError {
                     message: "--json can only be used with --status".to_owned(),
                 });
             }
-            other
-        }
-        None => {
-            if json_flag {
-                return Err(CliParseError {
-                    message: "--json can only be used with --status".to_owned(),
-                });
-            }
-            CommandMode::Daemon
+            other.unwrap_or(CommandMode::Daemon)
         }
     };
 
@@ -263,6 +229,21 @@ where
         socket,
         headless,
         mode: resolved_mode,
+    })
+}
+
+fn parse_non_empty_path(flag: &str, value: &str) -> Result<PathBuf, CliParseError> {
+    if value.trim().is_empty() {
+        return Err(CliParseError {
+            message: format!("{flag} path must not be empty"),
+        });
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn parse_disable_minutes(raw: &str) -> Result<u64, CliParseError> {
+    raw.parse::<u64>().map_err(|_| CliParseError {
+        message: format!("Invalid minutes value for --disable: '{raw}'"),
     })
 }
 

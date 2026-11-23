@@ -37,6 +37,19 @@ pub enum SettingsTab {
     About,
 }
 
+impl SettingsTab {
+    const ALL: [Self; 4] = [Self::Timing, Self::Policies, Self::Exercises, Self::About];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Timing => "Timing",
+            Self::Policies => "Policies",
+            Self::Exercises => "Exercises",
+            Self::About => "About & Support",
+        }
+    }
+}
+
 /// Terminal outcome returned by the settings window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsOutcome {
@@ -83,9 +96,7 @@ impl SettingsViewModel {
         let raw = name.into();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            let msg = "Exercise name must not be empty".to_owned();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+            return self.fail_validation("Exercise name must not be empty");
         }
         self.breaks_mut(kind).push(BreakSpec::new(trimmed));
         self.validation_error = None;
@@ -97,17 +108,12 @@ impl SettingsViewModel {
     pub fn remove_exercise(&mut self, kind: BreakType, index: usize) -> Result<(), String> {
         let total = self.config.short_breaks.len() + self.config.long_breaks.len();
         if total <= 1 {
-            let msg = "At least one break exercise must remain configured".to_owned();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+            return self.fail_validation("At least one break exercise must remain configured");
         }
-        let list = self.breaks_mut(kind);
-        if index >= list.len() {
-            let msg = format!("Exercise index {index} out of bounds");
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+        if index >= self.breaks_mut(kind).len() {
+            return self.fail_validation(format!("Exercise index {index} out of bounds"));
         }
-        list.remove(index);
+        self.breaks_mut(kind).remove(index);
         self.validation_error = None;
         Ok(())
     }
@@ -119,13 +125,7 @@ impl SettingsViewModel {
         index: usize,
         interval_secs: Option<u64>,
     ) -> Result<(), String> {
-        let list = self.breaks_mut(kind);
-        let Some(spec) = list.get_mut(index) else {
-            let msg = format!("Exercise index {index} out of bounds");
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        };
-        spec.interval_secs = interval_secs;
+        self.exercise_mut(kind, index)?.interval_secs = interval_secs;
         self.validation_error = None;
         Ok(())
     }
@@ -137,86 +137,38 @@ impl SettingsViewModel {
         index: usize,
         duration_secs: Option<u64>,
     ) -> Result<(), String> {
-        let list = self.breaks_mut(kind);
-        let Some(spec) = list.get_mut(index) else {
-            let msg = format!("Exercise index {index} out of bounds");
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        };
-        spec.duration_secs = duration_secs;
+        self.exercise_mut(kind, index)?.duration_secs = duration_secs;
         self.validation_error = None;
         Ok(())
     }
 
     /// Adds a non-empty window pattern to `do_not_disturb.skip_break_windows`.
     pub fn add_skip_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
-        let raw = pattern.into();
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            let msg = "Skip-break window pattern must not be empty".to_owned();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        }
-        self.config
-            .do_not_disturb
-            .skip_break_windows
-            .push(trimmed.to_owned());
-        self.validation_error = None;
-        Ok(())
+        self.add_window_pattern(true, pattern)
     }
 
     /// Removes the pattern at `index` from `do_not_disturb.skip_break_windows`.
     pub fn remove_skip_window(&mut self, index: usize) -> Result<(), String> {
-        if index >= self.config.do_not_disturb.skip_break_windows.len() {
-            let msg = format!("Skip-break window index {index} out of bounds");
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        }
-        self.config.do_not_disturb.skip_break_windows.remove(index);
-        self.validation_error = None;
-        Ok(())
+        self.remove_window_pattern(true, index)
     }
 
     /// Adds a non-empty window pattern to `do_not_disturb.take_break_windows`.
     pub fn add_take_window(&mut self, pattern: impl Into<String>) -> Result<(), String> {
-        let raw = pattern.into();
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            let msg = "Take-break window pattern must not be empty".to_owned();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        }
-        self.config
-            .do_not_disturb
-            .take_break_windows
-            .push(trimmed.to_owned());
-        self.validation_error = None;
-        Ok(())
+        self.add_window_pattern(false, pattern)
     }
 
     /// Removes the pattern at `index` from `do_not_disturb.take_break_windows`.
     pub fn remove_take_window(&mut self, index: usize) -> Result<(), String> {
-        if index >= self.config.do_not_disturb.take_break_windows.len() {
-            let msg = format!("Take-break window index {index} out of bounds");
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
-        }
-        self.config.do_not_disturb.take_break_windows.remove(index);
-        self.validation_error = None;
-        Ok(())
+        self.remove_window_pattern(false, index)
     }
 
     /// Validates the current in-memory configuration and updates `validation_error`.
     pub fn validate(&mut self) -> Result<(), String> {
         if let Err(err) = self.config.validate() {
-            let msg = err.to_string();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+            return self.fail_validation(err.to_string());
         }
         if self.config.short_breaks.is_empty() && self.config.long_breaks.is_empty() {
-            let msg = "At least one break exercise must be configured".to_owned();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+            return self.fail_validation("At least one break exercise must be configured");
         }
         self.validation_error = None;
         Ok(())
@@ -237,9 +189,7 @@ impl SettingsViewModel {
     pub fn save(&mut self) -> Result<SettingsOutcome, String> {
         self.validate()?;
         if let Err(err) = self.config.save_to_path(&self.config_path) {
-            let msg = err.to_string();
-            self.validation_error = Some(msg.clone());
-            return Err(msg);
+            return self.fail_validation(err.to_string());
         }
         self.validation_error = None;
         self.outcome = Some(SettingsOutcome::Saved);
@@ -262,10 +212,57 @@ impl SettingsViewModel {
         self.outcome.unwrap_or(SettingsOutcome::Cancelled)
     }
 
+    fn fail_validation<T>(&mut self, msg: impl Into<String>) -> Result<T, String> {
+        let msg = msg.into();
+        self.validation_error = Some(msg.clone());
+        Err(msg)
+    }
+
     fn breaks_mut(&mut self, kind: BreakType) -> &mut Vec<BreakSpec> {
         match kind {
             BreakType::Short => &mut self.config.short_breaks,
             BreakType::Long => &mut self.config.long_breaks,
+        }
+    }
+
+    fn exercise_mut(&mut self, kind: BreakType, index: usize) -> Result<&mut BreakSpec, String> {
+        if index >= self.breaks_mut(kind).len() {
+            return self.fail_validation(format!("Exercise index {index} out of bounds"));
+        }
+        Ok(&mut self.breaks_mut(kind)[index])
+    }
+
+    fn add_window_pattern(
+        &mut self,
+        is_skip: bool,
+        pattern: impl Into<String>,
+    ) -> Result<(), String> {
+        let raw = pattern.into();
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            let label = if is_skip { "Skip-break" } else { "Take-break" };
+            return self.fail_validation(format!("{label} window pattern must not be empty"));
+        }
+        self.window_list_mut(is_skip).push(trimmed.to_owned());
+        self.validation_error = None;
+        Ok(())
+    }
+
+    fn remove_window_pattern(&mut self, is_skip: bool, index: usize) -> Result<(), String> {
+        if index >= self.window_list_mut(is_skip).len() {
+            let label = if is_skip { "Skip-break" } else { "Take-break" };
+            return self.fail_validation(format!("{label} window index {index} out of bounds"));
+        }
+        self.window_list_mut(is_skip).remove(index);
+        self.validation_error = None;
+        Ok(())
+    }
+
+    fn window_list_mut(&mut self, is_skip: bool) -> &mut Vec<String> {
+        if is_skip {
+            &mut self.config.do_not_disturb.skip_break_windows
+        } else {
+            &mut self.config.do_not_disturb.take_break_windows
         }
     }
 }
@@ -276,14 +273,6 @@ struct SettingsLaunch {
 }
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
-
-fn store_outcome(sink: &Arc<Mutex<Option<SettingsOutcome>>>, outcome: SettingsOutcome) {
-    if let Ok(mut guard) = sink.lock()
-        && guard.is_none()
-    {
-        *guard = Some(outcome);
-    }
-}
 
 fn number_field_row(
     label: &'static str,
@@ -511,22 +500,21 @@ fn policies_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
         )
 }
 
-fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
-    let short_items = computed(move || {
+fn exercise_tier_section(
+    vm: Signal<SettingsViewModel>,
+    kind: BreakType,
+    title: &'static str,
+    caption: &'static str,
+    placeholder: &'static str,
+    key_prefix: &'static str,
+) -> impl IntoElement {
+    let items = computed(move || {
         vm.with(|m| {
-            m.config
-                .short_breaks
-                .iter()
-                .enumerate()
-                .map(|(idx, spec)| (idx, spec.name.clone()))
-                .collect::<Vec<_>>()
-        })
-    });
-    let long_items = computed(move || {
-        vm.with(|m| {
-            m.config
-                .long_breaks
-                .iter()
+            let list = match kind {
+                BreakType::Short => &m.config.short_breaks,
+                BreakType::Long => &m.config.long_breaks,
+            };
+            list.iter()
                 .enumerate()
                 .map(|(idx, spec)| (idx, spec.name.clone()))
                 .collect::<Vec<_>>()
@@ -534,112 +522,90 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
     });
 
     view()
+        .gap_3()
+        .child(section_header(title, caption))
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .child(view().flex_1().child(cozy_input(
+                    placeholder,
+                    move || {
+                        vm.with(|m| match kind {
+                            BreakType::Short => m.draft_short_exercise.clone(),
+                            BreakType::Long => m.draft_long_exercise.clone(),
+                        })
+                    },
+                    move |s: &str| {
+                        vm.update(|m| match kind {
+                            BreakType::Short => m.draft_short_exercise = s.to_owned(),
+                            BreakType::Long => m.draft_long_exercise = s.to_owned(),
+                        });
+                    },
+                )))
+                .child(secondary_button("Add", move || {
+                    vm.update(|m| {
+                        let name = match kind {
+                            BreakType::Short => m.draft_short_exercise.clone(),
+                            BreakType::Long => m.draft_long_exercise.clone(),
+                        };
+                        if m.add_exercise(kind, name).is_ok() {
+                            match kind {
+                                BreakType::Short => m.draft_short_exercise.clear(),
+                                BreakType::Long => m.draft_long_exercise.clear(),
+                            }
+                        }
+                    });
+                })),
+        )
+        .child(view().gap_2().child(each(
+            items,
+            move |(idx, name)| format!("{key_prefix}-{idx}-{name}"),
+            move |item, _| {
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .rounded(radii::ELEMENT)
+                    .bg(colors::BACKGROUND_MUTED)
+                    .px_3()
+                    .py_2()
+                    .child(
+                        text(move || item.with(|(_, name)| name.clone()))
+                            .text_sm()
+                            .text_color(colors::TEXT_PRIMARY),
+                    )
+                    .child(destructive_button("Remove", move || {
+                        let idx = item.with(|(i, _)| *i);
+                        vm.update(|m| {
+                            let _ = m.remove_exercise(kind, idx);
+                        });
+                    }))
+            },
+        )))
+}
+
+fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
+    view()
         .gap_5()
-        .child(
-            view()
-                .gap_3()
-                .child(section_header(
-                    "Short Break Exercises",
-                    "Quick 15-second prompts cycled during work intervals.",
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .items_center()
-                        .child(view().flex_1().child(cozy_input(
-                            "Add a short exercise...",
-                            move || vm.with(|m| m.draft_short_exercise.clone()),
-                            move |s: &str| vm.update(|m| m.draft_short_exercise = s.to_owned()),
-                        )))
-                        .child(secondary_button("Add", move || {
-                            vm.update(|m| {
-                                let name = m.draft_short_exercise.clone();
-                                if m.add_exercise(BreakType::Short, name).is_ok() {
-                                    m.draft_short_exercise.clear();
-                                }
-                            });
-                        })),
-                )
-                .child(view().gap_2().child(each(
-                    short_items,
-                    |(idx, name)| format!("short-{idx}-{name}"),
-                    move |item, _| {
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .rounded(radii::ELEMENT)
-                            .bg(colors::BACKGROUND_MUTED)
-                            .px_3()
-                            .py_2()
-                            .child(
-                                text(move || item.with(|(_, name)| name.clone()))
-                                    .text_sm()
-                                    .text_color(colors::TEXT_PRIMARY),
-                            )
-                            .child(destructive_button("Remove", move || {
-                                let idx = item.with(|(i, _)| *i);
-                                vm.update(|m| {
-                                    let _ = m.remove_exercise(BreakType::Short, idx);
-                                });
-                            }))
-                    },
-                ))),
-        )
+        .child(exercise_tier_section(
+            vm,
+            BreakType::Short,
+            "Short Break Exercises",
+            "Quick 15-second prompts cycled during work intervals.",
+            "Add a short exercise...",
+            "short",
+        ))
         .child(section_divider())
-        .child(
-            view()
-                .gap_3()
-                .child(section_header(
-                    "Long Break Exercises",
-                    "Restorative prompts shown after every four short breaks.",
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .gap_2()
-                        .items_center()
-                        .child(view().flex_1().child(cozy_input(
-                            "Add a long exercise...",
-                            move || vm.with(|m| m.draft_long_exercise.clone()),
-                            move |s: &str| vm.update(|m| m.draft_long_exercise = s.to_owned()),
-                        )))
-                        .child(secondary_button("Add", move || {
-                            vm.update(|m| {
-                                let name = m.draft_long_exercise.clone();
-                                if m.add_exercise(BreakType::Long, name).is_ok() {
-                                    m.draft_long_exercise.clear();
-                                }
-                            });
-                        })),
-                )
-                .child(view().gap_2().child(each(
-                    long_items,
-                    |(idx, name)| format!("long-{idx}-{name}"),
-                    move |item, _| {
-                        view()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .rounded(radii::ELEMENT)
-                            .bg(colors::BACKGROUND_MUTED)
-                            .px_3()
-                            .py_2()
-                            .child(
-                                text(move || item.with(|(_, name)| name.clone()))
-                                    .text_sm()
-                                    .text_color(colors::TEXT_PRIMARY),
-                            )
-                            .child(destructive_button("Remove", move || {
-                                let idx = item.with(|(i, _)| *i);
-                                vm.update(|m| {
-                                    let _ = m.remove_exercise(BreakType::Long, idx);
-                                });
-                            }))
-                    },
-                ))),
-        )
+        .child(exercise_tier_section(
+            vm,
+            BreakType::Long,
+            "Long Break Exercises",
+            "Restorative prompts shown after every four short breaks.",
+            "Add a long exercise...",
+            "long",
+        ))
 }
 
 fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
@@ -648,6 +614,21 @@ fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
         Appearance::Dark => 1,
         Appearance::System => 2,
     };
+    let mut track = segmented_track(theme_index);
+    for (label, mode) in [
+        ("Light", Appearance::Light),
+        ("Dark", Appearance::Dark),
+        ("System", Appearance::System),
+    ] {
+        track = track.child(segmented_option(
+            label,
+            move || appearance.get() == mode,
+            move || {
+                appearance.set(mode);
+                set_color_scheme(mode);
+            },
+        ));
+    }
 
     view()
         .gap_5()
@@ -664,33 +645,7 @@ fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
                         .items_center()
                         .justify_between()
                         .gap_3()
-                        .child(
-                            segmented_track(theme_index)
-                                .child(segmented_option(
-                                    "Light",
-                                    move || appearance.get() == Appearance::Light,
-                                    move || {
-                                        appearance.set(Appearance::Light);
-                                        set_color_scheme(Appearance::Light);
-                                    },
-                                ))
-                                .child(segmented_option(
-                                    "Dark",
-                                    move || appearance.get() == Appearance::Dark,
-                                    move || {
-                                        appearance.set(Appearance::Dark);
-                                        set_color_scheme(Appearance::Dark);
-                                    },
-                                ))
-                                .child(segmented_option(
-                                    "System",
-                                    move || appearance.get() == Appearance::System,
-                                    move || {
-                                        appearance.set(Appearance::System);
-                                        set_color_scheme(Appearance::System);
-                                    },
-                                )),
-                        )
+                        .child(track)
                         .child(
                             text(move || match appearance.get() {
                                 Appearance::Light => "Active mode: Light (Warm Oatmeal)",
@@ -773,6 +728,18 @@ pub(crate) fn build_settings_view(
         SettingsTab::About => 3,
     };
 
+    let mut sidebar_nav = view()
+        .relative()
+        .gap_1()
+        .child(sidebar_nav_indicator(tab_index));
+    for tab in SettingsTab::ALL {
+        sidebar_nav = sidebar_nav.child(sidebar_nav_item(
+            tab.label(),
+            move || active_tab.get() == tab,
+            move || vm.update(|m| m.active_tab = tab),
+        ));
+    }
+
     let sidebar = view()
         .w(px(210.0))
         .flex_shrink_0()
@@ -810,32 +777,7 @@ pub(crate) fn build_settings_view(
                                 ),
                         ),
                 )
-                .child(
-                    view()
-                        .relative()
-                        .gap_1()
-                        .child(sidebar_nav_indicator(tab_index))
-                        .child(sidebar_nav_item(
-                            "Timing",
-                            move || active_tab.get() == SettingsTab::Timing,
-                            move || vm.update(|m| m.active_tab = SettingsTab::Timing),
-                        ))
-                        .child(sidebar_nav_item(
-                            "Policies",
-                            move || active_tab.get() == SettingsTab::Policies,
-                            move || vm.update(|m| m.active_tab = SettingsTab::Policies),
-                        ))
-                        .child(sidebar_nav_item(
-                            "Exercises",
-                            move || active_tab.get() == SettingsTab::Exercises,
-                            move || vm.update(|m| m.active_tab = SettingsTab::Exercises),
-                        ))
-                        .child(sidebar_nav_item(
-                            "About & Support",
-                            move || active_tab.get() == SettingsTab::About,
-                            move || vm.update(|m| m.active_tab = SettingsTab::About),
-                        )),
-                ),
+                .child(sidebar_nav),
         )
         .child(
             view().px_3().py_1().child(
@@ -890,12 +832,7 @@ pub(crate) fn build_settings_view(
         .gap_3()
         .child(page_heading(
             "Settings",
-            move || match active_tab.get() {
-                SettingsTab::Timing => "Timing",
-                SettingsTab::Policies => "Policies",
-                SettingsTab::Exercises => "Exercises",
-                SettingsTab::About => "About & Support",
-            },
+            move || active_tab.get().label(),
             &highlight_scale,
         ))
         .child(kpi_row)
@@ -967,7 +904,7 @@ pub(crate) fn build_settings_view(
                         }
                     });
                     if saved {
-                        store_outcome(&save_sink, SettingsOutcome::Saved);
+                        crate::store_outcome(&save_sink, SettingsOutcome::Saved);
                         if quit_on_finish {
                             quit();
                         }
@@ -981,7 +918,7 @@ pub(crate) fn build_settings_view(
             vm.update(|m| {
                 let _ = m.cancel();
             });
-            store_outcome(&cancel_sink, SettingsOutcome::Cancelled);
+            crate::store_outcome(&cancel_sink, SettingsOutcome::Cancelled);
             if quit_on_finish {
                 quit();
             }

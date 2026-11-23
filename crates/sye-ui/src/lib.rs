@@ -51,6 +51,14 @@ impl From<sye_core::ConfigError> for UiError {
     }
 }
 
+pub(crate) fn store_outcome<T>(sink: &std::sync::Mutex<Option<T>>, outcome: T) {
+    if let Ok(mut guard) = sink.lock()
+        && guard.is_none()
+    {
+        *guard = Some(outcome);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::error::Error;

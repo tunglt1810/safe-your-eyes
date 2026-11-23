@@ -267,35 +267,19 @@ impl Config {
 
         let mut errors = Vec::new();
 
-        if self.short_break_interval_secs == 0 {
-            errors.push(ValidationError {
-                field: "short_break_interval_secs".to_owned(),
-                message: "must be at least 1".to_owned(),
-            });
-        }
-        if self.short_break_duration_secs == 0 {
-            errors.push(ValidationError {
-                field: "short_break_duration_secs".to_owned(),
-                message: "must be at least 1".to_owned(),
-            });
-        }
-        if self.long_break_interval_secs == 0 {
-            errors.push(ValidationError {
-                field: "long_break_interval_secs".to_owned(),
-                message: "must be at least 1".to_owned(),
-            });
-        }
-        if self.long_break_duration_secs == 0 {
-            errors.push(ValidationError {
-                field: "long_break_duration_secs".to_owned(),
-                message: "must be at least 1".to_owned(),
-            });
-        }
-        if self.postpone_duration_secs == 0 {
-            errors.push(ValidationError {
-                field: "postpone_duration_secs".to_owned(),
-                message: "must be at least 1".to_owned(),
-            });
+        for (field, value) in [
+            ("short_break_interval_secs", self.short_break_interval_secs),
+            ("short_break_duration_secs", self.short_break_duration_secs),
+            ("long_break_interval_secs", self.long_break_interval_secs),
+            ("long_break_duration_secs", self.long_break_duration_secs),
+            ("postpone_duration_secs", self.postpone_duration_secs),
+        ] {
+            if value == 0 {
+                errors.push(ValidationError {
+                    field: field.to_owned(),
+                    message: "must be at least 1".to_owned(),
+                });
+            }
         }
         if self.short_break_interval_secs > 0
             && self.pre_break_warning_secs >= self.short_break_interval_secs

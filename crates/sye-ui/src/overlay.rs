@@ -81,12 +81,7 @@ impl OverlayViewModel {
 
     /// Remaining seconds rounded up so `15s` displays `00:15` until a full second passes.
     pub fn remaining_secs_ceil(&self) -> u64 {
-        let rem = self.remaining();
-        if rem.subsec_nanos() > 0 {
-            rem.as_secs().saturating_add(1)
-        } else {
-            rem.as_secs()
-        }
+        duration_secs_ceil(self.remaining())
     }
 
     /// Remaining countdown formatted as `MM:SS`.
@@ -118,13 +113,9 @@ impl OverlayViewModel {
 
     /// Remaining shortcut-lock seconds (rounded up).
     pub fn lock_remaining_secs(&self) -> u64 {
-        let rem =
-            Duration::from_secs(self.request.shortcut_disable_secs).saturating_sub(self.elapsed);
-        if rem.subsec_nanos() > 0 {
-            rem.as_secs().saturating_add(1)
-        } else {
-            rem.as_secs()
-        }
+        duration_secs_ceil(
+            Duration::from_secs(self.request.shortcut_disable_secs).saturating_sub(self.elapsed),
+        )
     }
 
     /// Whether the Skip control should be shown.
@@ -213,20 +204,20 @@ impl OverlayViewModel {
     }
 }
 
+fn duration_secs_ceil(rem: Duration) -> u64 {
+    if rem.subsec_nanos() > 0 {
+        rem.as_secs().saturating_add(1)
+    } else {
+        rem.as_secs()
+    }
+}
+
 struct OverlayLaunch {
     request: OverlayRequest,
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
 }
 
 static OVERLAY_LAUNCH: Mutex<Option<OverlayLaunch>> = Mutex::new(None);
-
-fn store_outcome(sink: &Arc<Mutex<Option<OverlayOutcome>>>, outcome: OverlayOutcome) {
-    if let Ok(mut guard) = sink.lock()
-        && guard.is_none()
-    {
-        *guard = Some(outcome);
-    }
-}
 
 /// Builds the Cozy break overlay surface for both desktop runs and headless tests.
 pub(crate) fn build_overlay_view(
@@ -241,7 +232,7 @@ pub(crate) fn build_overlay_view(
         move || {
             let terminal = vm.with(|m| m.outcome().cloned());
             if let Some(outcome) = terminal {
-                store_outcome(&sink, outcome);
+                crate::store_outcome(&sink, outcome);
                 if quit_on_finish {
                     quit();
                 }

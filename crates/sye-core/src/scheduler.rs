@@ -418,11 +418,7 @@ impl<C: Clock> Scheduler<C> {
 
     fn handle_disable(&mut self, duration_secs: Option<u64>) -> Vec<SchedulerAction> {
         let mut actions = Vec::new();
-        if self.state == SchedulerState::PreBreak {
-            actions.push(SchedulerAction::DismissNotification);
-        } else if self.state == SchedulerState::Break {
-            actions.push(SchedulerAction::CloseOverlay);
-        }
+        self.push_active_state_cleanup(&mut actions);
 
         self.smart_pause.reset();
         self.state = SchedulerState::Stopped;
@@ -461,11 +457,7 @@ impl<C: Clock> Scheduler<C> {
             0
         };
 
-        if self.state == SchedulerState::PreBreak {
-            actions.push(SchedulerAction::DismissNotification);
-        } else if self.state == SchedulerState::Break {
-            actions.push(SchedulerAction::CloseOverlay);
-        }
+        self.push_active_state_cleanup(&mut actions);
 
         self.resting_since_mono_ms = now_mono;
         self.resting_since_wall_secs = self.now_wall_secs();
@@ -611,11 +603,7 @@ impl<C: Clock> Scheduler<C> {
 
     fn handle_reload_config(&mut self, new_cfg: Config) -> Vec<SchedulerAction> {
         let mut actions = Vec::new();
-        if self.state == SchedulerState::PreBreak {
-            actions.push(SchedulerAction::DismissNotification);
-        } else if self.state == SchedulerState::Break {
-            actions.push(SchedulerAction::CloseOverlay);
-        }
+        self.push_active_state_cleanup(&mut actions);
 
         self.config = new_cfg;
         self.queue = BreakQueue::from_config(&self.config, self.rng_seed);
@@ -637,11 +625,7 @@ impl<C: Clock> Scheduler<C> {
 
     fn handle_quit(&mut self) -> Vec<SchedulerAction> {
         let mut actions = Vec::new();
-        if self.state == SchedulerState::PreBreak {
-            actions.push(SchedulerAction::DismissNotification);
-        } else if self.state == SchedulerState::Break {
-            actions.push(SchedulerAction::CloseOverlay);
-        }
+        self.push_active_state_cleanup(&mut actions);
         self.smart_pause.reset();
         self.resume_at_ms = None;
         self.disabled_until_unix_secs = None;
@@ -651,6 +635,14 @@ impl<C: Clock> Scheduler<C> {
         }
         actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
         actions
+    }
+
+    fn push_active_state_cleanup(&self, actions: &mut Vec<SchedulerAction>) {
+        match self.state {
+            SchedulerState::PreBreak => actions.push(SchedulerAction::DismissNotification),
+            SchedulerState::Break => actions.push(SchedulerAction::CloseOverlay),
+            _ => {}
+        }
     }
 
     fn enter_break(&mut self, now_ms: u64, spec: &ResolvedBreak) -> Vec<SchedulerAction> {

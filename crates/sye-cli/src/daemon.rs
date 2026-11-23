@@ -5,7 +5,6 @@ use std::process::{Command, ExitCode};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use sye_core::chime::ChimeKind;
 use sye_core::config::{BreakType, Config};
 use sye_core::ipc::{IpcCommand, IpcResponse};
 use sye_core::scheduler::{OverlayOutcome, Scheduler, SchedulerAction, SchedulerEvent};
@@ -17,6 +16,95 @@ use sye_platform::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+struct DaemonHost<'a> {
+    headless: bool,
+    session_file: &'a Path,
+    notifier: OsNotifier,
+    audio: OsAudioPlayer,
+    overlay_launcher: Option<SubprocessOverlayLauncher>,
+    tray: Option<TrayHandle>,
+    headless_break_deadline: Option<Instant>,
+}
+
+impl DaemonHost<'_> {
+    fn execute(&mut self, actions: Vec<SchedulerAction>) {
+        for action in actions {
+            match action {
+                SchedulerAction::NotifyPreBreak {
+                    break_spec,
+                    warning_secs,
+                } => {
+                    if !self.headless {
+                        let _ = self.notifier.show_pre_break(
+                            break_spec.break_type,
+                            &break_spec.name,
+                            warning_secs,
+                        );
+                    }
+                }
+                SchedulerAction::DismissNotification => {
+                    if !self.headless {
+                        let _ = self.notifier.dismiss();
+                    }
+                }
+                SchedulerAction::PlayChime { kind, volume } => {
+                    if !self.headless {
+                        let _ = self.audio.play_chime(kind, volume);
+                    }
+                }
+                SchedulerAction::ShowOverlay(req) => {
+                    if self.headless {
+                        self.headless_break_deadline =
+                            Some(Instant::now() + Duration::from_secs(req.duration_secs));
+                    } else if let Some(launcher) = self.overlay_launcher.as_mut() {
+                        let _ = launcher.launch(&req);
+                    }
+                }
+                SchedulerAction::CloseOverlay => {
+                    self.headless_break_deadline = None;
+                    if let Some(launcher) = self.overlay_launcher.as_mut() {
+                        let _ = launcher.close();
+                    }
+                }
+                SchedulerAction::UpdateTray(snapshot) => {
+                    if let Some(handle) = self.tray.as_mut() {
+                        let _ = handle.update(&snapshot);
+                    }
+                }
+                SchedulerAction::PersistSession(session) => {
+                    let _ = session.save_to_path(self.session_file);
+                }
+            }
+        }
+    }
+
+    fn poll_overlay_outcome(&mut self) -> Option<OverlayOutcome> {
+        if self.headless {
+            if let Some(deadline) = self.headless_break_deadline
+                && Instant::now() >= deadline
+            {
+                self.headless_break_deadline = None;
+                return Some(OverlayOutcome::Completed);
+            }
+            None
+        } else {
+            self.overlay_launcher
+                .as_mut()
+                .and_then(|launcher| launcher.poll_outcome().ok().flatten())
+        }
+    }
+
+    fn close_overlay(&mut self) {
+        if let Some(launcher) = self.overlay_launcher.as_mut() {
+            let _ = launcher.close();
+        }
+    }
+}
+
+fn disable_minutes_to_secs(minutes: Option<u64>) -> Option<u64> {
+    minutes.filter(|&m| m > 0).map(|m| m.saturating_mul(60))
+}
 
 /// Runs the single-instance background daemon until `Quit`.
 pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
@@ -49,7 +137,7 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
         .map_or(0x5EED_CAFE, |d| d.as_nanos() as u64);
 
     let persist_state = config.persist_state;
-    let mut scheduler = Scheduler::new(config.clone(), SystemClock::new(), seed);
+    let mut scheduler = Scheduler::new(config, SystemClock::new(), seed);
     if persist_state
         && let Ok(raw) = std::fs::read_to_string(&paths.session_file)
         && let Ok(session) = SessionState::from_toml_str(&raw)
@@ -57,38 +145,27 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
         scheduler.restore_session(&session);
     }
 
-    let notifier = OsNotifier::new();
-    let audio = OsAudioPlayer::new();
     let idle_provider = SystemIdleProvider::new();
     let dnd_provider = SystemDndProvider::new();
-    let mut overlay_launcher = if headless {
-        None
-    } else {
-        SubprocessOverlayLauncher::current_exe().ok()
-    };
-
     let (tray_tx, tray_rx) = mpsc::channel::<TrayEvent>();
-    let mut tray = if headless {
-        None
-    } else {
-        TrayHandle::try_new(&scheduler.tray_snapshot(), tray_tx).ok()
+    let mut host = DaemonHost {
+        headless,
+        session_file: &paths.session_file,
+        notifier: OsNotifier::new(),
+        audio: OsAudioPlayer::new(),
+        overlay_launcher: (!headless)
+            .then(|| SubprocessOverlayLauncher::current_exe().ok())
+            .flatten(),
+        tray: (!headless)
+            .then(|| TrayHandle::try_new(&scheduler.tray_snapshot(), tray_tx).ok())
+            .flatten(),
+        headless_break_deadline: None,
     };
 
-    let mut headless_break_deadline: Option<Instant> = None;
     let mut last_policy_check = Instant::now();
     let mut running = true;
 
-    let start_actions = scheduler.handle_event(SchedulerEvent::Start);
-    execute_actions(
-        start_actions,
-        headless,
-        &paths.session_file,
-        &notifier,
-        &audio,
-        &mut overlay_launcher,
-        &mut tray,
-        &mut headless_break_deadline,
-    );
+    host.execute(scheduler.handle_event(SchedulerEvent::Start));
 
     while running {
         loop {
@@ -105,13 +182,7 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
                     }
                 }
                 IpcCommand::Disable { minutes } => {
-                    let duration_secs = minutes.and_then(|m| {
-                        if m == 0 {
-                            None
-                        } else {
-                            Some(m.saturating_mul(60))
-                        }
-                    });
+                    let duration_secs = disable_minutes_to_secs(minutes);
                     deferred_actions
                         .extend(scheduler.handle_event(SchedulerEvent::Disable { duration_secs }));
                     IpcResponse::Ok {
@@ -141,16 +212,7 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
             });
 
             if !deferred_actions.is_empty() {
-                execute_actions(
-                    deferred_actions,
-                    headless,
-                    &paths.session_file,
-                    &notifier,
-                    &audio,
-                    &mut overlay_launcher,
-                    &mut tray,
-                    &mut headless_break_deadline,
-                );
+                host.execute(deferred_actions);
             }
 
             if open_settings && !headless {
@@ -175,16 +237,9 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
         while let Ok(event) = tray_rx.try_recv() {
             let actions = match event {
                 TrayEvent::Enable => scheduler.handle_event(SchedulerEvent::Enable),
-                TrayEvent::Disable { minutes } => {
-                    let duration_secs = minutes.and_then(|m| {
-                        if m == 0 {
-                            None
-                        } else {
-                            Some(m.saturating_mul(60))
-                        }
-                    });
-                    scheduler.handle_event(SchedulerEvent::Disable { duration_secs })
-                }
+                TrayEvent::Disable { minutes } => scheduler.handle_event(SchedulerEvent::Disable {
+                    duration_secs: disable_minutes_to_secs(minutes),
+                }),
                 TrayEvent::TakeBreak { kind } => {
                     scheduler.handle_event(SchedulerEvent::TakeBreak { kind })
                 }
@@ -199,164 +254,36 @@ pub(crate) fn run_daemon(paths: AppPaths, headless: bool) -> ExitCode {
                     scheduler.handle_event(SchedulerEvent::Quit)
                 }
             };
-            execute_actions(
-                actions,
-                headless,
-                &paths.session_file,
-                &notifier,
-                &audio,
-                &mut overlay_launcher,
-                &mut tray,
-                &mut headless_break_deadline,
-            );
+            host.execute(actions);
         }
 
         if !running {
             break;
         }
 
-        if headless {
-            if let Some(deadline) = headless_break_deadline
-                && Instant::now() >= deadline
-            {
-                headless_break_deadline = None;
-                let actions = scheduler
-                    .handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Completed));
-                execute_actions(
-                    actions,
-                    headless,
-                    &paths.session_file,
-                    &notifier,
-                    &audio,
-                    &mut overlay_launcher,
-                    &mut tray,
-                    &mut headless_break_deadline,
-                );
-            }
-        } else if let Some(launcher) = overlay_launcher.as_mut()
-            && let Ok(Some(outcome)) = launcher.poll_outcome()
-        {
-            let actions = scheduler.handle_event(SchedulerEvent::OverlayFinished(outcome));
-            execute_actions(
-                actions,
-                headless,
-                &paths.session_file,
-                &notifier,
-                &audio,
-                &mut overlay_launcher,
-                &mut tray,
-                &mut headless_break_deadline,
-            );
+        if let Some(outcome) = host.poll_overlay_outcome() {
+            host.execute(scheduler.handle_event(SchedulerEvent::OverlayFinished(outcome)));
         }
 
         if !headless && last_policy_check.elapsed() >= Duration::from_secs(1) {
             last_policy_check = Instant::now();
             if let Ok(idle) = idle_provider.idle_duration() {
-                let actions = scheduler.handle_event(SchedulerEvent::IdleObserved(idle));
-                execute_actions(
-                    actions,
-                    headless,
-                    &paths.session_file,
-                    &notifier,
-                    &audio,
-                    &mut overlay_launcher,
-                    &mut tray,
-                    &mut headless_break_deadline,
-                );
+                host.execute(scheduler.handle_event(SchedulerEvent::IdleObserved(idle)));
             }
             let _ = &dnd_provider;
         }
 
         let tick_actions = scheduler.tick();
         if !tick_actions.is_empty() {
-            execute_actions(
-                tick_actions,
-                headless,
-                &paths.session_file,
-                &notifier,
-                &audio,
-                &mut overlay_launcher,
-                &mut tray,
-                &mut headless_break_deadline,
-            );
+            host.execute(tick_actions);
         }
 
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    if let Some(launcher) = overlay_launcher.as_mut() {
-        let _ = launcher.close();
-    }
+    host.close_overlay();
 
     ExitCode::SUCCESS
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Action executor borrows host handles directly without allocating a wrapper struct"
-)]
-fn execute_actions(
-    actions: Vec<SchedulerAction>,
-    headless: bool,
-    session_file: &Path,
-    notifier: &OsNotifier,
-    audio: &OsAudioPlayer,
-    overlay_launcher: &mut Option<SubprocessOverlayLauncher>,
-    tray: &mut Option<TrayHandle>,
-    headless_break_deadline: &mut Option<Instant>,
-) {
-    for action in actions {
-        match action {
-            SchedulerAction::NotifyPreBreak {
-                break_spec,
-                warning_secs,
-            } => {
-                if !headless {
-                    let _ = notifier.show_pre_break(
-                        break_spec.break_type,
-                        &break_spec.name,
-                        warning_secs,
-                    );
-                }
-            }
-            SchedulerAction::DismissNotification => {
-                if !headless {
-                    let _ = notifier.dismiss();
-                }
-            }
-            SchedulerAction::PlayChime { kind, volume } => {
-                if !headless {
-                    let _ = play_chime_safely(audio, kind, volume);
-                }
-            }
-            SchedulerAction::ShowOverlay(req) => {
-                if headless {
-                    *headless_break_deadline =
-                        Some(Instant::now() + Duration::from_secs(req.duration_secs));
-                } else if let Some(launcher) = overlay_launcher.as_mut() {
-                    let _ = launcher.launch(&req);
-                }
-            }
-            SchedulerAction::CloseOverlay => {
-                *headless_break_deadline = None;
-                if let Some(launcher) = overlay_launcher.as_mut() {
-                    let _ = launcher.close();
-                }
-            }
-            SchedulerAction::UpdateTray(snapshot) => {
-                if let Some(handle) = tray.as_mut() {
-                    let _ = handle.update(&snapshot);
-                }
-            }
-            SchedulerAction::PersistSession(session) => {
-                let _ = session.save_to_path(session_file);
-            }
-        }
-    }
-}
-
-fn play_chime_safely(audio: &OsAudioPlayer, kind: ChimeKind, volume: u8) -> Result<(), String> {
-    audio.play_chime(kind, volume).map_err(|e| e.to_string())
 }
 
 fn spawn_settings_subprocess(config_file: &Path) {

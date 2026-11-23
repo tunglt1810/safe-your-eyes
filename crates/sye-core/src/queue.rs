@@ -126,20 +126,20 @@ impl BreakQueue {
 
     /// Returns the short-break index to persist so restoring resumes at the staged break.
     pub fn persisted_short_index(&self) -> usize {
-        if self.current.spec.break_type == BreakType::Short && !self.short_breaks.is_empty() {
-            (self.short_index + self.short_breaks.len() - 1) % self.short_breaks.len()
-        } else {
-            self.short_index
-        }
+        persisted_index(
+            self.short_index,
+            self.short_breaks.len(),
+            self.current.spec.break_type == BreakType::Short,
+        )
     }
 
     /// Returns the long-break index to persist so restoring resumes at the staged break.
     pub fn persisted_long_index(&self) -> usize {
-        if self.current.spec.break_type == BreakType::Long && !self.long_breaks.is_empty() {
-            (self.long_index + self.long_breaks.len() - 1) % self.long_breaks.len()
-        } else {
-            self.long_index
-        }
+        persisted_index(
+            self.long_index,
+            self.long_breaks.len(),
+            self.current.spec.break_type == BreakType::Long,
+        )
     }
 
     /// Returns remaining seconds until the next long break (if long breaks exist).
@@ -279,28 +279,47 @@ impl BreakQueue {
     }
 
     fn take_next_short(&mut self) -> ResolvedBreak {
-        let item = self.short_breaks[self.short_index].clone();
-        self.short_index += 1;
-        if self.short_index >= self.short_breaks.len() {
-            self.short_index = 0;
-            if self.random_order && self.short_breaks.len() > 1 {
-                self.rng.shuffle(&mut self.short_breaks);
-            }
-        }
-        item
+        take_next_from(
+            &mut self.short_breaks,
+            &mut self.short_index,
+            self.random_order,
+            &mut self.rng,
+        )
     }
 
     fn take_next_long(&mut self) -> ResolvedBreak {
-        let item = self.long_breaks[self.long_index].clone();
-        self.long_index += 1;
-        if self.long_index >= self.long_breaks.len() {
-            self.long_index = 0;
-            if self.random_order && self.long_breaks.len() > 1 {
-                self.rng.shuffle(&mut self.long_breaks);
-            }
-        }
-        item
+        take_next_from(
+            &mut self.long_breaks,
+            &mut self.long_index,
+            self.random_order,
+            &mut self.rng,
+        )
     }
+}
+
+fn persisted_index(index: usize, len: usize, is_current_tier: bool) -> usize {
+    if is_current_tier && len > 0 {
+        (index + len - 1) % len
+    } else {
+        index
+    }
+}
+
+fn take_next_from(
+    items: &mut [ResolvedBreak],
+    index: &mut usize,
+    random_order: bool,
+    rng: &mut SplitMix64,
+) -> ResolvedBreak {
+    let item = items[*index].clone();
+    *index += 1;
+    if *index >= items.len() {
+        *index = 0;
+        if random_order && items.len() > 1 {
+            rng.shuffle(items);
+        }
+    }
+    item
 }
 
 fn resolve_tier(

@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Safe Your Eyes — Lightweight Cross-Platform Eye-Protection App</title>
-  <meta name="description" content="Safe Your Eyes is a lightweight, open-source Rust desktop app for Windows, macOS, and Linux (x86_64 & ARM64) that reminds you to take regular eye breaks.">
+  <title>Safe Your Eyes</title>
+  <meta name="description" content="A small open-source Rust app for Windows, macOS and Linux that reminds you to rest your eyes.">
   <style>
     :root {
       --bg-body: #FAEBDA;
@@ -274,11 +274,11 @@
       </div>
       <h1>Safe Your Eyes</h1>
       <p class="lead">
-        A lightweight, cross-platform Rust desktop application that reminds you to take short and long eye breaks,
-        with native controls, 0% idle GPU usage, Smart Pause, Do Not Disturb, and no administrator privileges required.
+        I built this because working with AI made me forget to look away from the screen.
+        Every so often it asks you to close your eyes for a bit. Then you get back to work.
       </p>
       <div class="actions">
-        <a class="btn btn-primary" href="https://github.com/tunglt1810/safe-your-eyes/releases">Download Releases</a>
+        <a class="btn btn-primary" href="https://github.com/tunglt1810/safe-your-eyes/releases">Download</a>
         <a class="btn btn-icon" href="https://github.com/tunglt1810/safe-your-eyes" aria-label="GitHub Repository" title="View on GitHub">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M12 0.297C5.37 0.297 0 5.67 0 12.297c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/>
@@ -292,26 +292,26 @@
 
     <section class="grid" aria-label="Highlights">
       <article class="card sage">
-        <h3>Gentle Break Cadence</h3>
-        <p>15-minute / 15-second short breaks and 75-minute / 60-second long breaks (4:1 ratio), pre-break notices, synthesized chimes, and a 2-second key lock.</p>
+        <h3>Breaks that stay out of the way</h3>
+        <p>15 seconds every 15 minutes, 60 seconds every 75 minutes. A notice comes first, and a 2-second key lock stops accidental skips.</p>
       </article>
       <article class="card peach">
-        <h3>Smart Policies</h3>
-        <p>Smart Pause when idle, Do Not Disturb for fullscreen apps or battery power, strict break mode, skip limits, and user-level OS login autostart.</p>
+        <h3>Knows when to wait</h3>
+        <p>It pauses when you are idle and holds off during fullscreen apps or on battery. Strict mode is there if you want it.</p>
       </article>
       <article class="card butter">
-        <h3>0% Idle GPU Footprint</h3>
-        <p>Single binary with no Tokio runtime. The background daemon spawns native UI subprocesses only during breaks or Settings.</p>
+        <h3>0% GPU while idle</h3>
+        <p>One binary, no Tokio. The UI only starts for a break or when you open Settings.</p>
       </article>
       <article class="card mist">
-        <h3>No Admin Required</h3>
-        <p>Runs in user space with per-user config, session, IPC socket, and login startup entries on Windows, macOS, and Linux.</p>
+        <h3>No admin rights</h3>
+        <p>Everything lives in your user account, on every OS.</p>
       </article>
     </section>
 
     <section class="section">
-      <h2>Native Cozy Settings UI</h2>
-      <p>Customize break intervals, policies, exercises, theme (Light, Dark, or System), and login autostart with native OS controls.</p>
+      <h2>Settings</h2>
+      <p>Change the timings and the rules from a native window. It follows your system theme.</p>
       <figure class="media-frame">
         <img src="assets/ui-demo.gif" alt="Safe Your Eyes Cozy Settings UI preview">
       </figure>
@@ -340,10 +340,10 @@
     <section class="section" id="support">
       <div class="support-row">
         <div class="support-copy">
-          <h2>Support Safe Your Eyes</h2>
+          <h2>Support</h2>
           <p>
-            Safe Your Eyes is free and open-source software built in Rust with Native Shell (<code>nsh</code>) and the Cozy Design System.
-            If it helps protect your vision every day, consider supporting development.
+            I make Safe Your Eyes in my free time with Rust, Native Shell (<code>nsh</code>) and my
+            <a href="https://github.com/tunglt1810/cozy">Cozy Design System</a>. If it saves your eyes, a coffee keeps me going.
           </p>
           <a class="btn btn-primary" href="https://buymeacoffee.com/bbeeezzzzz">Buy Me a Coffee</a>
         </div>
@@ -356,7 +356,7 @@
 
     <footer>
       <p>
-        Safe Your Eyes is open-source software under GPL-2.0-only ·
+        Made by <a href="https://github.com/tunglt1810">@tunglt1810</a> · GPL-2.0-only ·
         <a href="https://github.com/tunglt1810/safe-your-eyes">GitHub</a> ·
         <a href="https://buymeacoffee.com/bbeeezzzzz">Buy Me a Coffee</a>
       </p>

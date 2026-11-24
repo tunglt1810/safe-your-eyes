@@ -164,10 +164,6 @@ impl Notifier for OsNotifier {
 
 #[cfg(target_os = "macos")]
 #[expect(
-    clippy::unused_self,
-    reason = "Objective-C UNUserNotificationCenterDelegate selector requires &self"
-)]
-#[expect(
     unsafe_code,
     reason = "UserNotifications.framework dynamic loading and Objective-C messaging"
 )]

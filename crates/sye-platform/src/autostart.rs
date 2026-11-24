@@ -91,25 +91,226 @@ impl AutostartManager {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+const SM_STATUS_NOT_REGISTERED: isize = 0;
+#[cfg(any(target_os = "macos", test))]
+const SM_STATUS_ENABLED: isize = 1;
+#[cfg(any(target_os = "macos", test))]
+const SM_STATUS_REQUIRES_APPROVAL: isize = 2;
+#[cfg(any(target_os = "macos", test))]
+const SM_STATUS_NOT_FOUND: isize = 3;
+#[cfg(any(target_os = "macos", test))]
+const SM_APP_SERVICE_ERROR_DOMAIN: &str = "SMAppServiceErrorDomain";
+#[cfg(any(target_os = "macos", test))]
+const SM_ERR_JOB_NOT_FOUND: isize = 6;
+
+fn has_custom_config_override(custom_config: Option<&Path>) -> bool {
+    let Some(cfg_path) = custom_config else {
+        return false;
+    };
+    !crate::AppPaths::resolve().is_ok_and(|p| p.config_file == cfg_path)
+}
+
+/// Returns `true` when `exe` resides inside a macOS `.app/Contents/MacOS/` bundle directory.
+#[must_use]
+pub fn is_macos_app_bundle_executable(exe: &Path) -> bool {
+    let Some(macos_dir) = exe.parent() else {
+        return false;
+    };
+    if macos_dir.file_name().and_then(|n| n.to_str()) != Some("MacOS") {
+        return false;
+    }
+    let Some(contents_dir) = macos_dir.parent() else {
+        return false;
+    };
+    if contents_dir.file_name().and_then(|n| n.to_str()) != Some("Contents") {
+        return false;
+    }
+    contents_dir
+        .parent()
+        .and_then(Path::extension)
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("app"))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn is_sm_app_service_settled(enabled: bool, status: isize, domain: &str, code: isize) -> bool {
+    if enabled {
+        matches!(status, SM_STATUS_ENABLED | SM_STATUS_REQUIRES_APPROVAL)
+    } else {
+        status == SM_STATUS_NOT_REGISTERED
+            || (status == SM_STATUS_NOT_FOUND
+                && code == SM_ERR_JOB_NOT_FOUND
+                && domain == SM_APP_SERVICE_ERROR_DOMAIN)
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+const fn interpret_sm_app_service_status(status: isize) -> Option<bool> {
+    match status {
+        SM_STATUS_ENABLED => Some(true),
+        SM_STATUS_NOT_REGISTERED => Some(false),
+        // `RequiresApproval` and `NotFound` defer to `config.toml` so startup does not unregister a pending-approval item.
+        _ => None,
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn should_bootout_launchd_job(launchctl_print_stdout: &str) -> bool {
+    !launchctl_print_stdout
+        .lines()
+        .any(|line| line.trim() == "state = running")
+}
+
+/// Queries the OS login-item state when managed externally (such as macOS System Settings).
+#[must_use]
+pub fn query_system_autostart(custom_config: Option<&Path>) -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    if !has_custom_config_override(custom_config)
+        && let Ok(exe) = std::env::current_exe()
+    {
+        if AutostartManager::system_default().is_ok_and(|m| m.is_enabled()) {
+            return None;
+        }
+        let resolved = exe.canonicalize().unwrap_or(exe);
+        if is_macos_app_bundle_executable(&resolved) {
+            return macos_login_item::query_status();
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = custom_config;
+    None
+}
+
 /// Synchronizes the current user's OS autostart entry for the running `safe-your-eyes` binary.
 pub fn sync_system_autostart(
     enabled: bool,
     custom_config: Option<&Path>,
 ) -> Result<(), PlatformError> {
     let mgr = AutostartManager::system_default()?;
+    let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
+    let resolved_exe = exe.canonicalize().unwrap_or(exe);
+    let custom_cfg = has_custom_config_override(custom_config);
+
+    #[cfg(target_os = "macos")]
+    if !custom_cfg && is_macos_app_bundle_executable(&resolved_exe) {
+        return macos_login_item::sync(enabled, mgr.entry_path());
+    }
+
     if !enabled {
         return mgr.disable();
     }
-    let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
-    let mut entry = AutostartEntry::for_safe_your_eyes(exe);
-    if let Some(cfg_path) = custom_config {
-        let is_default = crate::AppPaths::resolve().is_ok_and(|p| p.config_file == cfg_path);
-        if !is_default {
-            entry.args.push("--config".to_owned());
-            entry.args.push(cfg_path.to_string_lossy().into_owned());
-        }
+    let mut entry = AutostartEntry::for_safe_your_eyes(resolved_exe);
+    if custom_cfg && let Some(cfg_path) = custom_config {
+        entry.args.push("--config".to_owned());
+        entry.args.push(cfg_path.to_string_lossy().into_owned());
     }
     mgr.enable(&entry)
+}
+
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "ServiceManagement SMAppService dynamic loading and Objective-C messaging"
+)]
+mod macos_login_item {
+    use std::path::Path;
+    use std::process::Command;
+    use std::sync::OnceLock;
+
+    use objc2::msg_send;
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::NSError;
+    use sye_core::PlatformError;
+
+    pub(super) fn sync(enabled: bool, legacy_plist: &Path) -> Result<(), PlatformError> {
+        let res = autoreleasepool(|_| {
+            let service = main_app_service()?;
+            // SAFETY: `registerAndReturnError:` and `unregisterAndReturnError:` are documented
+            // `SMAppService` selectors (macOS 13+) returning `BOOL` and populating `NSError**`.
+            let call_res: Result<(), Retained<NSError>> = unsafe {
+                if enabled {
+                    msg_send![&*service, registerAndReturnError: _]
+                } else {
+                    msg_send![&*service, unregisterAndReturnError: _]
+                }
+            };
+            // SAFETY: `status` is a documented `SMAppService` property returning `SMAppServiceStatus`.
+            let status: isize = unsafe { msg_send![&*service, status] };
+            let Err(error) = call_res else {
+                return Ok(());
+            };
+            let domain = error.domain().to_string();
+            let code = error.code();
+            if super::is_sm_app_service_settled(enabled, status, &domain, code) {
+                return Ok(());
+            }
+            let message = error.localizedDescription().to_string();
+            Err(PlatformError::Io(format!("{message} ({domain} {code})")))
+        });
+        if res.is_ok() || !enabled {
+            cleanup_legacy_launch_agent(legacy_plist);
+        }
+        res
+    }
+
+    pub(super) fn query_status() -> Option<bool> {
+        autoreleasepool(|_| {
+            let service = main_app_service().ok()?;
+            // SAFETY: `status` is a documented `SMAppService` property returning `SMAppServiceStatus`.
+            let status: isize = unsafe { msg_send![&*service, status] };
+            super::interpret_sm_app_service_status(status)
+        })
+    }
+
+    fn cleanup_legacy_launch_agent(legacy_plist: &Path) {
+        if !legacy_plist.exists() {
+            return;
+        }
+        // Delete the plist before `launchctl` runs so `launchd` cannot kill us first.
+        let _ = std::fs::remove_file(legacy_plist);
+        // SAFETY: `geteuid` is a thread-safe POSIX syscall with no preconditions.
+        let uid = unsafe { libc::geteuid() };
+        let service_target = format!("gui/{uid}/io.github.safeyoureyes.SafeYourEyes");
+        if let Ok(output) = Command::new("/bin/launchctl")
+            .arg("print")
+            .arg(&service_target)
+            .output()
+            && output.status.success()
+            && super::should_bootout_launchd_job(&String::from_utf8_lossy(&output.stdout))
+        {
+            let _ = Command::new("/bin/launchctl")
+                .arg("bootout")
+                .arg(&service_target)
+                .output();
+        }
+    }
+
+    fn main_app_service() -> Result<Retained<AnyObject>, PlatformError> {
+        if !load_framework() {
+            return Err(PlatformError::Unavailable(
+                "ServiceManagement.framework unavailable".to_owned(),
+            ));
+        }
+        let class = AnyClass::get(c"SMAppService").ok_or_else(|| {
+            PlatformError::Unavailable("SMAppService class unavailable".to_owned())
+        })?;
+        // SAFETY: `+[SMAppService mainAppService]` is a documented class property on macOS 13+.
+        let service: Option<Retained<AnyObject>> = unsafe { msg_send![class, mainAppService] };
+        service.ok_or_else(|| {
+            PlatformError::Unavailable("SMAppService.mainAppService returned nil".to_owned())
+        })
+    }
+
+    fn load_framework() -> bool {
+        static LOADED: OnceLock<bool> = OnceLock::new();
+        *LOADED.get_or_init(|| {
+            let path = c"/System/Library/Frameworks/ServiceManagement.framework/ServiceManagement";
+            // SAFETY: `path` is a valid NUL-terminated system framework path; handle stays loaded.
+            !unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) }.is_null()
+        })
+    }
 }
 
 /// Resolves the standard per-user autostart file path for the current OS.
@@ -192,7 +393,7 @@ pub fn render_linux_desktop_entry(entry: &AutostartEntry) -> String {
 pub fn render_macos_launch_agent_plist(entry: &AutostartEntry) -> String {
     let exe = entry.executable.to_string_lossy();
     let mut out =
-        String::with_capacity(384 + entry.app_id.len() + exe.len() + entry.args.len() * 32);
+        String::with_capacity(512 + entry.app_id.len() * 2 + exe.len() + entry.args.len() * 32);
     out.push_str(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -203,8 +404,15 @@ pub fn render_macos_launch_agent_plist(entry: &AutostartEntry) -> String {
              <string>",
     );
     push_escaped_xml(&mut out, &entry.app_id);
+    // Associates fallback LaunchAgent jobs with the .app bundle so macOS System Settings shows the app icon.
     out.push_str(
         "</string>\n\
+             <key>AssociatedBundleIdentifiers</key>\n\
+             <array>\n        <string>",
+    );
+    push_escaped_xml(&mut out, &entry.app_id);
+    out.push_str(
+        "</string>\n    </array>\n\
              <key>ProgramArguments</key>\n\
              <array>\n        <string>",
     );
@@ -352,10 +560,77 @@ mod tests {
 
         let plist = render_macos_launch_agent_plist(&entry);
         assert!(plist.contains("<key>Label</key>"));
+        assert!(plist.contains("<key>AssociatedBundleIdentifiers</key>"));
         assert!(plist.contains("<string>io.github.safeyoureyes.SafeYourEyes</string>"));
         assert!(plist.contains("<string>/Applications/Eye &amp; Care/sye</string>"));
         assert!(plist.contains("<string>--flag=&lt;1&gt;</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
+    }
+
+    #[test]
+    fn macos_app_bundle_executable_detection_and_sm_status_mapping() {
+        assert!(is_macos_app_bundle_executable(Path::new(
+            "/Applications/Safe Your Eyes.app/Contents/MacOS/safe-your-eyes"
+        )));
+        assert!(!is_macos_app_bundle_executable(Path::new(
+            "/usr/local/bin/safe-your-eyes"
+        )));
+        assert!(!is_macos_app_bundle_executable(Path::new(
+            "/Users/me/target/release/safe-your-eyes"
+        )));
+
+        assert_eq!(
+            interpret_sm_app_service_status(SM_STATUS_ENABLED),
+            Some(true)
+        );
+        assert_eq!(
+            interpret_sm_app_service_status(SM_STATUS_NOT_REGISTERED),
+            Some(false)
+        );
+        assert_eq!(
+            interpret_sm_app_service_status(SM_STATUS_REQUIRES_APPROVAL),
+            None
+        );
+        assert_eq!(interpret_sm_app_service_status(SM_STATUS_NOT_FOUND), None);
+
+        assert!(is_sm_app_service_settled(
+            true,
+            SM_STATUS_ENABLED,
+            SM_APP_SERVICE_ERROR_DOMAIN,
+            12
+        ));
+        assert!(is_sm_app_service_settled(
+            true,
+            SM_STATUS_REQUIRES_APPROVAL,
+            SM_APP_SERVICE_ERROR_DOMAIN,
+            1
+        ));
+        assert!(is_sm_app_service_settled(
+            false,
+            SM_STATUS_NOT_FOUND,
+            SM_APP_SERVICE_ERROR_DOMAIN,
+            SM_ERR_JOB_NOT_FOUND
+        ));
+        assert!(!is_sm_app_service_settled(
+            false,
+            SM_STATUS_NOT_FOUND,
+            SM_APP_SERVICE_ERROR_DOMAIN,
+            2
+        ));
+    }
+
+    #[test]
+    fn should_bootout_launchd_job_skips_live_running_daemon() {
+        let running = "gui/501/io.github.safeyoureyes.SafeYourEyes = {\n\tactive count = 1\n\tstate = running\n\tpid = 4242\n}\n";
+        assert!(!should_bootout_launchd_job(running));
+
+        let waiting = "gui/501/io.github.safeyoureyes.SafeYourEyes = {\n\tactive count = 0\n\tstate = waiting\n\tlast exit code = 0\n}\n";
+        assert!(should_bootout_launchd_job(waiting));
+
+        let not_running =
+            "gui/501/io.github.safeyoureyes.SafeYourEyes = {\n\tstate = not running\n}\n";
+        assert!(should_bootout_launchd_job(not_running));
+        assert!(should_bootout_launchd_job(""));
     }
 
     #[test]

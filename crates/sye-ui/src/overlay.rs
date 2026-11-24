@@ -4,7 +4,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nsh_base::button;
-use nsh_core::element::desktop::quit;
+use nsh_core::desktop::{
+    MainWindowOptions, WindowAttributes, WindowFrameStyle, WindowKind, WindowLevel, WindowPosition,
+    Workspaces,
+};
+use nsh_core::element::desktop::{current_window, displays, quit};
 use nsh_core::prelude::*;
 use sye_core::config::BreakType;
 use sye_core::scheduler::{OverlayOutcome, OverlayRequest};
@@ -241,6 +245,66 @@ struct OverlayLaunch {
 
 static OVERLAY_LAUNCH: Mutex<Option<OverlayLaunch>> = Mutex::new(None);
 
+fn overlay_main_window_options_for_primary(
+    primary: Option<crate::MonitorRect>,
+) -> MainWindowOptions {
+    let mut attrs = WindowAttributes::default();
+    attrs.frame = Some(WindowFrameStyle::None);
+    attrs.level = Some(WindowLevel::AboveDock);
+    attrs.workspaces = Some(Workspaces::All);
+    attrs.resizable = Some(false);
+    attrs.movable = Some(false);
+    attrs.minimizable = Some(false);
+    attrs.maximizable = Some(false);
+    attrs.closable = Some(false);
+    attrs.focusable = Some(true);
+    attrs.activate = Some(true);
+    attrs.close_on_press = Some(false);
+    attrs.taskbar = Some(false);
+    attrs.shadow = Some(false);
+
+    let (width, height) = primary.map_or((1920.0, 1080.0), |rect| (rect.width, rect.height));
+
+    let mut main_window = MainWindowOptions::default();
+    main_window.default_size = Some(size(px(width), px(height)));
+    if let Some(rect) = primary {
+        main_window.default_position = Some(WindowPosition::At(point(px(rect.x), px(rect.y))));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Avoid `WindowMode::FullScreen` on macOS: AppKit's `toggleFullScreen:` conflicts with
+        // `Workspaces::All` and triggers a slow Space slide animation instead of instant cover.
+        main_window.default_mode = Some(nsh_core::desktop::WindowMode::FullScreen);
+    }
+    main_window.attributes = attrs;
+    main_window
+}
+
+fn overlay_main_window_options() -> MainWindowOptions {
+    let plan = crate::monitors::plan_overlay_viewports(&crate::monitors::detect_monitors());
+    overlay_main_window_options_for_primary(plan.primary)
+}
+
+fn secondary_window_attributes() -> WindowAttributes {
+    let mut attrs = WindowAttributes::default();
+    attrs.frame = Some(WindowFrameStyle::None);
+    attrs.level = Some(WindowLevel::AboveDock);
+    attrs.workspaces = Some(Workspaces::All);
+    attrs.resizable = Some(false);
+    attrs.movable = Some(false);
+    attrs.minimizable = Some(false);
+    attrs.maximizable = Some(false);
+    attrs.closable = Some(false);
+    attrs.close_on_escape = Some(false);
+    attrs.close_on_blur = Some(false);
+    attrs.close_on_press = Some(false);
+    attrs.taskbar = Some(false);
+    attrs.shadow = Some(false);
+    attrs.activate = Some(false);
+    attrs.focusable = Some(false);
+    attrs
+}
+
 /// Builds the Cozy break overlay surface for both desktop runs and headless tests.
 pub(crate) fn build_overlay_view(
     request: OverlayRequest,
@@ -289,6 +353,7 @@ pub(crate) fn build_overlay_view(
         BreakType::Long => "LONG BREAK",
     });
     let exercise_title = vm.with(|m| m.request().title.clone());
+    let secondary_title = exercise_title.clone();
     let status_note = vm.with(|m| m.status_note().map(str::to_owned));
     let show_skip = vm.with(OverlayViewModel::show_skip_button);
     let show_postpone = vm.with(OverlayViewModel::show_postpone_button);
@@ -452,14 +517,136 @@ pub(crate) fn build_overlay_view(
         )
         .child(actions_row);
 
-    view()
+    let mut root = view()
         .flex_1()
         .bg(colors::OVERLAY_CANVAS)
         .items_center()
         .justify_center()
         .p_6()
         .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
-        .child(card)
+        .child(card);
+
+    if quit_on_finish {
+        let main_win = current_window();
+        let effect_win = main_win.clone();
+        effect(move || {
+            let disp_list = displays();
+            if let Some(primary) = disp_list
+                .iter()
+                .find(|d| d.primary)
+                .or_else(|| disp_list.first())
+            {
+                #[cfg(target_os = "macos")]
+                if primary.bounds.size.width.is_finite()
+                    && primary.bounds.size.width.0 > 0.0
+                    && primary.bounds.size.height.is_finite()
+                    && primary.bounds.size.height.0 > 0.0
+                {
+                    effect_win.set_bounds(nsh_core::desktop::WindowFrame {
+                        x: Some(primary.bounds.origin.x),
+                        y: Some(primary.bounds.origin.y),
+                        width: Some(primary.bounds.size.width),
+                        height: Some(primary.bounds.size.height),
+                        animated: Some(false),
+                    });
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let _ = primary;
+                    effect_win.set_mode(nsh_core::desktop::WindowMode::FullScreen);
+                }
+            }
+        });
+        main_win.focus();
+        let focus_win = main_win;
+        drop(set_timeout(Duration::from_millis(50), move || {
+            focus_win.focus();
+        }));
+
+        let secondary_displays = computed(|| {
+            let disp_list = displays();
+            if disp_list.len() <= 1 {
+                return Vec::new();
+            }
+            let primary_idx = disp_list.iter().position(|d| d.primary).unwrap_or(0);
+            disp_list
+                .into_iter()
+                .enumerate()
+                .filter_map(|(idx, d)| (idx != primary_idx).then_some(d))
+                .collect::<Vec<_>>()
+        });
+
+        root = root.child(each(
+            secondary_displays,
+            |d| d.id.0,
+            move |d, _| {
+                let (disp_id, disp_bounds) = d.with(|disp| (disp.id, disp.bounds));
+                let sec_title = secondary_title.clone();
+                let sec_win_el = nsh_core::element::desktop::window()
+                    .id(format!("overlay-secondary-{}", disp_id.0))
+                    .kind(WindowKind::Popup)
+                    .attributes(secondary_window_attributes())
+                    .display(disp_id)
+                    .default_position(WindowPosition::At(disp_bounds.origin))
+                    .default_size(disp_bounds.size);
+                #[cfg(not(target_os = "macos"))]
+                let sec_win_el = sec_win_el.default_mode(nsh_core::desktop::WindowMode::FullScreen);
+                sec_win_el.content(move || {
+                    #[cfg(target_os = "macos")]
+                    {
+                        // AppKit constrains initial placement below the menu bar before
+                        // `NSStatusWindowLevel` applies, and drops requests sent before mount.
+                        let sec_win = current_window();
+                        let apply_bounds = move |b: Bounds<Points>| {
+                            if b.size.width.is_finite()
+                                && b.size.width.0 > 0.0
+                                && b.size.height.is_finite()
+                                && b.size.height.0 > 0.0
+                            {
+                                sec_win.set_bounds(nsh_core::desktop::WindowFrame {
+                                    x: Some(b.origin.x),
+                                    y: Some(b.origin.y),
+                                    width: Some(b.size.width),
+                                    height: Some(b.size.height),
+                                    animated: Some(false),
+                                });
+                            }
+                        };
+                        let apply_reactive = apply_bounds.clone();
+                        effect(move || {
+                            apply_reactive(d.with(|disp| disp.bounds));
+                        });
+                        drop(set_timeout(Duration::from_millis(16), move || {
+                            apply_bounds(d.with(|disp| disp.bounds));
+                        }));
+                    }
+                    view()
+                        .flex_1()
+                        .bg(colors::OVERLAY_CANVAS)
+                        .items_center()
+                        .justify_center()
+                        .p_6()
+                        .gap_4()
+                        .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
+                        .child(app_icon(48.0))
+                        .child(
+                            text(sec_title.clone())
+                                .text_2xl()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(colors::OVERLAY_TEXT),
+                        )
+                        .child(
+                            text(move || vm.with(OverlayViewModel::formatted_remaining))
+                                .text_4xl()
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(colors::ACCENT),
+                        )
+                })
+            },
+        ));
+    }
+
+    root
 }
 
 #[component]
@@ -495,14 +682,28 @@ pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
+        let main_window = overlay_main_window_options();
+        let initial_size = main_window.default_size.map_or((1920, 1080), |sz| {
+            (
+                (sz.width.0.round() as i32).max(1),
+                (sz.height.0.round() as i32).max(1),
+            )
+        });
+        let root = platform::Root::of::<BreakOverlayRoot>()
+            .appearance(Appearance::Dark)
+            .main_window(main_window);
         let _ = platform::run_app(
-            platform::AppSource::Rust(platform::Root::of::<BreakOverlayRoot>()),
+            platform::AppSource::Rust(root),
             platform::AppOptions {
                 title: "Safe Your Eyes — Break".to_owned(),
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.overlay".to_owned(),
-                size: (960, 640),
+                size: initial_size,
                 appearance: Appearance::Dark,
+                #[cfg(target_os = "macos")]
+                activation_policy: platform::ActivationPolicy::Accessory,
+                #[cfg(target_os = "macos")]
+                keep_size: true,
                 ..Default::default()
             },
         );
@@ -733,5 +934,60 @@ mod tests {
         assert!(app.shows("Postpone (Space)"));
         app.press("Skip (Esc)")?;
         Ok(())
+    }
+
+    #[test]
+    fn overlay_window_options_configure_borderless_above_dock_all_workspaces() {
+        let opts = overlay_main_window_options();
+        assert_eq!(opts.attributes.frame, Some(WindowFrameStyle::None));
+        assert_eq!(opts.attributes.level, Some(WindowLevel::AboveDock));
+        assert_eq!(opts.attributes.workspaces, Some(Workspaces::All));
+        assert_eq!(opts.attributes.resizable, Some(false));
+        assert_eq!(opts.attributes.movable, Some(false));
+        assert_eq!(opts.attributes.minimizable, Some(false));
+        assert_eq!(opts.attributes.maximizable, Some(false));
+        assert_eq!(opts.attributes.closable, Some(false));
+        assert_eq!(opts.attributes.focusable, Some(true));
+        assert_eq!(opts.attributes.activate, Some(true));
+        assert_eq!(opts.attributes.close_on_press, Some(false));
+        assert_eq!(opts.attributes.taskbar, Some(false));
+        assert_eq!(opts.attributes.shadow, Some(false));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(
+            opts.default_mode,
+            Some(nsh_core::desktop::WindowMode::FullScreen)
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(opts.default_mode, None);
+
+        let fallback = overlay_main_window_options_for_primary(None);
+        assert_eq!(fallback.default_size, Some(size(px(1920.0), px(1080.0))));
+        assert_eq!(fallback.default_position, None);
+
+        let custom = overlay_main_window_options_for_primary(Some(crate::MonitorRect {
+            x: 1920.0,
+            y: -180.0,
+            width: 2560.0,
+            height: 1440.0,
+            is_primary: true,
+        }));
+        assert_eq!(custom.default_size, Some(size(px(2560.0), px(1440.0))));
+        assert_eq!(
+            custom.default_position,
+            Some(WindowPosition::At(point(px(1920.0), px(-180.0))))
+        );
+
+        let sec = secondary_window_attributes();
+        assert_eq!(sec.frame, Some(WindowFrameStyle::None));
+        assert_eq!(sec.level, Some(WindowLevel::AboveDock));
+        assert_eq!(sec.workspaces, Some(Workspaces::All));
+        assert_eq!(sec.closable, Some(false));
+        assert_eq!(sec.close_on_escape, Some(false));
+        assert_eq!(sec.close_on_blur, Some(false));
+        assert_eq!(sec.close_on_press, Some(false));
+        assert_eq!(sec.taskbar, Some(false));
+        assert_eq!(sec.shadow, Some(false));
+        assert_eq!(sec.activate, Some(false));
+        assert_eq!(sec.focusable, Some(false));
     }
 }

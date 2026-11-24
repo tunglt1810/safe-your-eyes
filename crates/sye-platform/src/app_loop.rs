@@ -77,6 +77,39 @@ impl PlatformEventLoop {
             inner.finish_termination();
         }
     }
+
+    /// Returns `true` when macOS launched the daemon automatically as a user Login Item.
+    #[must_use]
+    pub fn was_launched_as_login_item(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner
+                .as_ref()
+                .is_some_and(macos_impl::MacOsEventLoop::was_launched_as_login_item)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    /// Yields foreground activation rights before spawning a GUI child process.
+    pub fn prepare_child_activation(&self) {
+        #[cfg(target_os = "macos")]
+        if let Some(ref inner) = self.inner {
+            inner.prepare_child_activation();
+        }
+    }
+
+    /// Brings an already-running GUI child process (`pid`) to the foreground.
+    pub fn activate_child(&self, pid: u32) {
+        #[cfg(target_os = "macos")]
+        if let Some(ref inner) = self.inner {
+            inner.activate_child(pid);
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = pid;
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -88,23 +121,31 @@ mod macos_impl {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::ProtocolObject;
     use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSApplicationDelegate,
-        NSApplicationTerminateReply, NSEventMask,
+        NSApplication, NSApplicationActivationOptions, NSApplicationActivationPolicy,
+        NSApplicationDelegate, NSApplicationTerminateReply, NSEventMask, NSRunningApplication,
     };
-    use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol};
+    use objc2_foundation::{
+        NSAppleEventDescriptor, NSAppleEventManager, NSDate, NSDefaultRunLoopMode, NSNotification,
+        NSObject, NSObjectProtocol, ns_string,
+    };
 
     use super::MAX_EVENTS_PER_PUMP;
     use crate::TrayEvent;
 
+    const KEY_AE_PROP_DATA: u32 = u32::from_be_bytes(*b"prdt");
+    const KEY_AE_LAUNCHED_AS_LOGIN_ITEM: u32 = u32::from_be_bytes(*b"lgit");
+
     struct DelegateIvars {
         event_tx: Sender<TrayEvent>,
         termination_requested: Arc<AtomicBool>,
+        launched_as_login_item: Arc<AtomicBool>,
+        did_finish_launching: Arc<AtomicBool>,
     }
 
     define_class!(
@@ -117,13 +158,33 @@ mod macos_impl {
         unsafe impl NSObjectProtocol for DaemonAppDelegate {}
 
         unsafe impl NSApplicationDelegate for DaemonAppDelegate {
+            #[unsafe(method(applicationDidFinishLaunching:))]
+            fn did_finish_launching(&self, _notification: &NSNotification) {
+                if let Some(event) =
+                    NSAppleEventManager::sharedAppleEventManager().currentAppleEvent()
+                {
+                    // SAFETY: `paramDescriptorForKeyword:` is a documented `NSAppleEventDescriptor`
+                    // selector taking an `AEKeyword` (`u32`).
+                    let prop: Option<Retained<NSAppleEventDescriptor>> =
+                        unsafe { msg_send![&*event, paramDescriptorForKeyword: KEY_AE_PROP_DATA] };
+                    if prop.is_some_and(|d| d.enumCodeValue() == KEY_AE_LAUNCHED_AS_LOGIN_ITEM) {
+                        self.ivars()
+                            .launched_as_login_item
+                            .store(true, Ordering::Release);
+                    }
+                }
+                self.ivars()
+                    .did_finish_launching
+                    .store(true, Ordering::Release);
+            }
+
             #[unsafe(method(applicationShouldHandleReopen:hasVisibleWindows:))]
             fn should_handle_reopen(
                 &self,
                 _sender: &NSApplication,
                 _has_visible_windows: bool,
             ) -> bool {
-                let _ = self.ivars().event_tx.send(TrayEvent::OpenSettings);
+                let _ = self.ivars().event_tx.send(TrayEvent::Reopen);
                 false
             }
 
@@ -152,13 +213,17 @@ mod macos_impl {
         app: Retained<NSApplication>,
         _delegate: Retained<DaemonAppDelegate>,
         termination_requested: Arc<AtomicBool>,
+        launched_as_login_item: Arc<AtomicBool>,
+        did_finish_launching: Arc<AtomicBool>,
     }
 
     impl MacOsEventLoop {
         pub(super) fn try_new(event_tx: Sender<TrayEvent>) -> Option<Self> {
             let mtm = MainThreadMarker::new()?;
             let termination_requested = Arc::new(AtomicBool::new(false));
-            autoreleasepool(|_| {
+            let launched_as_login_item = Arc::new(AtomicBool::new(false));
+            let did_finish_launching = Arc::new(AtomicBool::new(false));
+            let instance = autoreleasepool(|_| {
                 let app = NSApplication::sharedApplication(mtm);
                 app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
                 let delegate = DaemonAppDelegate::new(
@@ -166,16 +231,30 @@ mod macos_impl {
                     DelegateIvars {
                         event_tx,
                         termination_requested: Arc::clone(&termination_requested),
+                        launched_as_login_item: Arc::clone(&launched_as_login_item),
+                        did_finish_launching: Arc::clone(&did_finish_launching),
                     },
                 );
                 app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
                 app.finishLaunching();
-                Some(Self {
+                Self {
                     app,
                     _delegate: delegate,
                     termination_requested,
-                })
-            })
+                    launched_as_login_item,
+                    did_finish_launching,
+                }
+            });
+            // Pump until AppKit dispatches the initial `'aevt'/'oapp'` AppleEvent and fires `applicationDidFinishLaunching:`.
+            let start = Instant::now();
+            while !instance.did_finish_launching.load(Ordering::Acquire) {
+                let remaining = Duration::from_millis(200).saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    break;
+                }
+                instance.pump(remaining.min(Duration::from_millis(10)));
+            }
+            Some(instance)
         }
 
         pub(super) fn pump(&self, timeout: Duration) {
@@ -202,6 +281,40 @@ mod macos_impl {
                         self.app.sendEvent(&queued);
                     }
                     self.app.updateWindows();
+                }
+            });
+        }
+
+        pub(super) fn was_launched_as_login_item(&self) -> bool {
+            self.launched_as_login_item.load(Ordering::Acquire)
+        }
+
+        pub(super) fn prepare_child_activation(&self) {
+            autoreleasepool(|_| {
+                self.app
+                    .yieldActivationToApplicationWithBundleIdentifier(ns_string!(
+                        "io.github.safeyoureyes.SafeYourEyes"
+                    ));
+            });
+        }
+
+        pub(super) fn activate_child(&self, pid: u32) {
+            let Ok(pid) = i32::try_from(pid) else {
+                return;
+            };
+            autoreleasepool(|_| {
+                if let Some(target) =
+                    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+                {
+                    self.app.yieldActivationToApplication(&target);
+                    let _ = target.unhide();
+                    #[expect(
+                        deprecated,
+                        reason = "fallback flag alongside cooperative yield + ActivateAllWindows"
+                    )]
+                    let opts = NSApplicationActivationOptions::ActivateAllWindows
+                        | NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+                    let _ = target.activateWithOptions(opts);
                 }
             });
         }

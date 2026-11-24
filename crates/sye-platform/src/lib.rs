@@ -26,8 +26,9 @@ mod tray;
 pub use app_loop::PlatformEventLoop;
 pub use audio::OsAudioPlayer;
 pub use autostart::{
-    AutostartEntry, AutostartManager, default_autostart_path, render_linux_desktop_entry,
-    render_macos_launch_agent_plist, render_windows_startup_cmd, sync_system_autostart,
+    AutostartEntry, AutostartManager, default_autostart_path, is_macos_app_bundle_executable,
+    query_system_autostart, render_linux_desktop_entry, render_macos_launch_agent_plist,
+    render_windows_startup_cmd, sync_system_autostart,
 };
 pub use clock::SystemClock;
 pub use dnd::SystemDndProvider;

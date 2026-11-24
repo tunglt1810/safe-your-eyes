@@ -80,9 +80,7 @@ impl DaemonHost<'_> {
                     }
                 }
                 SchedulerAction::UpdateTray(snapshot) => {
-                    if let Some(handle) = self.tray.as_mut() {
-                        let _ = handle.update(&snapshot);
-                    }
+                    self.refresh_tray(&snapshot);
                 }
                 SchedulerAction::PersistSession(session) => {
                     if let Err(err) = session.save_to_path(self.session_file) {
@@ -90,6 +88,12 @@ impl DaemonHost<'_> {
                     }
                 }
             }
+        }
+    }
+
+    fn refresh_tray(&mut self, snapshot: &sye_core::scheduler::TraySnapshot) {
+        if let Some(handle) = self.tray.as_mut() {
+            let _ = handle.update(snapshot);
         }
     }
 
@@ -114,13 +118,19 @@ impl DaemonHost<'_> {
         }
     }
 
-    fn open_settings(&mut self) {
+    fn open_settings(&mut self, event_loop: Option<&PlatformEventLoop>) {
         if self.headless {
             return;
         }
         self.reap_settings_child();
-        if self.settings_child.is_some() {
+        if let Some(ref child) = self.settings_child {
+            if let Some(el) = event_loop {
+                el.activate_child(child.id());
+            }
             return;
+        }
+        if let Some(el) = event_loop {
+            el.prepare_child_activation();
         }
         match spawn_settings_subprocess(self.config_file) {
             Ok(child) => self.settings_child = Some(child),
@@ -192,15 +202,19 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         return ExitCode::FAILURE;
     }
 
-    let (config, load_err) = Config::load_or_default(&paths.config_file);
+    let (mut config, load_err) = Config::load_or_default(&paths.config_file);
     if let Some(err) = load_err {
         eprintln!("Warning: falling back to default config ({err})");
     }
-    if !headless
-        && let Err(err) =
+    if !headless {
+        if let Some(sys_autostart) = sye_platform::query_system_autostart(Some(&paths.config_file))
+        {
+            config.autostart = sys_autostart;
+        } else if let Err(err) =
             sye_platform::sync_system_autostart(config.autostart, Some(&paths.config_file))
-    {
-        eprintln!("Warning: failed to synchronize autostart entry: {err}");
+        {
+            eprintln!("Warning: failed to synchronize autostart entry: {err}");
+        }
     }
 
     let persist_state = config.persist_state;
@@ -248,13 +262,16 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let mut last_policy_check = Instant::now();
 
     host.execute(scheduler.handle_event(SchedulerEvent::Start));
-    if !headless && !background {
-        host.open_settings();
+    let launched_at_login = app_loop
+        .as_ref()
+        .is_some_and(PlatformEventLoop::was_launched_as_login_item);
+    if should_open_settings_on_startup(headless, background, launched_at_login) {
+        host.open_settings(app_loop.as_ref());
     }
 
     loop {
-        if !drain_ipc_requests(&server, &mut scheduler, &mut host)
-            || !drain_tray_events(&tray_rx, &mut scheduler, &mut host)
+        if !drain_ipc_requests(&server, &mut scheduler, &mut host, app_loop.as_ref())
+            || !drain_tray_events(&tray_rx, &mut scheduler, &mut host, app_loop.as_ref())
         {
             break;
         }
@@ -263,6 +280,14 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             && let Ok(updated_cfg) = Config::load_from_path(&paths.config_file)
             && updated_cfg != *scheduler.config()
         {
+            if !headless
+                && let Err(err) = sye_platform::sync_system_autostart(
+                    updated_cfg.autostart,
+                    Some(&paths.config_file),
+                )
+            {
+                eprintln!("Warning: failed to synchronize autostart entry: {err}");
+            }
             host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
         }
 
@@ -298,6 +323,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         if !tick_actions.is_empty() {
             host.execute(tick_actions);
         }
+        host.refresh_tray(&scheduler.tray_snapshot());
 
         if let Some(ref event_loop) = app_loop {
             event_loop.pump_events(POLL_INTERVAL);
@@ -322,6 +348,7 @@ fn drain_ipc_requests(
     server: &IpcServer,
     scheduler: &mut Scheduler<SystemClock>,
     host: &mut DaemonHost<'_>,
+    event_loop: Option<&PlatformEventLoop>,
 ) -> bool {
     loop {
         let mut should_quit = false;
@@ -368,8 +395,10 @@ fn drain_ipc_requests(
         if !deferred_actions.is_empty() {
             host.execute(deferred_actions);
         }
-        if open_settings {
-            host.open_settings();
+        if open_settings
+            && can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked)
+        {
+            host.open_settings(event_loop);
         }
         if should_quit {
             return false;
@@ -391,6 +420,7 @@ fn drain_tray_events(
     tray_rx: &mpsc::Receiver<TrayEvent>,
     scheduler: &mut Scheduler<SystemClock>,
     host: &mut DaemonHost<'_>,
+    event_loop: Option<&PlatformEventLoop>,
 ) -> bool {
     let mut keep_running = true;
     while let Ok(event) = tray_rx.try_recv() {
@@ -402,8 +432,10 @@ fn drain_tray_events(
             TrayEvent::TakeBreak { kind } => {
                 scheduler.handle_event(SchedulerEvent::TakeBreak { kind })
             }
-            TrayEvent::OpenSettings => {
-                host.open_settings();
+            TrayEvent::OpenSettings | TrayEvent::Reopen => {
+                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                    host.open_settings(event_loop);
+                }
                 Vec::new()
             }
             TrayEvent::Quit => {
@@ -414,6 +446,18 @@ fn drain_tray_events(
         host.execute(actions);
     }
     keep_running
+}
+
+const fn should_open_settings_on_startup(
+    headless: bool,
+    background: bool,
+    launched_at_login: bool,
+) -> bool {
+    !headless && !background && !launched_at_login
+}
+
+const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
+    !menu_locked && !matches!(state, SchedulerState::PreBreak | SchedulerState::Break)
 }
 
 fn spawn_settings_subprocess(config_file: &Path) -> std::io::Result<Child> {
@@ -463,4 +507,27 @@ pub(crate) fn format_human_status(snapshot: &sye_core::scheduler::StatusSnapshot
     }
     let _ = write!(out, " | Consecutive skips: {}", snapshot.consecutive_skips);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_settings_suppressed_for_headless_background_or_login_item() {
+        assert!(should_open_settings_on_startup(false, false, false));
+        assert!(!should_open_settings_on_startup(true, false, false));
+        assert!(!should_open_settings_on_startup(false, true, false));
+        assert!(!should_open_settings_on_startup(false, false, true));
+    }
+
+    #[test]
+    fn settings_guards_block_pre_break_break_and_locked_menu() {
+        assert!(can_open_settings(SchedulerState::Waiting, false));
+        assert!(can_open_settings(SchedulerState::Stopped, false));
+        assert!(can_open_settings(SchedulerState::Resting, false));
+        assert!(!can_open_settings(SchedulerState::PreBreak, false));
+        assert!(!can_open_settings(SchedulerState::Break, false));
+        assert!(!can_open_settings(SchedulerState::Waiting, true));
+    }
 }

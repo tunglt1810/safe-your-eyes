@@ -30,19 +30,23 @@ pub enum TrayIconState {
     PreBreak,
 }
 
-/// User actions emitted from system tray menu clicks.
+/// User actions emitted from system tray menu clicks and OS app reopen events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayEvent {
     Enable,
     Disable { minutes: Option<u64> },
     TakeBreak { kind: Option<BreakType> },
     OpenSettings,
+    Reopen,
     Quit,
 }
 
 struct ActiveTray {
+    #[cfg(target_os = "macos")]
+    menu_timer: macos_menu_timer::MacMenuTimer,
     tray_icon: TrayIcon,
     icon_state: TrayIconState,
+    last_snapshot: Option<TraySnapshot>,
     status_item: MenuItem,
     enable_item: MenuItem,
     disable_submenu: Submenu,
@@ -157,10 +161,16 @@ impl TrayHandle {
             }
         }));
 
+        #[cfg(target_os = "macos")]
+        let menu_timer = macos_menu_timer::MacMenuTimer::new(initial, status_item.clone());
+
         let mut handle = Self {
             active: Some(ActiveTray {
+                #[cfg(target_os = "macos")]
+                menu_timer,
                 tray_icon,
                 icon_state,
+                last_snapshot: None,
                 status_item,
                 enable_item,
                 disable_submenu,
@@ -198,8 +208,14 @@ impl TrayHandle {
         let Some(active) = self.active.as_mut() else {
             return Ok(());
         };
+        if !should_apply_snapshot(&mut active.last_snapshot, snapshot) {
+            return Ok(());
+        }
 
-        active.status_item.set_text(format_status_label(snapshot));
+        let status_label = format_status_label(snapshot);
+        #[cfg(target_os = "macos")]
+        active.menu_timer.update(snapshot, &status_label);
+        active.status_item.set_text(status_label);
 
         let unlocked = !snapshot.menu_locked;
         let can_enable = !snapshot.enabled && snapshot.has_breaks && unlocked;
@@ -234,6 +250,125 @@ impl TrayHandle {
         }
 
         Ok(())
+    }
+}
+
+pub(crate) fn should_apply_snapshot(
+    last_snapshot: &mut Option<TraySnapshot>,
+    next: &TraySnapshot,
+) -> bool {
+    if last_snapshot.as_ref() == Some(next) {
+        return false;
+    }
+    *last_snapshot = Some(next.clone());
+    true
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+pub(crate) fn advance_snapshot_countdown(
+    snapshot: &TraySnapshot,
+    elapsed_secs: u64,
+) -> TraySnapshot {
+    let mut live = snapshot.clone();
+    if live.enabled
+        && matches!(
+            live.state,
+            SchedulerState::Waiting | SchedulerState::PreBreak
+        )
+    {
+        live.seconds_until_next_break = live.seconds_until_next_break.saturating_sub(elapsed_secs);
+    }
+    live
+}
+
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "NSTimer block scheduling in AppKit NSEventTrackingRunLoopMode"
+)]
+mod macos_menu_timer {
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use block2::RcBlock;
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2_app_kit::NSEventTrackingRunLoopMode;
+    use objc2_foundation::{NSRunLoop, NSTimer};
+    use sye_core::TraySnapshot;
+    use tray_icon::menu::MenuItem;
+
+    use super::{advance_snapshot_countdown, format_status_label};
+
+    struct MacMenuLiveState {
+        snapshot: TraySnapshot,
+        updated_at: Instant,
+        last_label: String,
+        status_item: MenuItem,
+    }
+
+    pub(super) struct MacMenuTimer {
+        state: Rc<RefCell<MacMenuLiveState>>,
+        timer: Retained<NSTimer>,
+    }
+
+    impl MacMenuTimer {
+        pub(super) fn new(initial: &TraySnapshot, status_item: MenuItem) -> Self {
+            let state = Rc::new(RefCell::new(MacMenuLiveState {
+                snapshot: initial.clone(),
+                updated_at: Instant::now(),
+                last_label: format_status_label(initial),
+                status_item,
+            }));
+            let timer_state = Rc::clone(&state);
+            // AppKit enters modal `NSEventTrackingRunLoopMode` while the status bar menu is open,
+            // pausing `daemon.rs`'s main loop; this timer keeps the countdown label ticking live.
+            let timer = autoreleasepool(|_| {
+                let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+                    let Ok(mut guard) = timer_state.try_borrow_mut() else {
+                        return;
+                    };
+                    let elapsed_secs = guard.updated_at.elapsed().as_secs();
+                    let live = advance_snapshot_countdown(&guard.snapshot, elapsed_secs);
+                    let label = format_status_label(&live);
+                    if label != guard.last_label {
+                        guard.last_label.clone_from(&label);
+                        let item = guard.status_item.clone();
+                        drop(guard);
+                        item.set_text(label);
+                    }
+                });
+                // SAFETY: `TrayHandle::try_new` enforces main-thread creation on macOS, and the
+                // timer is scheduled exclusively on `NSRunLoop::mainRunLoop()`, so `block` only
+                // executes on the main thread.
+                let timer =
+                    unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.25, true, &block) };
+                // SAFETY: `NSEventTrackingRunLoopMode` is an immutable AppKit constant.
+                unsafe {
+                    let mode = NSEventTrackingRunLoopMode;
+                    NSRunLoop::mainRunLoop().addTimer_forMode(&timer, mode);
+                }
+                timer
+            });
+            Self { state, timer }
+        }
+
+        pub(super) fn update(&self, snapshot: &TraySnapshot, label: &str) {
+            if let Ok(mut guard) = self.state.try_borrow_mut() {
+                guard.snapshot = snapshot.clone();
+                guard.updated_at = Instant::now();
+                guard.last_label.clear();
+                guard.last_label.push_str(label);
+            }
+        }
+    }
+
+    impl Drop for MacMenuTimer {
+        fn drop(&mut self) {
+            self.timer.invalidate();
+        }
     }
 }
 
@@ -519,5 +654,36 @@ mod tests {
         let snap = sample_snapshot(SchedulerState::Waiting, true);
         let res = TrayHandle::try_new(&snap, tx);
         assert!(matches!(res, Ok(_) | Err(PlatformError::Unavailable(_))));
+    }
+
+    #[test]
+    fn snapshot_dedup_and_live_countdown_progression() {
+        let mut last = None;
+        let waiting = sample_snapshot(SchedulerState::Waiting, true);
+        assert!(should_apply_snapshot(&mut last, &waiting));
+        assert!(!should_apply_snapshot(&mut last, &waiting));
+
+        let next_sec = advance_snapshot_countdown(&waiting, 1);
+        assert_eq!(next_sec.seconds_until_next_break, 889);
+        assert_eq!(format_status_label(&next_sec), "Next short break in 14:49");
+        assert!(should_apply_snapshot(&mut last, &next_sec));
+        assert!(!should_apply_snapshot(&mut last, &next_sec));
+
+        let saturated = advance_snapshot_countdown(&waiting, 5_000);
+        assert_eq!(saturated.seconds_until_next_break, 0);
+        assert_eq!(format_status_label(&saturated), "Next short break in 00:00");
+
+        let mut pre = sample_snapshot(SchedulerState::PreBreak, true);
+        pre.seconds_until_next_break = 5;
+        assert_eq!(
+            format_status_label(&advance_snapshot_countdown(&pre, 2)),
+            "Break starting in 00:03"
+        );
+
+        let resting = sample_snapshot(SchedulerState::Resting, true);
+        assert_eq!(advance_snapshot_countdown(&resting, 30), resting);
+
+        let disabled = sample_snapshot(SchedulerState::Waiting, false);
+        assert_eq!(advance_snapshot_countdown(&disabled, 30), disabled);
     }
 }

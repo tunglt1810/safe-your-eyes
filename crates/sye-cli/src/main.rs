@@ -155,22 +155,20 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
 }
 
 fn run_settings_and_sync_autostart(config_file: &std::path::Path) -> ExitCode {
-    match sye_ui::run_settings(config_file.to_path_buf()) {
-        Ok(sye_ui::SettingsOutcome::Saved) => match Config::load_from_path(config_file) {
-            Ok(cfg) => {
-                if let Err(err) =
-                    sye_platform::sync_system_autostart(cfg.autostart, Some(config_file))
-                {
-                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
-                }
-                ExitCode::SUCCESS
-            }
-            Err(err) => {
-                eprintln!("Warning: failed to reload saved config for autostart sync: {err}");
-                ExitCode::SUCCESS
-            }
-        },
-        Ok(sye_ui::SettingsOutcome::Cancelled) => ExitCode::SUCCESS,
+    let initial_system_autostart = sye_platform::query_system_autostart(Some(config_file));
+    let hook_path = config_file.to_path_buf();
+    let on_autostart_change = Box::new(move |enabled: bool| {
+        if let Err(err) = sye_platform::sync_system_autostart(enabled, Some(&hook_path)) {
+            eprintln!("Warning: failed to synchronize autostart entry: {err}");
+        }
+    });
+
+    match sye_ui::run_settings_with_autostart(
+        config_file.to_path_buf(),
+        initial_system_autostart,
+        Some(on_autostart_change),
+    ) {
+        Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
             ExitCode::FAILURE

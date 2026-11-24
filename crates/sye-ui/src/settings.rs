@@ -7,11 +7,12 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
-use nsh_core::element::desktop::{quit, title_bar};
+use nsh_core::element::desktop::{current_window, on_app_quit, quit, title_bar};
 use nsh_core::prelude::*;
 use nsh_core::shader::TransitionKey;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
@@ -304,12 +305,23 @@ impl WindowList {
     }
 }
 
+type AutostartHook = Arc<dyn Fn(bool) + Send + Sync>;
+
 struct SettingsLaunch {
     vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    on_autostart_change: Option<AutostartHook>,
 }
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
+
+fn load_settings_vm(config_path: PathBuf, system_autostart: Option<bool>) -> SettingsViewModel {
+    let mut vm = SettingsViewModel::load(config_path);
+    if let Some(actual) = system_autostart {
+        vm.config.autostart = actual;
+    }
+    vm
+}
 
 fn number_field_row(
     label: &'static str,
@@ -354,7 +366,10 @@ fn number_field_row(
         )
 }
 
-fn timing_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
+fn timing_section(
+    vm: Signal<SettingsViewModel>,
+    on_autostart_change: Option<AutostartHook>,
+) -> impl IntoElement {
     view()
         .gap_5()
         .child(
@@ -434,7 +449,12 @@ fn timing_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
                 .child(cozy_switch(
                     "Launch at login (startup)",
                     move || vm.with(|m| m.config.autostart),
-                    move |v| vm.update(|m| m.config.autostart = v),
+                    move |v| {
+                        vm.update(|m| m.config.autostart = v);
+                        if let Some(cb) = &on_autostart_change {
+                            cb(v);
+                        }
+                    },
                 )),
         )
 }
@@ -670,12 +690,70 @@ fn settings_main_window_options() -> MainWindowOptions {
     main_window
 }
 
-/// Builds the Cozy Settings UI surface for both desktop runs and headless tests.
+/// Builds the Cozy Settings UI surface for headless tests without OS hooks.
+#[cfg(test)]
 pub(crate) fn build_settings_view(
     initial_vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
 ) -> impl IntoElement {
+    build_settings_view_with_hooks(initial_vm, outcome_sink, quit_on_finish, None)
+}
+
+pub(crate) fn build_settings_view_with_hooks(
+    initial_vm: SettingsViewModel,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    quit_on_finish: bool,
+    on_autostart_change: Option<AutostartHook>,
+) -> impl IntoElement {
+    let initial_autostart = initial_vm.config.autostart;
+    let (live_hook, save_autostart) = match on_autostart_change {
+        Some(hook) => {
+            let autostart_dirty = Arc::new(AtomicBool::new(false));
+            let live_dirty = Arc::clone(&autostart_dirty);
+            let live_cb = Arc::clone(&hook);
+            let live: AutostartHook = Arc::new(move |enabled| {
+                live_dirty.store(true, Ordering::Release);
+                live_cb(enabled);
+            });
+
+            let revert_sink = Arc::clone(&outcome_sink);
+            let revert_dirty = Arc::clone(&autostart_dirty);
+            let revert_cb = Arc::clone(&hook);
+            let revert_if_unsaved = Arc::new(move || {
+                let is_saved = revert_sink
+                    .lock()
+                    .ok()
+                    .is_some_and(|guard| *guard == Some(SettingsOutcome::Saved));
+                if !is_saved && revert_dirty.swap(false, Ordering::AcqRel) {
+                    revert_cb(initial_autostart);
+                }
+            });
+            // `Engine::drop` tears down the worker thread without disposing the root `Owner`,
+            // so `on_app_quit` covers window close/`quit()` while `cleanup` covers scope disposal.
+            let quit_revert = Arc::clone(&revert_if_unsaved);
+            on_app_quit(move || {
+                quit_revert();
+                std::future::ready(())
+            });
+            cleanup(move || revert_if_unsaved());
+
+            (Some(live), Some((autostart_dirty, hook)))
+        }
+        None => (None, None),
+    };
+
+    if quit_on_finish {
+        // macOS ignores `NSApplication::activate()` after tray menu dismissal unless `Focus`
+        // triggers `Activation::Take` both on initial commit and after AppKit finishes menu tracking.
+        let main_win = current_window();
+        main_win.focus();
+        let focus_win = main_win;
+        drop(set_timeout(Duration::from_millis(60), move || {
+            focus_win.focus();
+        }));
+    }
+
     let initial_appearance = appearance_for_theme_mode(initial_vm.config.theme);
     let vm = signal(initial_vm);
     let appearance = signal(initial_appearance);
@@ -881,6 +959,9 @@ pub(crate) fn build_settings_view(
             move || status_banner(true, move || error_msg.get().unwrap_or_default()),
         ));
 
+    let timing_hook = live_hook.as_ref().map(Arc::clone);
+    let reset_hook = live_hook;
+
     let form_scroll = scroll().flex_1().bg(colors::BACKGROUND_SURFACE).child(
         view()
             .p_5()
@@ -889,7 +970,7 @@ pub(crate) fn build_settings_view(
             .bind_translate_y(&panel_y)
             .child(when(
                 move || active_tab.get() == SettingsTab::Timing,
-                move || timing_section(vm),
+                move || timing_section(vm, timing_hook.as_ref().map(Arc::clone)),
             ))
             .child(when(
                 move || active_tab.get() == SettingsTab::Policies,
@@ -921,12 +1002,18 @@ pub(crate) fn build_settings_view(
                 .gap_2()
                 .child(primary_button("Save", move || {
                     let mut saved = false;
+                    let mut saved_autostart = false;
                     vm.update(|m| {
                         if m.save().is_ok() {
                             saved = true;
+                            saved_autostart = m.config.autostart;
                         }
                     });
                     if saved {
+                        if let Some((dirty, hook)) = &save_autostart {
+                            dirty.store(false, Ordering::Release);
+                            hook(saved_autostart);
+                        }
                         crate::store_outcome(&save_sink, SettingsOutcome::Saved);
                         if quit_on_finish {
                             quit();
@@ -934,7 +1021,17 @@ pub(crate) fn build_settings_view(
                     }
                 }))
                 .child(secondary_button("Reset", move || {
-                    vm.update(SettingsViewModel::reset_to_defaults);
+                    let mut autostart_changed = None;
+                    vm.update(|m| {
+                        let prev = m.config.autostart;
+                        m.reset_to_defaults();
+                        if m.config.autostart != prev {
+                            autostart_changed = Some(m.config.autostart);
+                        }
+                    });
+                    if let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
+                        cb(next);
+                    }
                     let default_appearance = appearance_for_theme_mode(ThemeMode::default());
                     if let Some(center) = measured_theme_btn_center.get() {
                         reveal_origin.set(center);
@@ -1006,7 +1103,13 @@ pub(crate) fn build_settings_view(
 fn SettingsRoot() -> impl IntoElement {
     let launch = SETTINGS_LAUNCH.lock().ok().and_then(|mut g| g.take());
     match launch {
-        Some(launch) => build_settings_view(launch.vm, launch.outcome_sink, true).into_element(),
+        Some(launch) => build_settings_view_with_hooks(
+            launch.vm,
+            launch.outcome_sink,
+            true,
+            launch.on_autostart_change,
+        )
+        .into_element(),
         None => view()
             .flex_1()
             .bg(colors::BACKGROUND_BODY)
@@ -1019,9 +1122,20 @@ fn SettingsRoot() -> impl IntoElement {
 
 /// Runs the Cozy Settings window using Native Shell (`nsh`) and returns `SettingsOutcome`.
 pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
-    let vm = SettingsViewModel::load(config_path);
+    run_settings_with_autostart(config_path, None, None)
+}
+
+/// Runs the Cozy Settings window with live OS login-item synchronization.
+#[allow(clippy::type_complexity)]
+pub fn run_settings_with_autostart(
+    config_path: PathBuf,
+    system_autostart: Option<bool>,
+    on_autostart_change: Option<Box<dyn Fn(bool) + Send + Sync>>,
+) -> Result<SettingsOutcome, UiError> {
+    let vm = load_settings_vm(config_path, system_autostart);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
     let outcome_sink = Arc::new(Mutex::new(None));
+    let on_autostart_change: Option<AutostartHook> = on_autostart_change.map(Arc::from);
 
     let Ok(mut guard) = SETTINGS_LAUNCH.lock() else {
         return Err(UiError::WindowInit(
@@ -1031,6 +1145,7 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
     *guard = Some(SettingsLaunch {
         vm,
         outcome_sink: Arc::clone(&outcome_sink),
+        on_autostart_change,
     });
     drop(guard);
 
@@ -1063,7 +1178,7 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::AtomicU64;
 
     use super::*;
 
@@ -1538,6 +1653,230 @@ mod tests {
             Some(false),
             "Reset from Dark must restore System (Light OS) appearance"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn load_settings_vm_overrides_autostart_when_system_value_present()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = RepoTempDir::new("system-autostart")?;
+        let path = dir.file("config.toml");
+        let cfg = Config {
+            autostart: false,
+            ..Config::default()
+        };
+        cfg.save_to_path(&path)?;
+
+        let unchanged = load_settings_vm(path.clone(), None);
+        assert!(!unchanged.config.autostart);
+
+        let overridden_true = load_settings_vm(path.clone(), Some(true));
+        assert!(overridden_true.config.autostart);
+
+        let cfg_true = Config {
+            autostart: true,
+            ..Config::default()
+        };
+        cfg_true.save_to_path(&path)?;
+        let overridden_false = load_settings_vm(path, Some(false));
+        assert!(!overridden_false.config.autostart);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_autostart_override_and_live_callback_sync()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-autostart")?;
+        let path = dir.file("autostart.toml");
+        let cfg = Config {
+            autostart: false,
+            ..Config::default()
+        };
+        cfg.save_to_path(&path)?;
+
+        static AUTOSTART_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static AUTOSTART_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
+        #[component]
+        fn TestAutostartSettings() -> impl IntoElement {
+            let path = AUTOSTART_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = load_settings_vm(path, Some(true));
+            let sink = Arc::new(Mutex::new(None));
+            let hook: AutostartHook = Arc::new(|enabled| {
+                if let Ok(mut guard) = AUTOSTART_EVENTS.lock() {
+                    guard.push(enabled);
+                }
+            });
+            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+        }
+
+        if let Ok(mut guard) = AUTOSTART_PATH.lock() {
+            *guard = Some(path.clone());
+        }
+        if let Ok(mut guard) = AUTOSTART_EVENTS.lock() {
+            guard.clear();
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestAutostartSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Launch at login (startup)")?;
+
+        // Initial `system_autostart = Some(true)` overrode saved `false`, so first toggle flips to `false`.
+        app.press("Launch at login (startup)")?;
+        app.press("Launch at login (startup)")?;
+        // Now `autostart` is `true`; pressing `Reset` restores default `false` and fires callback.
+        app.press("Reset")?;
+        app.press("Launch at login (startup)")?;
+        app.press("Save")?;
+        drop(app);
+
+        let events = AUTOSTART_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(events, vec![false, true, false, true, true]);
+
+        let reloaded = Config::load_from_path(&path)?;
+        assert!(reloaded.autostart);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_autostart_reverts_on_cancel_and_window_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-autostart-revert")?;
+        let path = dir.file("autostart-revert.toml");
+        let cfg = Config {
+            autostart: false,
+            ..Config::default()
+        };
+        cfg.save_to_path(&path)?;
+
+        static REVERT_LAUNCH: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
+        static REVERT_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
+        #[component]
+        fn TestAutostartRevert() -> impl IntoElement {
+            let (path, initial_system) = REVERT_LAUNCH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = load_settings_vm(path, Some(initial_system));
+            let sink = Arc::new(Mutex::new(None));
+            let hook: AutostartHook = Arc::new(|enabled| {
+                if let Ok(mut guard) = REVERT_EVENTS.lock() {
+                    guard.push(enabled);
+                }
+            });
+            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+        }
+
+        if let Ok(mut guard) = REVERT_LAUNCH.lock() {
+            *guard = Some((path.clone(), false));
+        }
+        if let Ok(mut guard) = REVERT_EVENTS.lock() {
+            guard.clear();
+        }
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestAutostartRevert>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Launch at login (startup)")?;
+        app.press("Launch at login (startup)")?;
+        app.press("Cancel")?;
+        drop(app);
+
+        let cancel_events = REVERT_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(cancel_events, vec![true, false]);
+
+        if let Ok(mut guard) = REVERT_LAUNCH.lock() {
+            *guard = Some((path, true));
+        }
+        if let Ok(mut guard) = REVERT_EVENTS.lock() {
+            guard.clear();
+        }
+        let mut app_close = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestAutostartRevert>())
+        })
+        .map_err(|e| e.to_string())?;
+        app_close.wait_for("Launch at login (startup)")?;
+        app_close.press("Launch at login (startup)")?;
+        drop(app_close);
+
+        let close_events = REVERT_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(close_events, vec![false, true]);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_autostart_save_persists_without_revert_on_drop()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-autostart-save")?;
+        let path = dir.file("autostart-save.toml");
+        let cfg = Config {
+            autostart: false,
+            ..Config::default()
+        };
+        cfg.save_to_path(&path)?;
+
+        static SAVE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static SAVE_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
+        #[component]
+        fn TestAutostartSave() -> impl IntoElement {
+            let path = SAVE_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = load_settings_vm(path, Some(false));
+            let sink = Arc::new(Mutex::new(None));
+            let hook: AutostartHook = Arc::new(|enabled| {
+                if let Ok(mut guard) = SAVE_EVENTS.lock() {
+                    guard.push(enabled);
+                }
+            });
+            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+        }
+
+        if let Ok(mut guard) = SAVE_PATH.lock() {
+            *guard = Some(path.clone());
+        }
+        if let Ok(mut guard) = SAVE_EVENTS.lock() {
+            guard.clear();
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestAutostartSave>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Launch at login (startup)")?;
+        app.press("Launch at login (startup)")?;
+        app.press("Save")?;
+        drop(app);
+
+        let events = SAVE_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(events, vec![true, true]);
+
+        let reloaded = Config::load_from_path(&path)?;
+        assert!(reloaded.autostart);
         Ok(())
     }
 }

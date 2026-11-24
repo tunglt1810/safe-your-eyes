@@ -247,12 +247,12 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 
 ### 10.2 Shape, Motion, and Screens
 
-- Concentric desktop border radii keep inner corners parallel to native window corners: `8px` (elements and sidebar navigation items), `12px` (Floating Sage Sidebar, Form Card, and Pastel KPI cards), `28px` (overlay card), and `9999px` (pill controls).
+- Concentric Cozy border radii follow `tokens/cozy.tokens.json`: `12px` (elements), `14px` (sidebar navigation items), `18px` (Form Card and QR container), `20px` (Pastel KPI cards), `22px` (Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill controls).
 - Motion follows `tunglt1810/cozy` v0.2.0.
 - `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) moves the sliding sidebar indicator and the centered switch knob (`3pt` symmetrical inset, `18pt` horizontal travel).
-- `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives tab panel entrances (`160ms`), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), and highlighter sweeps (`380ms`).
-- Cozy Circular Theme Reveal uses an `nsh` `screen_transition()` WGSL shader (`480ms`, `cubic-bezier(0.4, 0, 0.2, 1)`) that expands a circle from the theme button center to the farthest window corner.
-- The reveal runs only when the resolved Light or Dark appearance changes and `reduce_motion()` is `false`.
+- `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives staggered list-item entrances on tab switch (`10px` rise, `260ms`, `28ms` step capped at row 12; skipped on initial window load), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), and highlighter sweeps (`380ms`).
+- Theme switching uses native `transition_colors` (`200ms`, `cubic-bezier(0.4, 0, 0.2, 1)`) on Cozy surfaces so changing themes renders smoothly without a blank-frame flash.
+- Toggling the theme persists `Config.theme` to `config.toml` immediately without writing unsaved form edits; a theme-only change does not reset the daemon's active break countdown.
 - Pressable pills scale to `0.97` on press.
 - All animations stop when the operating system enables Reduce Motion (`reduce_motion()`).
 - The break overlay opens a borderless `WindowFrameStyle::None` window at `WindowLevel::AboveDock` across `Workspaces::All`.
@@ -270,6 +270,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - The Settings window focuses itself on launch to appear in front of the active application.
 - The Settings window opens directly in the saved `Config.theme` mode with zero flash.
 - The Floating Sage Sidebar has a matching `1px` border and switches between `Timing`, `Policies`, `Exercises`, and `About & Support`.
+- In `Policies`, enabling `Strict break (hide Skip)` automatically turns off and disables `Limit consecutive skips` and `Max consecutive skips`, and displays `Strict` in the `Skip Limit` KPI card.
 - The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
 - The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar (`Save`, `Reset`, `Cancel`).
 - The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.

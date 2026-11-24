@@ -690,6 +690,13 @@ impl<C: Clock> Scheduler<C> {
     }
 
     fn handle_reload_config(&mut self, new_cfg: Config) -> Vec<SchedulerAction> {
+        let mut current_with_new_theme = self.config.clone();
+        current_with_new_theme.theme = new_cfg.theme;
+        if new_cfg == current_with_new_theme {
+            self.config.theme = new_cfg.theme;
+            return Vec::new();
+        }
+
         let mut actions = Vec::new();
         self.push_active_state_cleanup(&mut actions);
 
@@ -1631,5 +1638,22 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, SchedulerAction::DismissNotification))
         );
+    }
+
+    #[test]
+    fn reload_config_theme_only_preserves_countdown() {
+        let clock = FakeClock::default();
+        let cfg = test_config();
+        let mut sched = Scheduler::new(cfg.clone(), &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        clock.advance_secs(120);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 780);
+
+        let mut theme_only = cfg;
+        theme_only.theme = crate::config::ThemeMode::Dark;
+        let actions = sched.handle_event(SchedulerEvent::ReloadConfig(theme_only));
+        assert!(actions.is_empty());
+        assert_eq!(sched.config().theme, crate::config::ThemeMode::Dark);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 780);
     }
 }

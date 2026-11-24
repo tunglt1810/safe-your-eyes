@@ -6,8 +6,7 @@ use std::sync::{Arc, OnceLock};
 
 use nsh_base::{button, input, link, switch};
 use nsh_core::canvas::{LineCap, LineJoin};
-use nsh_core::element::desktop::title_bar;
-use nsh_core::element::{ImageSrc, Painter};
+use nsh_core::element::{ImageSrc, Painter, Timing};
 use nsh_core::prelude::*;
 use sye_core::config::ThemeMode;
 
@@ -108,27 +107,37 @@ pub(crate) fn page_heading(
         )
 }
 
-/// Top-right Cozy theme toggle pill with crisp vector SVG icon and center-origin tracking.
+/// Wraps a settings list item in Cozy's `.cozy-list-row` staggered entrance (`10px` rise, `260ms`,
+/// `28ms` step capped at row 12) when `animate` is true and Reduce Motion is disabled.
+pub(crate) fn stagger_item(
+    index: usize,
+    animate: bool,
+    child: impl IntoElement,
+) -> impl IntoElement {
+    let container = view().child(child);
+    if !animate || reduce_motion() {
+        return container;
+    }
+    let delay_ms = motion::row_stagger_delay_ms(index);
+    let timing = Timing {
+        duration_ms: motion::ROW_ENTER_MS,
+        easing: motion::COZY_EASE,
+        delay_ms,
+        frame_rate: None,
+    };
+    let opacity = animated_value(0.0);
+    let y = animated_value(motion::ROW_ENTER_Y);
+    opacity.timing_with(1.0, timing);
+    y.timing_with(0.0, timing);
+    container.bind_opacity(&opacity).bind_translate_y(&y)
+}
+
+/// Top-right Cozy theme toggle pill with crisp vector SVG icon.
 pub(crate) fn theme_toggle_button(
     mode: impl Fn() -> ThemeMode + Copy + 'static,
-    measured_center: Signal<Option<[f32; 2]>>,
-    on_press: impl Fn(Option<[f32; 2]>) + 'static,
+    on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let btn_ref = element_ref();
     let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
-
-    effect(move || {
-        // Re-measure when native titlebar insets or window dimensions shift parent layout.
-        let _ = title_bar();
-        let _ = window();
-        spawn(async move {
-            if let Some(m) = btn_ref.measure().await {
-                let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
-                let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
-                measured_center.set(Some([cx, cy]));
-            }
-        });
-    });
 
     let icon = canvas(move || {
         let svg = match mode() {
@@ -150,25 +159,10 @@ pub(crate) fn theme_toggle_button(
     .flex_shrink_0();
 
     view()
-        .element_ref(&btn_ref)
         .role(AccessibilityRole::Button)
         .focusable(true)
         .window_drag(false)
-        .on_layout(move |_: &Bounds<Points>| {
-            spawn(async move {
-                if let Some(m) = btn_ref.measure().await {
-                    let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
-                    let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
-                    measured_center.set(Some([cx, cy]));
-                }
-            });
-        })
-        .on_press(move |ev: &PressEvent| {
-            let p = ev.page_position;
-            let live_press = (p.x.0 > 0.0 || p.y.0 > 0.0).then_some([p.x.0, p.y.0]);
-            let origin = live_press.or_else(|| measured_center.get());
-            on_press(origin);
-        })
+        .on_press(move |_: &PressEvent| on_press())
         .h(px(36.0))
         .px_3()
         .flex_row()
@@ -180,7 +174,7 @@ pub(crate) fn theme_toggle_button(
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
         .transition()
-        .duration(motion::CONTROL_MS)
+        .duration(motion::THEME_COLOR_MS)
         .ease_bezier(bx1, by1, bx2, by2)
         .hover(|s| s.bg(colors::OVERLAY_HOVER))
         .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
@@ -208,7 +202,13 @@ pub(crate) fn section_header(title: &'static str, caption: &'static str) -> impl
 
 /// Hairline horizontal divider (`1px`) separating sections inside a Form Card (Astryx Divider).
 pub(crate) fn section_divider() -> impl IntoElement {
-    view().h(px(1.0)).bg(colors::BORDER)
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+    view()
+        .h(px(1.0))
+        .bg(colors::BORDER)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
 }
 
 /// Cozy primary pill button (warm coral fill + WCAG AAA dark espresso text).
@@ -325,12 +325,16 @@ pub(crate) fn pastel_kpi_card(
     label: &'static str,
     value: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     view()
         .flex_1()
         .rounded(radii::KPI)
         .bg(tone.bg())
         .border_1()
         .border_color(colors::BORDER)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
         .px_4()
         .py_3()
         .gap_1()
@@ -367,12 +371,23 @@ pub(crate) fn cozy_switch(
     checked: impl Fn() -> bool + 'static,
     on_change: impl Fn(bool) + 'static,
 ) -> impl IntoElement {
+    cozy_switch_with_disabled(label, checked, || false, on_change)
+}
+
+/// Cozy toggle switch row with reactive `disabled` state.
+pub(crate) fn cozy_switch_with_disabled(
+    label: &'static str,
+    checked: impl Fn() -> bool + 'static,
+    disabled: impl Fn() -> bool + Copy + 'static,
+    on_change: impl Fn(bool) + 'static,
+) -> impl IntoElement {
     view()
         .flex_row()
         .h(px(36.0))
         .items_center()
         .justify_between()
         .gap_3()
+        .opacity(move || if disabled() { 0.45_f32 } else { 1.0_f32 })
         .child(
             text(label)
                 .text_sm()
@@ -382,7 +397,12 @@ pub(crate) fn cozy_switch(
         .child(
             switch()
                 .checked(checked)
-                .on_change(move |val: &bool| on_change(*val))
+                .disabled(disabled)
+                .on_change(move |val: &bool| {
+                    if !disabled() {
+                        on_change(*val);
+                    }
+                })
                 .accessibility_label(label)
                 .track_style(|s| {
                     s.w(px(42.0))
@@ -412,15 +432,31 @@ pub(crate) fn cozy_switch(
         )
 }
 
-/// Cozy styled single-line text input (`8px` radius, `36px` height, `bg-surface` per Cozy v0.2.0).
+/// Cozy styled single-line text input (`12px` radius, `36px` height, `bg-surface` per Cozy v0.2.0).
 pub(crate) fn cozy_input(
     placeholder: &'static str,
     value: impl Fn() -> String + 'static,
     on_change: impl Fn(&str) + 'static,
 ) -> impl IntoElement {
+    cozy_input_with_disabled(placeholder, value, || false, on_change)
+}
+
+/// Cozy styled single-line text input with reactive `disabled` state.
+pub(crate) fn cozy_input_with_disabled(
+    placeholder: &'static str,
+    value: impl Fn() -> String + 'static,
+    disabled: impl Fn() -> bool + Copy + 'static,
+    on_change: impl Fn(&str) + 'static,
+) -> impl IntoElement {
     input()
         .value(value)
-        .on_change(on_change)
+        .disabled(disabled)
+        .readonly(disabled)
+        .on_change(move |raw: &str| {
+            if !disabled() {
+                on_change(raw);
+            }
+        })
         .placeholder(placeholder)
         .placeholder_color(|| color(colors::TEXT_DISABLED))
         .caret_color(|| color(colors::ACCENT))
@@ -437,6 +473,7 @@ pub(crate) fn cozy_input(
         .ease_out()
         .hover(|s| s.border_color(colors::TEXT_DISABLED))
         .focus(|s| s.border_color(colors::FOCUS_RING))
+        .disabled_style(|s| s.opacity(0.6))
 }
 
 /// Spring-animated sliding background indicator for the Floating Sage Sidebar (`tunglt1810/cozy`).
@@ -716,35 +753,19 @@ mod tests {
     }
 
     #[test]
-    fn theme_toggle_button_reports_fresh_origin_after_title_bar_shift() -> Result<(), String> {
-        use std::sync::Mutex;
-
+    fn theme_toggle_button_cycles_mode_on_press() -> Result<(), String> {
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
-
-        static LAST_ORIGIN: Mutex<Option<[f32; 2]>> = Mutex::new(None);
 
         #[component]
         fn ToggleHost() -> impl IntoElement {
             let mode = signal(ThemeMode::System);
-            let measured = signal(None::<[f32; 2]>);
-            view()
-                .p_3()
-                .child(view().h(move || title_bar().top))
-                .child(theme_toggle_button(
-                    move || mode.get(),
-                    measured,
-                    move |origin| {
-                        if let Ok(mut guard) = LAST_ORIGIN.lock() {
-                            *guard = origin;
-                        }
-                    },
-                ))
+            view().p_3().child(theme_toggle_button(
+                move || mode.get(),
+                move || mode.update(|m| *m = crate::theme::next_theme_mode(*m)),
+            ))
         }
 
-        if let Ok(mut guard) = LAST_ORIGIN.lock() {
-            *guard = None;
-        }
         let mut app = Headless::start(EngineConfig {
             viewport: Size::new(Points(400.0), Points(200.0)),
             ..EngineConfig::new(Root::of::<ToggleHost>())
@@ -752,22 +773,12 @@ mod tests {
         .map_err(|e| e.to_string())?;
         app.wait_for("Theme: System")?;
 
-        app.set_environment("win-titlebar", |env| {
-            env.title_bar.top = Points(36.0);
-            env.title_bar.right = Points(138.0);
-        })?;
-        app.settle();
         app.press("Theme: System")?;
-
-        let origin = LAST_ORIGIN
-            .lock()
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| "expected non-None origin on press".to_owned())?;
-        // 12pt root padding + 36pt titlebar spacer + ~18pt half button height = ~66pt (not stale ~30pt).
-        assert!(
-            origin[1] > 55.0,
-            "Expected fresh origin y > 55.0 after 36pt titlebar shift, got {origin:?}"
-        );
+        app.wait_for("Theme: Light")?;
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        app.press("Theme: Dark")?;
+        app.wait_for("Theme: System")?;
         Ok(())
     }
 }

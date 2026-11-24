@@ -88,6 +88,7 @@ pub(crate) fn page_heading(
     title: impl IntoReactive<SharedString>,
     highlight_scale: &AnimatedValue,
 ) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     view()
         .gap_1()
         .child(
@@ -102,6 +103,9 @@ pub(crate) fn page_heading(
                 .h(px(4.0))
                 .rounded(radii::PILL)
                 .bg(colors::HEADING_HIGHLIGHT)
+                .transition_colors()
+                .duration(motion::THEME_COLOR_MS)
+                .ease_bezier(bx1, by1, bx2, by2)
                 .origin_left()
                 .bind_transform(nsh_core::TransformKind::ScaleX, highlight_scale),
         )
@@ -158,33 +162,32 @@ pub(crate) fn theme_toggle_button(
     .h(px(16.0))
     .flex_shrink_0();
 
-    view()
-        .role(AccessibilityRole::Button)
-        .focusable(true)
-        .window_drag(false)
-        .on_press(move |_: &PressEvent| on_press())
-        .h(px(36.0))
-        .px_3()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .rounded(radii::PILL)
-        .bg(colors::BACKGROUND_SURFACE)
-        .border_1()
-        .border_color(colors::BORDER_EMPHASIZED)
-        .transition()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
-        .hover(|s| s.bg(colors::OVERLAY_HOVER))
-        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
-        .child(icon)
-        .child(
-            text(move || theme_mode_label(mode()))
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_PRIMARY),
-        )
+    view().window_drag(false).child(
+        button()
+            .on_press(on_press)
+            .h(px(36.0))
+            .px_3()
+            .flex_row()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .rounded(radii::PILL)
+            .bg(colors::BACKGROUND_SURFACE)
+            .border_1()
+            .border_color(colors::BORDER_EMPHASIZED)
+            .transition()
+            .duration(motion::THEME_COLOR_MS)
+            .ease_bezier(bx1, by1, bx2, by2)
+            .hover(|s| s.bg(colors::OVERLAY_HOVER))
+            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+            .child(icon)
+            .child(
+                text(move || theme_mode_label(mode()))
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors::TEXT_PRIMARY),
+            ),
+    )
 }
 
 /// Section heading with optional supporting caption inside the unified Form Card.
@@ -473,7 +476,7 @@ pub(crate) fn cozy_input_with_disabled(
         .ease_out()
         .hover(|s| s.border_color(colors::TEXT_DISABLED))
         .focus(|s| s.border_color(colors::FOCUS_RING))
-        .disabled_style(|s| s.opacity(0.6))
+        .disabled_style(|s| s.opacity(0.45))
 }
 
 /// Spring-animated sliding background indicator for the Floating Sage Sidebar (`tunglt1810/cozy`).
@@ -489,7 +492,7 @@ pub(crate) fn sidebar_nav_indicator(active_index: impl Fn() -> u8 + 'static) -> 
         .rounded(radii::NAV_ITEM)
         .bg(colors::SIDEBAR_ACTIVE)
         .translate_y(move || px(f32::from(active_index()) * step))
-        .transition_transform()
+        .transition()
         .ease_spring(motion::COZY_SPRING)
 }
 

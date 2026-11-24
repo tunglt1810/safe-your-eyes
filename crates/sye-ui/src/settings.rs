@@ -8,6 +8,7 @@
 
 use std::cell::Cell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -79,6 +80,7 @@ pub struct SettingsViewModel {
     pub draft_long_exercise: String,
     pub draft_skip_window: String,
     pub draft_take_window: String,
+    system_autostart: Option<bool>,
 }
 
 impl SettingsViewModel {
@@ -86,7 +88,10 @@ impl SettingsViewModel {
     /// if the existing file is unreadable or invalid.
     #[must_use]
     pub fn load(config_path: PathBuf) -> Self {
-        let (config, load_err) = Config::load_or_default(&config_path);
+        let (mut config, load_err) = Config::load_or_default(&config_path);
+        if config.strict_break {
+            config.limit_consecutive_skips.enabled = false;
+        }
         Self {
             config_path,
             config,
@@ -98,6 +103,7 @@ impl SettingsViewModel {
             draft_long_exercise: String::new(),
             draft_skip_window: String::new(),
             draft_take_window: String::new(),
+            system_autostart: None,
         }
     }
 
@@ -198,6 +204,11 @@ impl SettingsViewModel {
         if on_disk.theme == self.config.theme {
             return Ok(());
         }
+        // Keep `autostart` aligned with the OS login-item state seen by the daemon so a
+        // theme-only close neither clobbers OS autostart nor triggers a non-theme reload.
+        if let Some(actual) = self.system_autostart {
+            on_disk.autostart = actual;
+        }
         on_disk.theme = self.config.theme;
         on_disk
             .save_to_path(&self.config_path)
@@ -229,10 +240,14 @@ impl SettingsViewModel {
 
     /// Validates and persists the configuration to `config_path`.
     pub fn save(&mut self) -> Result<SettingsOutcome, String> {
+        if self.config.strict_break {
+            self.config.limit_consecutive_skips.enabled = false;
+        }
         self.validate()?;
         if let Err(err) = self.config.save_to_path(&self.config_path) {
             return self.fail_validation(err.to_string());
         }
+        self.system_autostart = Some(self.config.autostart);
         self.validation_error = None;
         self.outcome = Some(SettingsOutcome::Saved);
         Ok(SettingsOutcome::Saved)
@@ -353,6 +368,7 @@ static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
 
 fn load_settings_vm(config_path: PathBuf, system_autostart: Option<bool>) -> SettingsViewModel {
     let mut vm = SettingsViewModel::load(config_path);
+    vm.system_autostart = system_autostart;
     if let Some(actual) = system_autostart {
         vm.config.autostart = actual;
     }
@@ -381,12 +397,12 @@ fn number_field_row_with_disabled(
         .items_center()
         .justify_between()
         .gap_3()
-        .opacity(move || if disabled() { 0.45_f32 } else { 1.0_f32 })
         .child(
             text(label)
                 .text_sm()
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(colors::TEXT_PRIMARY),
+                .text_color(colors::TEXT_PRIMARY)
+                .opacity(move || if disabled() { 0.45_f32 } else { 1.0_f32 }),
         )
         .child(
             view()
@@ -404,12 +420,16 @@ fn number_field_row_with_disabled(
                     },
                 )))
                 .child(
-                    view().w(px(44.0)).items_end().child(
-                        text(unit)
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(colors::TEXT_SECONDARY),
-                    ),
+                    view()
+                        .w(px(44.0))
+                        .items_end()
+                        .opacity(move || if disabled() { 0.45_f32 } else { 1.0_f32 })
+                        .child(
+                            text(unit)
+                                .text_xs()
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(colors::TEXT_SECONDARY),
+                        ),
                 ),
         )
 }
@@ -746,6 +766,14 @@ fn exercise_tier_section(
         ),
     };
     let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+    let initial_remaining = Rc::new(Cell::new(if animate {
+        vm.with_untracked(|m| match kind {
+            BreakType::Short => m.config.short_breaks.len(),
+            BreakType::Long => m.config.long_breaks.len(),
+        })
+    } else {
+        0
+    }));
     let items = computed(move || {
         vm.with(|m| {
             let list = match kind {
@@ -753,8 +781,7 @@ fn exercise_tier_section(
                 BreakType::Long => &m.config.long_breaks,
             };
             list.iter()
-                .enumerate()
-                .map(|(idx, spec)| (idx, spec.name.clone()))
+                .map(|spec| spec.name.clone())
                 .collect::<Vec<_>>()
         })
     });
@@ -789,12 +816,17 @@ fn exercise_tier_section(
         ))
         .child(view().gap_2().child(each(
             items,
-            move |(idx, name)| format!("{key_prefix}-{idx}-{name}"),
-            move |item, _| {
-                let row_idx = item.with(|(i, _)| *i);
+            move |name| format!("{key_prefix}-{name}"),
+            move |item, row_idx| {
+                let rem = initial_remaining.get();
+                let row_animate = rem > 0;
+                if row_animate {
+                    initial_remaining.set(rem - 1);
+                }
+                let mount_idx = row_idx.get_untracked();
                 stagger_item(
-                    base_index + 2 + row_idx,
-                    animate,
+                    base_index + 2 + mount_idx,
+                    row_animate,
                     view()
                         .flex_row()
                         .items_center()
@@ -807,12 +839,12 @@ fn exercise_tier_section(
                         .px_3()
                         .py_2()
                         .child(
-                            text(move || item.with(|(_, name)| name.clone()))
+                            text(move || item.get())
                                 .text_sm()
                                 .text_color(colors::TEXT_PRIMARY),
                         )
                         .child(destructive_button("Remove", move || {
-                            let idx = item.with(|(i, _)| *i);
+                            let idx = row_idx.get_untracked();
                             vm.update(|m| {
                                 let _ = m.remove_exercise(kind, idx);
                             });
@@ -1432,7 +1464,7 @@ mod tests {
         vm.config.long_break_interval_secs = 3600;
         vm.config.long_break_duration_secs = 90;
         vm.config.pre_break_warning_secs = 15;
-        vm.config.strict_break = true;
+        vm.config.strict_break = false;
         vm.config.allow_postpone = true;
         vm.config.postpone_duration_secs = 180;
         vm.config.random_order = false;
@@ -1824,6 +1856,34 @@ mod tests {
         let saved = Config::load_from_path(&path)?;
         assert!(saved.strict_break);
         assert!(!saved.limit_consecutive_skips.enabled);
+
+        let mut legacy = Config {
+            strict_break: true,
+            ..Config::default()
+        };
+        legacy.limit_consecutive_skips.enabled = true;
+        legacy.save_to_path(&path)?;
+        let loaded_legacy = SettingsViewModel::load(path);
+        assert!(loaded_legacy.config.strict_break);
+        assert!(!loaded_legacy.config.limit_consecutive_skips.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn persist_theme_preserves_system_autostart_baseline() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let dir = RepoTempDir::new("persist-theme-autostart")?;
+        let path = dir.file("theme-autostart.toml");
+
+        let mut vm = load_settings_vm(path.clone(), Some(true));
+        vm.config.short_break_interval_secs = 123;
+        vm.config.theme = ThemeMode::Dark;
+        vm.persist_theme()?;
+
+        let saved = Config::load_from_path(&path)?;
+        assert_eq!(saved.theme, ThemeMode::Dark);
+        assert!(saved.autostart);
+        assert_eq!(saved.short_break_interval_secs, 900);
         Ok(())
     }
 
@@ -1900,6 +1960,22 @@ mod tests {
         assert!(
             delays.iter().all(|&d| d <= 336.0),
             "Expected staggered delays capped at 12 * 28ms = 336ms, got {delays:?}"
+        );
+
+        app.press("Exercises")?;
+        app.wait_for("Short Break Exercises")?;
+        assert!(app.shows("19"));
+        if let Ok(mut guard) = observed_delays.lock() {
+            guard.clear();
+        }
+        app.press("Remove >> nth=0")?;
+        app.wait_for("18")?;
+        assert!(
+            observed_delays
+                .lock()
+                .map_err(|e| e.to_string())?
+                .is_empty(),
+            "In-place exercise edits must not re-trigger tab-switch stagger animation"
         );
         Ok(())
     }

@@ -305,6 +305,9 @@ impl WindowList {
     }
 }
 
+/// Callback invoked whenever the launch-at-login setting changes in the Settings UI.
+pub type AutostartChangeCallback = Box<dyn Fn(bool) + Send + Sync>;
+
 type AutostartHook = Arc<dyn Fn(bool) + Send + Sync>;
 
 struct SettingsLaunch {
@@ -719,14 +722,13 @@ pub(crate) fn build_settings_view_with_hooks(
 
             let revert_sink = Arc::clone(&outcome_sink);
             let revert_dirty = Arc::clone(&autostart_dirty);
-            let revert_cb = Arc::clone(&hook);
             let revert_if_unsaved = Arc::new(move || {
                 let is_saved = revert_sink
                     .lock()
                     .ok()
                     .is_some_and(|guard| *guard == Some(SettingsOutcome::Saved));
                 if !is_saved && revert_dirty.swap(false, Ordering::AcqRel) {
-                    revert_cb(initial_autostart);
+                    hook(initial_autostart);
                 }
             });
             // `Engine::drop` tears down the worker thread without disposing the root `Owner`,
@@ -738,7 +740,7 @@ pub(crate) fn build_settings_view_with_hooks(
             });
             cleanup(move || revert_if_unsaved());
 
-            (Some(live), Some((autostart_dirty, hook)))
+            (Some(live), Some(autostart_dirty))
         }
         None => (None, None),
     };
@@ -1002,17 +1004,14 @@ pub(crate) fn build_settings_view_with_hooks(
                 .gap_2()
                 .child(primary_button("Save", move || {
                     let mut saved = false;
-                    let mut saved_autostart = false;
                     vm.update(|m| {
                         if m.save().is_ok() {
                             saved = true;
-                            saved_autostart = m.config.autostart;
                         }
                     });
                     if saved {
-                        if let Some((dirty, hook)) = &save_autostart {
+                        if let Some(dirty) = &save_autostart {
                             dirty.store(false, Ordering::Release);
-                            hook(saved_autostart);
                         }
                         crate::store_outcome(&save_sink, SettingsOutcome::Saved);
                         if quit_on_finish {
@@ -1126,11 +1125,10 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
 }
 
 /// Runs the Cozy Settings window with live OS login-item synchronization.
-#[allow(clippy::type_complexity)]
 pub fn run_settings_with_autostart(
     config_path: PathBuf,
     system_autostart: Option<bool>,
-    on_autostart_change: Option<Box<dyn Fn(bool) + Send + Sync>>,
+    on_autostart_change: Option<AutostartChangeCallback>,
 ) -> Result<SettingsOutcome, UiError> {
     let vm = load_settings_vm(config_path, system_autostart);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
@@ -1741,7 +1739,7 @@ mod tests {
         drop(app);
 
         let events = AUTOSTART_EVENTS.lock().map_err(|e| e.to_string())?.clone();
-        assert_eq!(events, vec![false, true, false, true, true]);
+        assert_eq!(events, vec![false, true, false, true]);
 
         let reloaded = Config::load_from_path(&path)?;
         assert!(reloaded.autostart);
@@ -1873,7 +1871,7 @@ mod tests {
         drop(app);
 
         let events = SAVE_EVENTS.lock().map_err(|e| e.to_string())?.clone();
-        assert_eq!(events, vec![true, true]);
+        assert_eq!(events, vec![true]);
 
         let reloaded = Config::load_from_path(&path)?;
         assert!(reloaded.autostart);

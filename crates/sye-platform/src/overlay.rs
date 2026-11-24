@@ -19,7 +19,9 @@ impl SubprocessOverlayLauncher {
     /// Creates a launcher that invokes the current executable with `--internal-overlay <JSON>`.
     pub fn current_exe() -> Result<Self, PlatformError> {
         let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
-        Ok(Self::with_command(exe, Vec::new()))
+        // Resolve Homebrew Cask symlinks so macOS launches the `.app` bundle executable directly.
+        let resolved = exe.canonicalize().unwrap_or(exe);
+        Ok(Self::with_command(resolved, Vec::new()))
     }
 
     /// Creates a launcher with an explicit program and leading arguments (useful for testing).

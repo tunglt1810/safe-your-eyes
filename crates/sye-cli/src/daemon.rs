@@ -8,7 +8,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sye_core::config::{BreakType, Config};
 use sye_core::ipc::{IpcCommand, IpcResponse};
-use sye_core::policies::ACTIVE_POSTPONE_SECS;
 use sye_core::scheduler::{
     OverlayOutcome, Scheduler, SchedulerAction, SchedulerEvent, SchedulerState,
 };
@@ -26,6 +25,7 @@ struct DaemonHost<'a> {
     headless: bool,
     config_file: &'a Path,
     session_file: &'a Path,
+    event_loop: Option<&'a PlatformEventLoop>,
     notifier: OsNotifier,
     audio: OsAudioPlayer,
     overlay_launcher: Option<SubprocessOverlayLauncher>,
@@ -65,10 +65,13 @@ impl DaemonHost<'_> {
                     if self.headless {
                         self.headless_break_deadline =
                             Instant::now().checked_add(Duration::from_secs(req.duration_secs));
-                    } else if let Some(launcher) = self.overlay_launcher.as_mut()
-                        && let Err(err) = launcher.launch(&req)
-                    {
-                        eprintln!("Warning: failed to launch break overlay: {err}");
+                    } else if let Some(launcher) = self.overlay_launcher.as_mut() {
+                        if let Some(el) = self.event_loop {
+                            el.prepare_child_activation();
+                        }
+                        if let Err(err) = launcher.launch(&req) {
+                            eprintln!("Warning: failed to launch break overlay: {err}");
+                        }
                     }
                 }
                 SchedulerAction::CloseOverlay => {
@@ -118,18 +121,18 @@ impl DaemonHost<'_> {
         }
     }
 
-    fn open_settings(&mut self, event_loop: Option<&PlatformEventLoop>) {
+    fn open_settings(&mut self) {
         if self.headless {
             return;
         }
         self.reap_settings_child();
         if let Some(ref child) = self.settings_child {
-            if let Some(el) = event_loop {
+            if let Some(el) = self.event_loop {
                 el.activate_child(child.id());
             }
             return;
         }
-        if let Some(el) = event_loop {
+        if let Some(el) = self.event_loop {
             el.prepare_child_activation();
         }
         match spawn_settings_subprocess(self.config_file) {
@@ -152,10 +155,15 @@ impl DaemonHost<'_> {
         std::mem::take(&mut self.settings_exited)
     }
 
-    fn close_settings(&mut self) {
+    fn close_settings(&mut self, saved_autostart: bool) {
         if let Some(mut child) = self.settings_child.take() {
             let _ = child.kill();
             let _ = child.wait();
+            // `SIGKILL` skips `on_app_quit` in the Settings child, so restore saved autostart here.
+            if !self.headless {
+                let _ =
+                    sye_platform::sync_system_autostart(saved_autostart, Some(self.config_file));
+            }
         }
     }
 
@@ -244,11 +252,19 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             }
         }
     };
+    let notifier = if headless {
+        OsNotifier::noop()
+    } else {
+        let n = OsNotifier::new();
+        n.request_authorization();
+        n
+    };
     let mut host = DaemonHost {
         headless,
         config_file: &paths.config_file,
         session_file: &paths.session_file,
-        notifier: OsNotifier::new(),
+        event_loop: app_loop.as_ref(),
+        notifier,
         audio: OsAudioPlayer::new(),
         overlay_launcher: (!headless)
             .then(|| SubprocessOverlayLauncher::current_exe().ok())
@@ -266,12 +282,12 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         .as_ref()
         .is_some_and(PlatformEventLoop::was_launched_as_login_item);
     if should_open_settings_on_startup(headless, background, launched_at_login) {
-        host.open_settings(app_loop.as_ref());
+        host.open_settings();
     }
 
     loop {
-        if !drain_ipc_requests(&server, &mut scheduler, &mut host, app_loop.as_ref())
-            || !drain_tray_events(&tray_rx, &mut scheduler, &mut host, app_loop.as_ref())
+        if !drain_ipc_requests(&server, &mut scheduler, &mut host)
+            || !drain_tray_events(&tray_rx, &mut scheduler, &mut host)
         {
             break;
         }
@@ -281,6 +297,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             && updated_cfg != *scheduler.config()
         {
             if !headless
+                && updated_cfg.autostart != scheduler.config().autostart
                 && let Err(err) = sye_platform::sync_system_autostart(
                     updated_cfg.autostart,
                     Some(&paths.config_file),
@@ -297,29 +314,22 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
 
         if !headless && last_policy_check.elapsed() >= Duration::from_secs(1) {
             last_policy_check = Instant::now();
-            let current_idle = idle_provider.idle_duration().ok();
-            if let Some(idle) = current_idle {
+            if let Ok(idle) = idle_provider.idle_duration() {
                 host.execute(scheduler.handle_event(SchedulerEvent::IdleObserved(idle)));
-            }
-            if scheduler.state() == SchedulerState::PreBreak {
-                let dnd_ctx = if scheduler.config().do_not_disturb.enabled {
-                    dnd_provider.query_dnd_context().ok()
-                } else {
-                    None
-                };
-                // SPEC 7.1: postpone_if_active applies only in the final seconds before Break.
-                let postpone_idle = current_idle.filter(|_| {
-                    scheduler.status_snapshot().seconds_until_next_break <= ACTIVE_POSTPONE_SECS
-                });
-                let policy_actions =
-                    scheduler.evaluate_pre_break_policies(postpone_idle, dnd_ctx.as_ref());
-                if !policy_actions.is_empty() {
-                    host.execute(policy_actions);
-                }
             }
         }
 
-        let tick_actions = scheduler.tick();
+        let tick_actions = if !headless && scheduler.needs_policy_check() {
+            let current_idle = idle_provider.idle_duration().ok();
+            let dnd_ctx = if scheduler.config().do_not_disturb.enabled {
+                dnd_provider.query_dnd_context().ok()
+            } else {
+                None
+            };
+            scheduler.tick_with_policies(current_idle, dnd_ctx.as_ref())
+        } else {
+            scheduler.tick()
+        };
         if !tick_actions.is_empty() {
             host.execute(tick_actions);
         }
@@ -333,7 +343,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     }
 
     host.close_overlay();
-    host.close_settings();
+    host.close_settings(scheduler.config().autostart);
     drop(host);
     drop(server);
     if let Some(event_loop) = app_loop {
@@ -348,7 +358,6 @@ fn drain_ipc_requests(
     server: &IpcServer,
     scheduler: &mut Scheduler<SystemClock>,
     host: &mut DaemonHost<'_>,
-    event_loop: Option<&PlatformEventLoop>,
 ) -> bool {
     loop {
         let mut should_quit = false;
@@ -378,9 +387,13 @@ fn drain_ipc_requests(
                 }
             }
             IpcCommand::OpenSettings => {
-                open_settings = true;
-                IpcResponse::Ok {
-                    message: Some("Opening settings".to_owned()),
+                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                    open_settings = true;
+                    IpcResponse::Ok {
+                        message: Some("Opening settings".to_owned()),
+                    }
+                } else {
+                    IpcResponse::Ok { message: None }
                 }
             }
             IpcCommand::Quit => {
@@ -395,10 +408,8 @@ fn drain_ipc_requests(
         if !deferred_actions.is_empty() {
             host.execute(deferred_actions);
         }
-        if open_settings
-            && can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked)
-        {
-            host.open_settings(event_loop);
+        if open_settings {
+            host.open_settings();
         }
         if should_quit {
             return false;
@@ -420,7 +431,6 @@ fn drain_tray_events(
     tray_rx: &mpsc::Receiver<TrayEvent>,
     scheduler: &mut Scheduler<SystemClock>,
     host: &mut DaemonHost<'_>,
-    event_loop: Option<&PlatformEventLoop>,
 ) -> bool {
     let mut keep_running = true;
     while let Ok(event) = tray_rx.try_recv() {
@@ -434,7 +444,7 @@ fn drain_tray_events(
             }
             TrayEvent::OpenSettings | TrayEvent::Reopen => {
                 if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
-                    host.open_settings(event_loop);
+                    host.open_settings();
                 }
                 Vec::new()
             }
@@ -462,7 +472,8 @@ const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
 
 fn spawn_settings_subprocess(config_file: &Path) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
-    Command::new(exe)
+    let resolved = exe.canonicalize().unwrap_or(exe);
+    Command::new(resolved)
         .arg("--internal-settings")
         .arg("--config")
         .arg(config_file)

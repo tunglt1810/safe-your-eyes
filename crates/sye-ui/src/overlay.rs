@@ -305,55 +305,15 @@ fn secondary_window_attributes() -> WindowAttributes {
     attrs
 }
 
-/// Builds the Cozy break overlay surface for both desktop runs and headless tests.
-pub(crate) fn build_overlay_view(
-    request: OverlayRequest,
-    outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
-    quit_on_finish: bool,
+fn build_overlay_card(
+    vm: Signal<OverlayViewModel>,
+    finish_if_ready: impl Fn() + Clone + 'static,
 ) -> impl IntoElement {
-    let vm = signal(OverlayViewModel::new(request));
-
-    let finish_if_ready = move || {
-        let terminal = vm.with(|m| m.outcome().copied());
-        if let Some(outcome) = terminal {
-            crate::store_outcome(&outcome_sink, outcome);
-            if quit_on_finish {
-                quit();
-            }
-        }
-    };
-
-    // Drive fade-in and countdown ticks on the NSH engine clock (supports Clock::manual in tests).
-    let finish_tick = finish_if_ready.clone();
-    let _timer = set_interval(Duration::from_millis(100), move || {
-        vm.update(|m| {
-            let _ = m.tick(Duration::from_millis(100));
-        });
-        finish_tick();
-    });
-
-    let finish_esc = finish_if_ready.clone();
-    on_key("escape", move |_| {
-        vm.update(|m| {
-            let _ = m.handle_key(OverlayKey::Escape);
-        });
-        finish_esc();
-    });
-
-    let finish_space = finish_if_ready.clone();
-    on_key("space", move |_| {
-        vm.update(|m| {
-            let _ = m.handle_key(OverlayKey::Space);
-        });
-        finish_space();
-    });
-
     let break_label: &'static str = vm.with(|m| match m.request().break_type {
         BreakType::Short => "SHORT BREAK",
         BreakType::Long => "LONG BREAK",
     });
     let exercise_title = vm.with(|m| m.request().title.clone());
-    let secondary_title = exercise_title.clone();
     let status_note = vm.with(|m| m.status_note().map(str::to_owned));
     let show_skip = vm.with(OverlayViewModel::show_skip_button);
     let show_postpone = vm.with(OverlayViewModel::show_postpone_button);
@@ -499,23 +459,66 @@ pub(crate) fn build_overlay_view(
         );
     }
 
-    card = card
-        .child(
-            text(move || {
-                vm.with(|m| {
-                    if m.is_shortcut_locked() {
-                        format!("Controls unlock in {}s", m.lock_remaining_secs())
-                    } else if m.request().strict_break && !m.request().allow_postpone {
-                        "Strict break active — rest your eyes".to_owned()
-                    } else {
-                        "Relax your gaze until the timer completes".to_owned()
-                    }
-                })
+    card.child(
+        text(move || {
+            vm.with(|m| {
+                if m.is_shortcut_locked() {
+                    format!("Controls unlock in {}s", m.lock_remaining_secs())
+                } else if m.request().strict_break && !m.request().allow_postpone {
+                    "Strict break active — rest your eyes".to_owned()
+                } else {
+                    "Relax your gaze until the timer completes".to_owned()
+                }
             })
-            .text_xs()
-            .text_color(colors::OVERLAY_MUTED),
-        )
-        .child(actions_row);
+        })
+        .text_xs()
+        .text_color(colors::OVERLAY_MUTED),
+    )
+    .child(actions_row)
+}
+
+/// Builds the Cozy break overlay surface for both desktop runs and headless tests.
+pub(crate) fn build_overlay_view(
+    request: OverlayRequest,
+    outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
+    quit_on_finish: bool,
+) -> impl IntoElement {
+    let vm = signal(OverlayViewModel::new(request));
+
+    let finish_if_ready = move || {
+        let terminal = vm.with(|m| m.outcome().copied());
+        if let Some(outcome) = terminal {
+            crate::store_outcome(&outcome_sink, outcome);
+            if quit_on_finish {
+                quit();
+            }
+        }
+    };
+
+    // Drive fade-in and countdown ticks on the NSH engine clock (supports Clock::manual in tests).
+    let finish_tick = finish_if_ready.clone();
+    let _timer = set_interval(Duration::from_millis(100), move || {
+        vm.update(|m| {
+            let _ = m.tick(Duration::from_millis(100));
+        });
+        finish_tick();
+    });
+
+    let finish_esc = finish_if_ready.clone();
+    on_key("escape", move |_| {
+        vm.update(|m| {
+            let _ = m.handle_key(OverlayKey::Escape);
+        });
+        finish_esc();
+    });
+
+    let finish_space = finish_if_ready.clone();
+    on_key("space", move |_| {
+        vm.update(|m| {
+            let _ = m.handle_key(OverlayKey::Space);
+        });
+        finish_space();
+    });
 
     let mut root = view()
         .flex_1()
@@ -524,7 +527,7 @@ pub(crate) fn build_overlay_view(
         .justify_center()
         .p_6()
         .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
-        .child(card);
+        .child(build_overlay_card(vm, finish_if_ready.clone()));
 
     if quit_on_finish {
         let main_win = current_window();
@@ -581,7 +584,7 @@ pub(crate) fn build_overlay_view(
             |d| d.id.0,
             move |d, _| {
                 let (disp_id, disp_bounds) = d.with(|disp| (disp.id, disp.bounds));
-                let sec_title = secondary_title.clone();
+                let finish_if_ready = finish_if_ready.clone();
                 let sec_win_el = nsh_core::element::desktop::window()
                     .id(format!("overlay-secondary-{}", disp_id.0))
                     .kind(WindowKind::Popup)
@@ -626,21 +629,8 @@ pub(crate) fn build_overlay_view(
                         .items_center()
                         .justify_center()
                         .p_6()
-                        .gap_4()
                         .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
-                        .child(app_icon(48.0))
-                        .child(
-                            text(sec_title.clone())
-                                .text_2xl()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(colors::OVERLAY_TEXT),
-                        )
-                        .child(
-                            text(move || vm.with(OverlayViewModel::formatted_remaining))
-                                .text_4xl()
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(colors::ACCENT),
-                        )
+                        .child(build_overlay_card(vm, finish_if_ready.clone()))
                 })
             },
         ));

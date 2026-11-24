@@ -121,6 +121,7 @@ pub struct Scheduler<C: Clock> {
     state: SchedulerState,
     smart_pause: SmartPausePolicy,
     skip_limit: SkipLimitPolicy,
+    pre_break_notification_active: bool,
 
     // Active monotonic deadlines in milliseconds.
     pre_break_at_ms: u64,
@@ -149,6 +150,7 @@ impl<C: Clock> Scheduler<C> {
             state: SchedulerState::Start,
             smart_pause: SmartPausePolicy::new(),
             skip_limit: SkipLimitPolicy::new(0),
+            pre_break_notification_active: false,
             pre_break_at_ms: 0,
             next_break_at_ms: 0,
             break_started_ms: 0,
@@ -241,10 +243,61 @@ impl<C: Clock> Scheduler<C> {
         Vec::new()
     }
 
-    /// Convenience wrapper for `handle_event(SchedulerEvent::Tick)`.
+    /// Returns `true` when `Waiting` or `PreBreak` has reached its policy-evaluation deadline.
+    #[must_use]
+    pub fn needs_policy_check(&self) -> bool {
+        match self.state {
+            SchedulerState::Waiting => self.now_mono_ms() >= self.pre_break_at_ms,
+            SchedulerState::PreBreak => self.now_mono_ms() >= self.next_break_at_ms,
+            SchedulerState::Start
+            | SchedulerState::Break
+            | SchedulerState::Stopped
+            | SchedulerState::Quit
+            | SchedulerState::Resting => false,
+        }
+    }
+
+    /// Advances time-driven transitions while evaluating `DoNotDisturb` and `SmartPause` policies.
+    #[must_use]
+    pub fn tick_with_policies(
+        &mut self,
+        current_idle: Option<Duration>,
+        dnd_ctx: Option<&DndContext>,
+    ) -> Vec<SchedulerAction> {
+        if self.state == SchedulerState::Quit {
+            return Vec::new();
+        }
+
+        let now = self.now_mono_ms();
+        match self.state {
+            SchedulerState::Waiting => self.tick_waiting(now, current_idle, dnd_ctx),
+            SchedulerState::PreBreak => self.tick_pre_break(now, current_idle, dnd_ctx),
+            SchedulerState::Break => {
+                if now < self.break_ends_ms {
+                    return Vec::new();
+                }
+                self.complete_break(true)
+            }
+            SchedulerState::Stopped => {
+                if let Some(resume_at) = self.resume_at_ms
+                    && now >= resume_at
+                {
+                    self.resume_at_ms = None;
+                    self.disabled_until_unix_secs = None;
+                    if self.queue.is_some() {
+                        return self.enter_waiting_fresh();
+                    }
+                }
+                Vec::new()
+            }
+            SchedulerState::Start | SchedulerState::Resting | SchedulerState::Quit => Vec::new(),
+        }
+    }
+
+    /// Convenience wrapper for `tick_with_policies(None, None)`.
     #[must_use]
     pub fn tick(&mut self) -> Vec<SchedulerAction> {
-        self.handle_event(SchedulerEvent::Tick)
+        self.tick_with_policies(None, None)
     }
 
     /// Processes a single event synchronously and returns emitted side-effect actions.
@@ -256,7 +309,7 @@ impl<C: Clock> Scheduler<C> {
 
         match event {
             SchedulerEvent::Start | SchedulerEvent::Enable => self.handle_start_or_enable(),
-            SchedulerEvent::Tick => self.handle_tick(),
+            SchedulerEvent::Tick => self.tick_with_policies(None, None),
             SchedulerEvent::Disable { duration_secs } => self.handle_disable(duration_secs),
             SchedulerEvent::EnterResting => self.handle_enter_resting(),
             SchedulerEvent::ExitResting { credit_idle_secs } => {
@@ -352,74 +405,95 @@ impl<C: Clock> Scheduler<C> {
         }
     }
 
-    fn handle_tick(&mut self) -> Vec<SchedulerAction> {
-        let now = self.now_mono_ms();
-        match self.state {
-            SchedulerState::Waiting => {
-                if now < self.pre_break_at_ms {
-                    return Vec::new();
-                }
-                let Some(queued) = self.queue.as_ref().map(|q| q.current().clone()) else {
-                    self.state = SchedulerState::Stopped;
-                    return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
-                };
-                let effective_warning_secs =
-                    self.config.pre_break_warning_secs.min(queued.wait_secs);
-                if effective_warning_secs == 0 {
-                    return self.enter_break(now, queued.spec);
-                }
-                self.state = SchedulerState::PreBreak;
-                let warning_ms = effective_warning_secs.saturating_mul(1000);
-                // Ensure the user still receives a warning window if tick() arrived late.
-                self.next_break_at_ms = self.next_break_at_ms.max(now.saturating_add(warning_ms));
-                let mut actions = vec![SchedulerAction::NotifyPreBreak {
-                    break_spec: queued.spec,
-                    warning_secs: effective_warning_secs,
-                }];
-                if self.config.audible_alert.pre_break {
-                    actions.push(SchedulerAction::PlayChime {
-                        kind: ChimeKind::PreBreak,
-                        volume: self.config.audible_alert.volume,
-                    });
-                }
-                actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
-                actions
-            }
-            SchedulerState::PreBreak => {
-                if now < self.next_break_at_ms {
-                    return Vec::new();
-                }
-                let Some(spec) = self.queue.as_ref().map(|q| q.current().spec.clone()) else {
-                    self.state = SchedulerState::Stopped;
-                    return vec![
-                        SchedulerAction::DismissNotification,
-                        SchedulerAction::UpdateTray(self.tray_snapshot()),
-                    ];
-                };
-                let mut actions = vec![SchedulerAction::DismissNotification];
-                actions.extend(self.enter_break(now, spec));
-                actions
-            }
-            SchedulerState::Break => {
-                if now < self.break_ends_ms {
-                    return Vec::new();
-                }
-                self.complete_break(true)
-            }
-            SchedulerState::Stopped => {
-                if let Some(resume_at) = self.resume_at_ms
-                    && now >= resume_at
-                {
-                    self.resume_at_ms = None;
-                    self.disabled_until_unix_secs = None;
-                    if self.queue.is_some() {
-                        return self.enter_waiting_fresh();
-                    }
-                }
-                Vec::new()
-            }
-            SchedulerState::Start | SchedulerState::Resting | SchedulerState::Quit => Vec::new(),
+    fn tick_waiting(
+        &mut self,
+        now: u64,
+        current_idle: Option<Duration>,
+        dnd_ctx: Option<&DndContext>,
+    ) -> Vec<SchedulerAction> {
+        if now < self.pre_break_at_ms {
+            return Vec::new();
         }
+        if self.queue.is_none() {
+            self.state = SchedulerState::Stopped;
+            return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
+        }
+        if let Some(ctx) = dnd_ctx
+            && DoNotDisturbPolicy::evaluate(&self.config.do_not_disturb, ctx).should_suppress()
+        {
+            if let Some(queue) = self.queue.as_mut() {
+                queue.advance();
+            }
+            return self.enter_waiting_fresh();
+        }
+        let Some(queued) = self.queue.as_ref().map(|q| q.current().clone()) else {
+            self.state = SchedulerState::Stopped;
+            return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
+        };
+        let effective_warning_secs = self.config.pre_break_warning_secs.min(queued.wait_secs);
+        if effective_warning_secs == 0 {
+            if let Some(idle) = current_idle
+                && let Some(delay) =
+                    SmartPausePolicy::should_postpone_if_active(&self.config.smart_pause, idle)
+            {
+                self.state = SchedulerState::PreBreak;
+                self.pre_break_notification_active = false;
+                let delay_ms = delay.as_secs().max(1).saturating_mul(1000);
+                self.next_break_at_ms = now.saturating_add(delay_ms);
+                return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
+            }
+            return self.enter_break(now, queued.spec);
+        }
+        self.state = SchedulerState::PreBreak;
+        self.pre_break_notification_active = true;
+        let warning_ms = effective_warning_secs.saturating_mul(1000);
+        // Ensure the user still receives a warning window if tick() arrived late.
+        self.next_break_at_ms = self.next_break_at_ms.max(now.saturating_add(warning_ms));
+        let mut actions = vec![SchedulerAction::NotifyPreBreak {
+            break_spec: queued.spec,
+            warning_secs: effective_warning_secs,
+        }];
+        if self.config.audible_alert.pre_break {
+            actions.push(SchedulerAction::PlayChime {
+                kind: ChimeKind::PreBreak,
+                volume: self.config.audible_alert.volume,
+            });
+        }
+        actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
+        actions
+    }
+
+    fn tick_pre_break(
+        &mut self,
+        now: u64,
+        current_idle: Option<Duration>,
+        dnd_ctx: Option<&DndContext>,
+    ) -> Vec<SchedulerAction> {
+        if now < self.next_break_at_ms {
+            return Vec::new();
+        }
+        if let Some(ctx) = dnd_ctx
+            && DoNotDisturbPolicy::evaluate(&self.config.do_not_disturb, ctx).should_suppress()
+        {
+            return self.handle_cancel_current_break();
+        }
+        if let Some(idle) = current_idle
+            && let Some(delay) =
+                SmartPausePolicy::should_postpone_if_active(&self.config.smart_pause, idle)
+        {
+            return self.handle_defer_break(delay.as_secs().max(1));
+        }
+        let mut actions = Vec::new();
+        if std::mem::take(&mut self.pre_break_notification_active) {
+            actions.push(SchedulerAction::DismissNotification);
+        }
+        let Some(spec) = self.queue.as_ref().map(|q| q.current().spec.clone()) else {
+            self.state = SchedulerState::Stopped;
+            actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
+            return actions;
+        };
+        actions.extend(self.enter_break(now, spec));
+        actions
     }
 
     fn handle_disable(&mut self, duration_secs: Option<u64>) -> Vec<SchedulerAction> {
@@ -590,8 +664,13 @@ impl<C: Clock> Scheduler<C> {
         if self.state != SchedulerState::PreBreak {
             return Vec::new();
         }
-        let mut actions = vec![SchedulerAction::DismissNotification];
-        actions.extend(self.enter_waiting_with_wait_secs(delay_secs.max(1), false));
+        let delay_ms = delay_secs.max(1).saturating_mul(1000);
+        self.next_break_at_ms = self.now_mono_ms().saturating_add(delay_ms);
+        let mut actions = Vec::new();
+        if std::mem::take(&mut self.pre_break_notification_active) {
+            actions.push(SchedulerAction::DismissNotification);
+        }
+        actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
         actions
     }
 
@@ -602,7 +681,10 @@ impl<C: Clock> Scheduler<C> {
         if let Some(queue) = self.queue.as_mut() {
             queue.advance();
         }
-        let mut actions = vec![SchedulerAction::DismissNotification];
+        let mut actions = Vec::new();
+        if std::mem::take(&mut self.pre_break_notification_active) {
+            actions.push(SchedulerAction::DismissNotification);
+        }
         actions.extend(self.enter_waiting_fresh());
         actions
     }
@@ -643,9 +725,13 @@ impl<C: Clock> Scheduler<C> {
         actions
     }
 
-    fn push_active_state_cleanup(&self, actions: &mut Vec<SchedulerAction>) {
+    fn push_active_state_cleanup(&mut self, actions: &mut Vec<SchedulerAction>) {
         match self.state {
-            SchedulerState::PreBreak => actions.push(SchedulerAction::DismissNotification),
+            SchedulerState::PreBreak => {
+                if std::mem::take(&mut self.pre_break_notification_active) {
+                    actions.push(SchedulerAction::DismissNotification);
+                }
+            }
             SchedulerState::Break => actions.push(SchedulerAction::CloseOverlay),
             SchedulerState::Start
             | SchedulerState::Waiting
@@ -657,6 +743,7 @@ impl<C: Clock> Scheduler<C> {
 
     fn enter_break(&mut self, now_ms: u64, spec: ResolvedBreak) -> Vec<SchedulerAction> {
         self.state = SchedulerState::Break;
+        self.pre_break_notification_active = false;
         self.break_started_ms = now_ms;
         self.break_ends_ms = now_ms.saturating_add(spec.duration_secs.saturating_mul(1000));
 
@@ -716,6 +803,7 @@ impl<C: Clock> Scheduler<C> {
     fn enter_waiting_fresh(&mut self) -> Vec<SchedulerAction> {
         let Some(wait_secs) = self.queue.as_ref().map(|q| q.current().wait_secs) else {
             self.state = SchedulerState::Stopped;
+            self.pre_break_notification_active = false;
             return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
         };
         self.enter_waiting_with_wait_secs(wait_secs, true)
@@ -732,6 +820,7 @@ impl<C: Clock> Scheduler<C> {
         let warning_ms = warning_secs.saturating_mul(1000);
 
         self.state = SchedulerState::Waiting;
+        self.pre_break_notification_active = false;
         self.next_break_at_ms = now.saturating_add(wait_ms);
         self.pre_break_at_ms = self.next_break_at_ms.saturating_sub(warning_ms);
 
@@ -1228,9 +1317,8 @@ mod tests {
         let _ = sched.tick();
         assert_eq!(sched.state(), SchedulerState::PreBreak);
 
-        // Active user defers break by 2s.
         let defer_actions = sched.evaluate_pre_break_policies(Some(Duration::ZERO), None);
-        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
         assert_eq!(sched.status_snapshot().seconds_until_next_break, 2);
         assert!(
             defer_actions
@@ -1238,8 +1326,11 @@ mod tests {
                 .any(|a| matches!(a, SchedulerAction::DismissNotification))
         );
 
-        // Reach PreBreak again, then suppress via DND.
         clock.advance_secs(2);
+        let _ = sched.tick();
+        let _ = sched.handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Completed));
+
+        clock.advance_secs(890);
         let _ = sched.tick();
         assert_eq!(sched.state(), SchedulerState::PreBreak);
         let dnd = DndContext {
@@ -1341,5 +1432,204 @@ mod tests {
         assert_eq!(sched.state(), SchedulerState::Waiting);
         let _ = sched.status_snapshot();
         let _ = sched.tick();
+    }
+
+    fn has_pre_break_chime(actions: &[SchedulerAction]) -> bool {
+        actions.iter().any(|a| {
+            matches!(
+                a,
+                SchedulerAction::PlayChime {
+                    kind: ChimeKind::PreBreak,
+                    ..
+                }
+            )
+        })
+    }
+
+    #[test]
+    fn needs_policy_check_tracks_waiting_and_pre_break_deadlines() {
+        let clock = FakeClock::default();
+        let mut sched = Scheduler::new(test_config(), &clock, 1);
+        assert!(!sched.needs_policy_check());
+
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert!(!sched.needs_policy_check());
+
+        clock.advance_secs(889);
+        assert!(!sched.needs_policy_check());
+
+        clock.advance_secs(1);
+        assert!(sched.needs_policy_check());
+
+        let _ = sched.tick_with_policies(None, None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert!(!sched.needs_policy_check());
+
+        clock.advance_secs(9);
+        assert!(!sched.needs_policy_check());
+
+        clock.advance_secs(1);
+        assert!(sched.needs_policy_check());
+
+        let _ = sched.tick_with_policies(None, None);
+        assert_eq!(sched.state(), SchedulerState::Break);
+        assert!(!sched.needs_policy_check());
+    }
+
+    #[test]
+    fn tick_with_policies_dnd_at_waiting_suppresses_pre_break_and_advances_queue() {
+        let clock = FakeClock::default();
+        let mut sched = Scheduler::new(test_config(), &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        let first_name = sched.status_snapshot().next_break_name;
+
+        clock.advance_secs(890);
+        let dnd = DndContext {
+            is_fullscreen: true,
+            ..DndContext::default()
+        };
+        let actions = sched.tick_with_policies(None, Some(&dnd));
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert_ne!(sched.status_snapshot().next_break_name, first_name);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 900);
+        assert_eq!(sched.next_deadline(), Some(Duration::from_secs(1780)));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(!has_pre_break_chime(&actions));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+    }
+
+    #[test]
+    fn tick_with_policies_postpone_if_active_defers_in_pre_break_without_spam() {
+        let clock = FakeClock::default();
+        let mut cfg = test_config();
+        cfg.smart_pause.postpone_if_active = true;
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(890);
+        let pre_actions = sched.tick_with_policies(Some(Duration::ZERO), None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert!(
+            pre_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(has_pre_break_chime(&pre_actions));
+
+        clock.advance_secs(10);
+        let defer_1 = sched.tick_with_policies(Some(Duration::from_secs(1)), None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 2);
+        assert_eq!(sched.next_deadline(), Some(Duration::from_secs(902)));
+        let dismiss_count_1 = defer_1
+            .iter()
+            .filter(|a| matches!(a, SchedulerAction::DismissNotification))
+            .count();
+        assert_eq!(dismiss_count_1, 1);
+        assert!(
+            !defer_1
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(!has_pre_break_chime(&defer_1));
+        assert!(
+            !defer_1
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+
+        clock.advance_secs(2);
+        let defer_2 = sched.tick_with_policies(Some(Duration::ZERO), None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 2);
+        assert!(
+            !defer_2
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+        assert!(
+            !defer_2
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(!has_pre_break_chime(&defer_2));
+        assert!(
+            !defer_2
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+
+        clock.advance_secs(2);
+        let brk_actions = sched.tick_with_policies(Some(Duration::from_secs(2)), None);
+        assert_eq!(sched.state(), SchedulerState::Break);
+        assert!(
+            brk_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+        assert!(
+            !brk_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+        assert!(
+            !brk_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(!has_pre_break_chime(&brk_actions));
+    }
+
+    #[test]
+    fn zero_warning_postpone_if_active_defers_silently_until_idle() {
+        let clock = FakeClock::default();
+        let mut cfg = test_config();
+        cfg.pre_break_warning_secs = 0;
+        cfg.smart_pause.postpone_if_active = true;
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(900);
+        let defer_actions = sched.tick_with_policies(Some(Duration::ZERO), None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 2);
+        assert!(
+            !defer_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
+        );
+        assert!(
+            !defer_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+        assert!(
+            !defer_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+
+        clock.advance_secs(2);
+        let brk_actions = sched.tick_with_policies(Some(Duration::from_secs(2)), None);
+        assert_eq!(sched.state(), SchedulerState::Break);
+        assert!(
+            brk_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+        assert!(
+            !brk_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
     }
 }

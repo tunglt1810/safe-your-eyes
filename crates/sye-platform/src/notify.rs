@@ -47,6 +47,16 @@ impl OsNotifier {
             active: Mutex::new(None),
         }
     }
+
+    /// Requests OS notification permission once per process when supported.
+    pub fn request_authorization(&self) {
+        #[cfg(target_os = "macos")]
+        if self.enabled {
+            macos_impl::request_authorization();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = self.enabled;
+    }
 }
 
 impl Default for OsNotifier {
@@ -153,7 +163,10 @@ impl Notifier for OsNotifier {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(clippy::unused_self)]
+#[expect(
+    clippy::unused_self,
+    reason = "Objective-C UNUserNotificationCenterDelegate selector requires &self"
+)]
 #[expect(
     unsafe_code,
     reason = "UserNotifications.framework dynamic loading and Objective-C messaging"
@@ -170,8 +183,9 @@ mod macos_impl {
     use sye_core::PlatformError;
 
     const PRE_BREAK_NOTIFICATION_ID: &str = "io.github.safeyoureyes.pre-break";
-    const AUTHORIZATION_OPTIONS: usize = 1 | 2 | 4;
-    const PRESENTATION: usize = 1 | (1 << 1) | (1 << 3) | (1 << 4);
+    // Alert/banner/list only: badges are unused and chimes play through `OsAudioPlayer`.
+    const AUTHORIZATION_OPTIONS: usize = 1 << 2;
+    const PRESENTATION: usize = (1 << 3) | (1 << 4);
 
     thread_local! {
         // `UNUserNotificationCenter.delegate` is weak, so retain the delegate on the main thread.
@@ -199,21 +213,21 @@ mod macos_impl {
         }
     );
 
+    pub(super) fn request_authorization() {
+        autoreleasepool(|_| {
+            let Ok(center) = notification_center() else {
+                return;
+            };
+            install_delegate(&center);
+            ensure_authorization(&center);
+        });
+    }
+
     pub(super) fn show_pre_break(summary: &str, body: &str) -> Result<(), PlatformError> {
         autoreleasepool(|_| {
             let center = notification_center()?;
             install_delegate(&center);
-
-            let auth_done = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
-            // SAFETY: `requestAuthorizationWithOptions:completionHandler:` is a documented
-            // `UNUserNotificationCenter` selector accepting `UNAuthorizationOptions` and `(BOOL, NSError *)`.
-            unsafe {
-                let _: () = msg_send![
-                    &*center,
-                    requestAuthorizationWithOptions: AUTHORIZATION_OPTIONS,
-                    completionHandler: &*auth_done
-                ];
-            }
+            ensure_authorization(&center);
 
             let content_cls = AnyClass::get(c"UNMutableNotificationContent").ok_or_else(|| {
                 PlatformError::Unavailable("UNMutableNotificationContent unavailable".to_owned())
@@ -262,6 +276,22 @@ mod macos_impl {
                 let _: () =
                     msg_send![&*center, removePendingNotificationRequestsWithIdentifiers: &*ids];
                 let _: () = msg_send![&*center, removeDeliveredNotificationsWithIdentifiers: &*ids];
+            }
+        });
+    }
+
+    fn ensure_authorization(center: &AnyObject) {
+        static AUTH_REQUESTED: OnceLock<()> = OnceLock::new();
+        AUTH_REQUESTED.get_or_init(|| {
+            let auth_done = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
+            // SAFETY: `requestAuthorizationWithOptions:completionHandler:` is a documented
+            // `UNUserNotificationCenter` selector accepting `UNAuthorizationOptions` and `(BOOL, NSError *)`.
+            unsafe {
+                let _: () = msg_send![
+                    center,
+                    requestAuthorizationWithOptions: AUTHORIZATION_OPTIONS,
+                    completionHandler: &*auth_done
+                ];
             }
         });
     }
@@ -351,5 +381,15 @@ mod tests {
         let res = notifier.show_pre_break(BreakType::Short, "Look away", 5);
         assert!(matches!(res, Ok(()) | Err(PlatformError::Unavailable(_))));
         assert!(notifier.dismiss().is_ok());
+    }
+
+    #[test]
+    fn request_authorization_succeeds_for_noop_and_active_notifiers() {
+        let noop = OsNotifier::noop();
+        noop.request_authorization();
+
+        let active = OsNotifier::new();
+        active.request_authorization();
+        active.request_authorization();
     }
 }

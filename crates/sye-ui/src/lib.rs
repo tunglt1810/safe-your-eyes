@@ -16,7 +16,8 @@ pub use monitors::{
 };
 pub use overlay::{OverlayKey, OverlayViewModel, format_mm_ss, run_overlay};
 pub use settings::{
-    SettingsOutcome, SettingsTab, SettingsViewModel, run_settings, run_settings_with_autostart,
+    AutostartChangeCallback, SettingsOutcome, SettingsTab, SettingsViewModel, run_settings,
+    run_settings_with_autostart,
 };
 pub use theme::SUPPORT_URL;
 

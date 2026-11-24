@@ -71,7 +71,7 @@ fn main() -> ExitCode {
             }
         },
         CommandMode::InternalSettings => run_settings_and_sync_autostart(&paths.config_file),
-        CommandMode::Daemon => daemon::run_daemon(&paths, args.headless),
+        CommandMode::Daemon => daemon::run_daemon(&paths, args.headless, args.background),
         CommandMode::Status { json } => send_ipc_command(
             &paths,
             &IpcCommand::Status,

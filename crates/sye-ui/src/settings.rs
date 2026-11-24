@@ -1,24 +1,31 @@
 //! Cozy Settings window view model and Native Shell (`nsh`) renderer.
 //!
 //! Applies the Cozy Design System (<https://github.com/tunglt1810/cozy>) with Astryx layout rules:
-//! Floating Sage Sidebar with spring indicator, Pastel KPI summary cards, `SegmentedControl` theme
-//! switcher, unified rounded Form Card with clipped sticky toolbar, and author support link.
+//! seamless themed hidden titlebar, Floating Sage Sidebar with spring indicator, top-right Cozy
+//! theme switcher with Circular Theme Reveal, Pastel KPI summary cards, unified rounded Form Card
+//! with clipped sticky toolbar, and author support link.
 
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use nsh_core::element::desktop::quit;
+use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
+use nsh_core::element::desktop::{quit, title_bar};
 use nsh_core::prelude::*;
-use sye_core::config::{BreakSpec, BreakType, Config};
+use nsh_core::shader::TransitionKey;
+use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
 
 use crate::UiError;
-use crate::theme::{SUPPORT_URL, colors, motion, radii};
+use crate::theme::{
+    SUPPORT_URL, appearance_for_theme_mode, colors, motion, next_theme_mode, radii,
+    theme_mode_for_appearance, theme_reveal_shader,
+};
 use crate::ui::{
     KpiTone, app_icon, cozy_input, cozy_switch, destructive_button, ghost_button, page_heading,
     pastel_kpi_card, primary_button, secondary_button, section_divider, section_header,
-    segmented_option, segmented_track, sidebar_nav_indicator, sidebar_nav_item, status_banner,
-    support_link, support_qr_card,
+    sidebar_nav_indicator, sidebar_nav_item, status_banner, support_link, support_qr_card,
+    theme_toggle_button,
 };
 
 #[cfg(target_os = "linux")]
@@ -337,7 +344,7 @@ fn number_field_row(
                     },
                 )))
                 .child(
-                    view().w(px(44.0)).child(
+                    view().w(px(44.0)).items_end().child(
                         text(unit)
                             .text_xs()
                             .font_weight(FontWeight::MEDIUM)
@@ -622,80 +629,45 @@ fn exercises_section(vm: Signal<SettingsViewModel>) -> impl IntoElement {
         ))
 }
 
-fn about_section(appearance: Signal<Appearance>) -> impl IntoElement {
-    let theme_index = move || match appearance.get() {
-        Appearance::Light => 0,
-        Appearance::Dark => 1,
-        Appearance::System => 2,
-    };
-    let mut track = segmented_track(theme_index);
-    for (label, mode) in [
-        ("Light", Appearance::Light),
-        ("Dark", Appearance::Dark),
-        ("System", Appearance::System),
-    ] {
-        track = track.child(segmented_option(
-            label,
-            move || appearance.get() == mode,
-            move || {
-                appearance.set(mode);
-                set_color_scheme(mode);
-            },
-        ));
-    }
-
-    view()
-        .gap_5()
-        .child(
-            view()
-                .gap_3()
-                .child(section_header(
-                    "Cozy Appearance",
-                    "Switch between warm oatmeal Light mode, dark roast Dark mode, or follow your OS.",
-                ))
-                .child(
-                    view()
-                        .flex_row()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(track)
-                        .child(
-                            text(move || match appearance.get() {
-                                Appearance::Light => "Active mode: Light (Warm Oatmeal)",
-                                Appearance::Dark => "Active mode: Dark (Dark Roast)",
-                                Appearance::System => "Active mode: System",
-                            })
+fn about_section() -> impl IntoElement {
+    view().gap_5().child(
+        view()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_5()
+            .child(
+                view()
+                    .flex_1()
+                    .gap_3()
+                    .child(section_header(
+                        "Support Safe Your Eyes",
+                        "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
+                    ))
+                    .child(
+                        text(format!("Support link: {SUPPORT_URL}"))
                             .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
                             .text_color(colors::TEXT_SECONDARY),
-                        ),
-                ),
-        )
-        .child(section_divider())
-        .child(
-            view()
-                .flex_row()
-                .items_center()
-                .justify_between()
-                .gap_5()
-                .child(
-                    view()
-                        .flex_1()
-                        .gap_3()
-                        .child(section_header(
-                            "Support Safe Your Eyes",
-                            "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
-                        ))
-                        .child(
-                            text(format!("Support link: {SUPPORT_URL}"))
-                                .text_xs()
-                                .text_color(colors::TEXT_SECONDARY),
-                        )
-                        .child(view().flex_row().child(support_link("Buy Me a Coffee"))),
-                )
-                .child(support_qr_card()),
-        )
+                    )
+                    .child(view().flex_row().child(support_link("Buy Me a Coffee"))),
+            )
+            .child(support_qr_card()),
+    )
+}
+
+/// Builds the `MainWindowOptions` with a seamless themed hidden titlebar.
+fn settings_main_window_options() -> MainWindowOptions {
+    let mut tb = TitleBarOptions::default();
+    tb.style = TitleBarStyle::Hidden;
+    tb.height = Some(px(36.0));
+    #[cfg(target_os = "macos")]
+    {
+        // Aligns macOS traffic lights cleanly inside the top-left of the Floating Sage Sidebar.
+        tb.controls_offset = Some(point(px(22.0), px(20.0)));
+    }
+    let mut main_window = MainWindowOptions::default();
+    main_window.attributes.title_bar = Some(tb);
+    main_window
 }
 
 /// Builds the Cozy Settings UI surface for both desktop runs and headless tests.
@@ -704,8 +676,12 @@ pub(crate) fn build_settings_view(
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
 ) -> impl IntoElement {
+    let initial_appearance = appearance_for_theme_mode(initial_vm.config.theme);
     let vm = signal(initial_vm);
-    let appearance = signal(Appearance::Light);
+    let appearance = signal(initial_appearance);
+    let measured_theme_btn_center = signal(None::<[f32; 2]>);
+    let reveal_origin = signal([860.0_f32, 44.0_f32]);
+    let reveal_epoch = signal(0_u32);
 
     let active_tab = computed(move || vm.with(|m| m.active_tab));
     let warning_msg = computed(move || vm.with(|m| m.load_warning.clone()));
@@ -734,9 +710,29 @@ pub(crate) fn build_settings_view(
         }
     });
 
+    // Keep reveal_origin synced with live button center for external OS theme switches and Reset.
+    effect(move || {
+        if let Some(center) = measured_theme_btn_center.get() {
+            reveal_origin.set(center);
+        }
+    });
+
+    // Only trigger Cozy's Circular Theme Reveal when the resolved Light/Dark state actually flips
+    // and OS Reduce Motion is off (suppresses startup and no-op System -> Light/Dark clicks).
+    let prev_dark = Cell::new(None::<bool>);
+    effect(move || {
+        let now_dark = dark();
+        let previous = prev_dark.replace(Some(now_dark));
+        if let Some(prev) = previous
+            && prev != now_dark
+            && !reduce_motion()
+        {
+            reveal_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+        }
+    });
+
     let save_sink = Arc::clone(&outcome_sink);
     let cancel_sink = outcome_sink;
-    let (bx1, by1, bx2, by2) = motion::COZY_BEZIER;
 
     let tab_index = move || match active_tab.get() {
         SettingsTab::Timing => 0,
@@ -762,14 +758,17 @@ pub(crate) fn build_settings_view(
         .flex_shrink_0()
         .rounded(radii::SIDEBAR)
         .bg(colors::SIDEBAR_BG)
+        .border_1()
+        .border_color(colors::BORDER)
         .p_3()
         .justify_between()
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .gap_2()
+                .child(when(
+                    move || title_bar().left.0 > 0.0,
+                    || view().h(px(26.0)).window_drag(true),
+                ))
                 .child(
                     view()
                         .flex_row()
@@ -777,6 +776,7 @@ pub(crate) fn build_settings_view(
                         .gap_3()
                         .px_2()
                         .py_2()
+                        .window_drag(true)
                         .child(app_icon(36.0))
                         .child(
                             view()
@@ -842,11 +842,35 @@ pub(crate) fn build_settings_view(
     let page_header = view()
         .flex_shrink_0()
         .gap_3()
-        .child(page_heading(
-            "Settings",
-            move || active_tab.get().label(),
-            &highlight_scale,
-        ))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .window_drag(true)
+                .child(page_heading(
+                    move || active_tab.get().label(),
+                    &highlight_scale,
+                ))
+                .child(theme_toggle_button(
+                    move || theme_mode_for_appearance(appearance.get()),
+                    measured_theme_btn_center,
+                    move |origin| {
+                        let resolved_origin = origin.unwrap_or_else(|| {
+                            let win = window();
+                            [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
+                        });
+                        reveal_origin.set(resolved_origin);
+                        let next_mode =
+                            next_theme_mode(theme_mode_for_appearance(appearance.get()));
+                        let next_appearance = appearance_for_theme_mode(next_mode);
+                        vm.update(|m| m.config.theme = next_mode);
+                        appearance.set(next_appearance);
+                        set_color_scheme(next_appearance);
+                    },
+                )),
+        )
         .child(kpi_row)
         .child(when(
             move || warning_msg.get().is_some(),
@@ -857,38 +881,29 @@ pub(crate) fn build_settings_view(
             move || status_banner(true, move || error_msg.get().unwrap_or_default()),
         ));
 
-    let form_scroll = scroll()
-        .flex_1()
-        .bg(colors::BACKGROUND_SURFACE)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
-        .child(
-            view()
-                .p_5()
-                .bg(colors::BACKGROUND_SURFACE)
-                .transition_colors()
-                .duration(motion::THEME_COLOR_MS)
-                .ease_bezier(bx1, by1, bx2, by2)
-                .bind_opacity(&panel_opacity)
-                .bind_translate_y(&panel_y)
-                .child(when(
-                    move || active_tab.get() == SettingsTab::Timing,
-                    move || timing_section(vm),
-                ))
-                .child(when(
-                    move || active_tab.get() == SettingsTab::Policies,
-                    move || policies_section(vm),
-                ))
-                .child(when(
-                    move || active_tab.get() == SettingsTab::Exercises,
-                    move || exercises_section(vm),
-                ))
-                .child(when(
-                    move || active_tab.get() == SettingsTab::About,
-                    move || about_section(appearance),
-                )),
-        );
+    let form_scroll = scroll().flex_1().bg(colors::BACKGROUND_SURFACE).child(
+        view()
+            .p_5()
+            .bg(colors::BACKGROUND_SURFACE)
+            .bind_opacity(&panel_opacity)
+            .bind_translate_y(&panel_y)
+            .child(when(
+                move || active_tab.get() == SettingsTab::Timing,
+                move || timing_section(vm),
+            ))
+            .child(when(
+                move || active_tab.get() == SettingsTab::Policies,
+                move || policies_section(vm),
+            ))
+            .child(when(
+                move || active_tab.get() == SettingsTab::Exercises,
+                move || exercises_section(vm),
+            ))
+            .child(when(
+                move || active_tab.get() == SettingsTab::About,
+                about_section,
+            )),
+    );
 
     let sticky_toolbar = view()
         .flex_shrink_0()
@@ -897,13 +912,9 @@ pub(crate) fn build_settings_view(
         .justify_between()
         .px_5()
         .py_3()
-        .rounded_b(radii::CONTAINER)
         .bg(colors::BACKGROUND_SURFACE)
         .border_t_1()
         .border_color(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .flex_row()
@@ -924,6 +935,12 @@ pub(crate) fn build_settings_view(
                 }))
                 .child(secondary_button("Reset", move || {
                     vm.update(SettingsViewModel::reset_to_defaults);
+                    let default_appearance = appearance_for_theme_mode(ThemeMode::default());
+                    if let Some(center) = measured_theme_btn_center.get() {
+                        reveal_origin.set(center);
+                    }
+                    appearance.set(default_appearance);
+                    set_color_scheme(default_appearance);
                 })),
         )
         .child(ghost_button("Cancel", move || {
@@ -944,23 +961,45 @@ pub(crate) fn build_settings_view(
         .border_1()
         .border_color(colors::BORDER)
         .overflow_hidden()
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(form_scroll)
         .child(sticky_toolbar);
 
-    view()
+    // Reserve top drag clearance on Windows/Linux where native caption buttons occupy top-right.
+    let right_pane = view()
+        .flex_1()
+        .gap_3()
+        .child(when(
+            move || title_bar().right.0 > 0.0,
+            || {
+                view()
+                    .h(move || px((title_bar().top.0 - 12.0).max(0.0)))
+                    .w_full()
+                    .window_drag(true)
+            },
+        ))
+        .child(page_header)
+        .child(form_card);
+
+    let mut root = view()
         .flex_1()
         .bg(colors::BACKGROUND_BODY)
         .flex_row()
-        .p_4()
-        .gap_4()
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
+        .p_3()
+        .gap_3()
         .child(sidebar)
-        .child(view().flex_1().gap_4().child(page_header).child(form_card))
+        .child(right_pane);
+
+    if let Some(shader) = theme_reveal_shader() {
+        root = root.child(
+            screen_transition()
+                .source(shader)
+                .duration(Duration::from_millis(motion::THEME_REVEAL_MS))
+                .uniform("origin", move || reveal_origin.get())
+                .value(move || TransitionKey::number(f64::from(reveal_epoch.get()))),
+        );
+    }
+
+    root
 }
 
 #[component]
@@ -981,6 +1020,7 @@ fn SettingsRoot() -> impl IntoElement {
 /// Runs the Cozy Settings window using Native Shell (`nsh`) and returns `SettingsOutcome`.
 pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
     let vm = SettingsViewModel::load(config_path);
+    let initial_appearance = appearance_for_theme_mode(vm.config.theme);
     let outcome_sink = Arc::new(Mutex::new(None));
 
     let Ok(mut guard) = SETTINGS_LAUNCH.lock() else {
@@ -996,14 +1036,17 @@ pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
 
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
+        // Set saved theme on Root (not AppOptions) so Core keeps real OS color_scheme in system_dark.
+        let root = platform::Root::of::<SettingsRoot>()
+            .appearance(initial_appearance)
+            .main_window(settings_main_window_options());
         let _ = platform::run_app(
-            platform::AppSource::Rust(platform::Root::of::<SettingsRoot>()),
+            platform::AppSource::Rust(root),
             platform::AppOptions {
                 title: "Safe Your Eyes — Settings".to_owned(),
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.settings".to_owned(),
                 size: (920, 680),
-                appearance: Appearance::Light,
                 ..Default::default()
             },
         );
@@ -1089,6 +1132,7 @@ mod tests {
         let path = dir.file("nested").join("config.toml");
 
         let mut vm = SettingsViewModel::load(path.clone());
+        vm.config.theme = ThemeMode::Dark;
         vm.config.short_break_interval_secs = 600;
         vm.config.short_break_duration_secs = 20;
         vm.config.long_break_interval_secs = 3600;
@@ -1127,6 +1171,7 @@ mod tests {
 
         let reloaded = Config::load_from_path(&path)?;
         assert_eq!(reloaded, vm.config);
+        assert_eq!(reloaded.theme, ThemeMode::Dark);
         Ok(())
     }
 
@@ -1150,6 +1195,7 @@ mod tests {
         let path = dir.file("config.toml");
 
         let mut vm = SettingsViewModel::load(path.clone());
+        vm.config.theme = ThemeMode::Dark;
         vm.config.short_break_interval_secs = 0;
         vm.draft_short_exercise = "draft".to_owned();
         vm.draft_skip_window = "mpv".to_owned();
@@ -1157,6 +1203,7 @@ mod tests {
 
         vm.reset_to_defaults();
         assert_eq!(vm.config, Config::default());
+        assert_eq!(vm.config.theme, ThemeMode::System);
         assert_eq!(vm.validation_error, None);
         assert!(vm.draft_short_exercise.is_empty());
         assert!(vm.draft_skip_window.is_empty());
@@ -1251,7 +1298,19 @@ mod tests {
     }
 
     #[test]
-    fn nsh_headless_settings_navigates_sidebar_and_shows_support_link() -> Result<(), String> {
+    fn settings_main_window_uses_hidden_titlebar() {
+        let opts = settings_main_window_options();
+        let tb = opts.attributes.title_bar;
+        assert!(tb.is_some());
+        if let Some(tb) = tb {
+            assert_eq!(tb.style, TitleBarStyle::Hidden);
+            assert_eq!(tb.height, Some(px(36.0)));
+        }
+    }
+
+    #[test]
+    fn nsh_headless_settings_navigates_sidebar_cycles_theme_and_toggles_switch()
+    -> Result<(), String> {
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
 
@@ -1268,27 +1327,217 @@ mod tests {
         }
 
         let mut app = Headless::start(EngineConfig {
-            viewport: Size::new(Points(900.0), Points(640.0)),
+            viewport: Size::new(Points(920.0), Points(680.0)),
             ..EngineConfig::new(Root::of::<TestSettings>())
         })
         .map_err(|e| e.to_string())?;
         app.wait_for("Safe Your Eyes")?;
+        assert!(!app.shows("Settings"));
+        assert!(app.shows("Timing"));
         assert!(app.shows("Break Schedule"));
         assert!(app.shows("Short Break"));
         assert!(app.shows("Launch at login (startup)"));
+        assert!(app.shows("Theme: System"));
 
+        // Cycle top-right theme button on Timing tab: System -> Light -> Dark -> System.
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        app.press("Theme: Dark")?;
+        app.wait_for("Theme: System")?;
+
+        // Navigate to Policies and toggle a cozy_switch.
         app.press("Policies")?;
         app.wait_for("Break Enforcement")?;
+        assert!(!app.shows("Settings"));
+        assert!(app.shows("Theme: System"));
+        app.press("Strict break (hide Skip)")?;
 
+        // Navigate to Exercises.
+        app.press("Exercises")?;
+        app.wait_for("Short Break Exercises")?;
+        assert!(app.shows("Theme: System"));
+
+        // Navigate to About & Support: no duplicate Cozy Appearance section, support card intact.
         app.press("About & Support")?;
         app.wait_for("Buy Me a Coffee")?;
+        assert!(!app.shows("Cozy Appearance"));
+        assert!(app.shows("Theme: System"));
         assert!(app.shows("Support link: https://buymeacoffee.com/bbeeezzzzz"));
         assert!(app.shows("Scan to Buy Me a Coffee"));
+        Ok(())
+    }
 
-        app.press("Dark")?;
-        app.wait_for("Active mode: Dark (Dark Roast)")?;
-        app.press("System")?;
-        app.wait_for("Active mode: System")?;
+    #[test]
+    fn nsh_headless_theme_save_reset_and_cancel() -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-theme-persist")?;
+        let save_path = dir.file("saved-theme.toml");
+        let cancel_path = dir.file("cancelled-theme.toml");
+
+        static TEST_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+        #[component]
+        fn TestPersistSettings() -> impl IntoElement {
+            let path = TEST_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            build_settings_view(vm, sink, false)
+        }
+
+        // Cycle System -> Light -> Dark, Reset back to System, then cycle to Light and Save.
+        if let Ok(mut guard) = TEST_PATH.lock() {
+            *guard = Some(save_path.clone());
+        }
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestPersistSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Theme: System")?;
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        app.press("Reset")?;
+        app.wait_for("Theme: System")?;
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        app.press("Policies")?;
+        app.wait_for("Break Enforcement")?;
+        app.press("Strict break (hide Skip)")?;
+        app.press("Save")?;
+
+        let reloaded = Config::load_from_path(&save_path)?;
+        assert_eq!(reloaded.theme, ThemeMode::Light);
+        assert!(reloaded.strict_break);
+
+        // Cycle theme and Cancel: nothing written to disk.
+        if let Ok(mut guard) = TEST_PATH.lock() {
+            *guard = Some(cancel_path.clone());
+        }
+        let mut app2 = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestPersistSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app2.wait_for("Theme: System")?;
+        app2.press("Theme: System")?;
+        app2.wait_for("Theme: Light")?;
+        app2.press("Cancel")?;
+        assert!(!cancel_path.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_reopen_dark_switches_to_system_and_resets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_core::MountItem;
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-reopen-dark")?;
+        let dark_path = dir.file("dark.toml");
+        let dark_cfg = Config {
+            theme: ThemeMode::Dark,
+            ..Config::default()
+        };
+        dark_cfg.save_to_path(&dark_path)?;
+
+        static DARK_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static IS_DARK_NOW: Mutex<Option<bool>> = Mutex::new(None);
+
+        #[component]
+        fn TestDarkSettings() -> impl IntoElement {
+            let path = DARK_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            effect(move || {
+                let d = dark();
+                if let Ok(mut guard) = IS_DARK_NOW.lock() {
+                    *guard = Some(d);
+                }
+            });
+            build_settings_view(vm, sink, false)
+        }
+
+        if let Ok(mut guard) = DARK_PATH.lock() {
+            *guard = Some(dark_path);
+        }
+        let observed_appearances: Arc<Mutex<Vec<Appearance>>> = Arc::new(Mutex::new(Vec::new()));
+        let app_sink = Arc::clone(&observed_appearances);
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(
+                Root::of::<TestDarkSettings>()
+                    .appearance(Appearance::Dark)
+                    .main_window(settings_main_window_options()),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+        app.observe(move |_step, batch| {
+            for item in &batch.items {
+                if let MountItem::Appearance { appearance } = item
+                    && let Ok(mut guard) = app_sink.lock()
+                {
+                    guard.push(*appearance);
+                }
+            }
+        });
+
+        app.wait_for("Theme: Dark")?;
+        assert_eq!(
+            IS_DARK_NOW.lock().ok().and_then(|g| *g),
+            Some(true),
+            "Saved Dark config must render dark on startup"
+        );
+
+        // Cycle Dark -> System on default Light OS: must emit Appearance::System and flip dark() to false.
+        app.press("Theme: Dark")?;
+        app.wait_for("Theme: System")?;
+        app.settle();
+        assert_eq!(
+            IS_DARK_NOW.lock().ok().and_then(|g| *g),
+            Some(false),
+            "Switching Dark -> System on Light OS must flip dark() back to false"
+        );
+        let seen = observed_appearances
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        assert!(
+            seen.contains(&Appearance::System),
+            "Expected MountItem::Appearance(System) after Dark -> System, got {seen:?}"
+        );
+
+        // Cycle back to Dark, then Reset -> must flip dark() back to false again.
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        app.settle();
+        assert_eq!(IS_DARK_NOW.lock().ok().and_then(|g| *g), Some(true));
+
+        app.press("Reset")?;
+        app.wait_for("Theme: System")?;
+        app.settle();
+        assert_eq!(
+            IS_DARK_NOW.lock().ok().and_then(|g| *g),
+            Some(false),
+            "Reset from Dark must restore System (Light OS) appearance"
+        );
         Ok(())
     }
 }

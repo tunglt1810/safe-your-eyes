@@ -4,8 +4,12 @@
 //! providers (F13), desktop notifications and WAV audio playback (F14), and single-instance local
 //! IPC, OS paths, autostart, and subprocess overlay launching (F15).
 
-#![cfg_attr(not(target_os = "windows"), forbid(unsafe_code))]
+#![cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    forbid(unsafe_code)
+)]
 
+pub mod app_loop;
 mod audio;
 mod autostart;
 mod clock;
@@ -19,6 +23,7 @@ mod paths;
 mod test_util;
 mod tray;
 
+pub use app_loop::PlatformEventLoop;
 pub use audio::OsAudioPlayer;
 pub use autostart::{
     AutostartEntry, AutostartManager, default_autostart_path, render_linux_desktop_entry,

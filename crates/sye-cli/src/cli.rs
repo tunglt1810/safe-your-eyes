@@ -28,6 +28,7 @@ pub(crate) struct CliArgs {
     pub(crate) config: Option<PathBuf>,
     pub(crate) socket: Option<PathBuf>,
     pub(crate) headless: bool,
+    pub(crate) background: bool,
     pub(crate) mode: CommandMode,
 }
 
@@ -56,6 +57,7 @@ OPTIONS:
     --config <PATH>           Override TOML config file path
     --socket <PATH>           Override local IPC socket / pipe name
     --headless                Run daemon without tray or GUI overlay subprocesses
+    --background              Start daemon silently in the tray without opening Settings
     --status                  Query running daemon status
     --json                    Output --status as JSON
     -e, --enable              Resume/enable running daemon
@@ -81,6 +83,7 @@ where
     let mut config: Option<PathBuf> = None;
     let mut socket: Option<PathBuf> = None;
     let mut headless = false;
+    let mut background = false;
     let mut json_flag = false;
     let mut mode: Option<CommandMode> = None;
 
@@ -91,6 +94,7 @@ where
                     config,
                     socket,
                     headless,
+                    background,
                     mode: CommandMode::Help,
                 });
             }
@@ -99,10 +103,12 @@ where
                     config,
                     socket,
                     headless,
+                    background,
                     mode: CommandMode::Version,
                 });
             }
             "--headless" => headless = true,
+            "--background" => background = true,
             "--json" => json_flag = true,
             "--config" => {
                 let value = iter.next().ok_or_else(|| CliParseError {
@@ -155,6 +161,8 @@ where
                 set_mode(&mut mode, CommandMode::InternalOverlay { payload_json })?;
             }
             "--internal-settings" => set_mode(&mut mode, CommandMode::InternalSettings)?,
+            // macOS LaunchServices passes a Process Serial Number (`-psn_*`) when launching `.app` bundles.
+            other if other.strip_prefix("-psn_").is_some_and(|s| !s.is_empty()) => {}
             other => {
                 if let Some(val) = other.strip_prefix("--config=") {
                     config = Some(parse_non_empty_path("--config", val)?);
@@ -192,6 +200,7 @@ where
         config,
         socket,
         headless,
+        background,
         mode: resolved_mode,
     })
 }
@@ -261,6 +270,27 @@ mod tests {
 
         let b = parse_args(["--json", "--status"])?;
         assert_eq!(b.mode, CommandMode::Status { json: true });
+        Ok(())
+    }
+
+    #[test]
+    fn parses_background_flag_and_ignores_macos_psn_args() -> Result<(), CliParseError> {
+        let bg = parse_args(["--background", "--config", "custom.toml"])?;
+        assert!(bg.background);
+        assert!(!bg.headless);
+        assert_eq!(bg.mode, CommandMode::Daemon);
+        assert_eq!(bg.config, Some(PathBuf::from("custom.toml")));
+
+        let psn = parse_args(["-psn_0_123456"])?;
+        assert!(!psn.background);
+        assert!(!psn.headless);
+        assert_eq!(psn.mode, CommandMode::Daemon);
+
+        let combined = parse_args(["-psn_0_987654", "--background"])?;
+        assert!(combined.background);
+        assert_eq!(combined.mode, CommandMode::Daemon);
+        assert!(parse_args(["-psn_"]).is_err());
+        assert!(HELP_TEXT.contains("--background"));
         Ok(())
     }
 }

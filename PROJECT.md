@@ -105,6 +105,12 @@ Every Survey feature is assigned a milestone (none unassigned).
 | F19 | Cross-Platform CI Matrix | `.github/workflows/ci.yml` running `fmt`, `clippy`, `test`, and release build across `ubuntu-latest`, `macos-latest`, `windows-latest` | M4 | survey (`explorer_survey_1`, `spec_miner_survey_3`) |
 | F20 | Opaque-Box E2E Test Suite (Tiers 1–4) | Requirement-driven E2E harness & tests in `e2e/` covering all CLI/config/scheduler/IPC/policy behaviors + `TEST_READY.md` | E2E Track | Project Pattern |
 | F21 | Final Verification & Tier 5 Hardening | Pass 100% of E2E Tiers 1–4 + white-box Tier 5 adversarial coverage hardening | M5 | Project Pattern |
+| F22 | macOS AppKit Event Loop, Visible Tray & Interactive Startup/Re-open | `PlatformEventLoop` in `sye-platform` (macOS `NSApplication` + `NSApplicationDelegate` reopen/terminate + `finishLaunching()` + event pump; Windows Win32 message pump), tray error logging, `--background` flag (used by autostart), `-psn_*` ignore, interactive launch & duplicate-launch `OpenSettings` | M6 | survey (`explorer_survey_1`) |
+| F23 | Seamless Themed Hidden Titlebar | `Root::main_window` with `TitleBarStyle::Hidden`, macOS sidebar-integrated `controls_offset`, reactive `title_bar()` insets (macOS left / Windows & Linux right), `.window_drag(true/false)` matching Cozy theme & `ui-demo.gif` | M6 | survey (`explorer_survey_2`, `explorer_survey_3`) |
+| F24 | Concentric Window & Inner Component Borders | Harmonized concentric radii (`SIDEBAR`/`CONTAINER`/`KPI` = 12pt, `NAV_ITEM`/`ELEMENT` = 8pt), root `.p_3().gap_3()`, matching hairline border on sidebar, remove redundant `.rounded_b` on `sticky_toolbar`, tidy number-field right alignment | M6 | survey (`explorer_survey_2`) |
+| F25 | Centered & Animated Toggle Switch | Fix `cozy_switch` track layout (`.flex_row().items_center().px(px(2.0))`) and thumb checked translation (`.translate_x(px(0.0)).checked(\|c\| c.translate_x(px(18.0)))`) with `COZY_SPRING` | M6 | survey (`explorer_survey_2`) |
+| F26 | Dynamic Per-Screen Page Titles | Replace hardcoded `"Settings"` H1 and duplicate badge pill with reactive active tab label (`Timing`, `Policies`, `Exercises`, `About & Support`) + animated Cozy highlight bar | M6 | survey (`explorer_survey_2`) |
+| F27 | Top-Right Cozy Theme Switcher & Circular Reveal Effect | Persisted `Config.theme: ThemeMode` (`system`/`light`/`dark`), top-right Cozy pill switcher with vector SVG icon in `page_header` (removing duplicate from About), `nsh` `shader` feature + `screen_transition()` WGSL 480ms `cubic-bezier(0.4,0,0.2,1)` circular reveal from button center to farthest corner with `reduce_motion()` & resolved-mode guards | M6 | survey (`explorer_survey_3`) |
 
 ## Milestones
 
@@ -116,18 +122,21 @@ Every Survey feature is assigned a milestone (none unassigned).
 | M4 | `cli-daemon-integration` | `sye-cli` single binary, daemon loop, CLI IPC, subprocess launcher, CI matrix, README (F18–F19) | M2, M3 | DONE (3/3 CLI tests + CI) |
 | M5 | `final-e2e-and-hardening` | Phase 1: 100% E2E Tiers 1–4 pass (F21) | M4, E2E Track | DONE (72/72 E2E pass) |
 | E2E | `e2e-testing-track` | Independent opaque-box E2E test infra (`TEST_INFRA.md`) + Tiers 1–4 suite (`e2e/`) (F20) | none | DONE (72/72 pass) |
+| M6 | `macos-v011-fixes` | macOS startup/tray/re-open + Cozy UI parity (hidden themed titlebar, concentric borders, toggle fix, per-screen titles, top-right theme switcher & circular reveal) (F22–F27) | M1–M5 | DONE (133/133 unit/headless + 72/72 E2E) |
 
 ## Interface Contracts
 
 ### 1. CLI & Process Entry Point (`safe-your-eyes`)
-Used by both `sye-cli` (M4) and `e2e/` (E2E Testing Track):
+Used by both `sye-cli` (M4, M6) and `e2e/` (E2E Testing Track):
 - **Binary name**: `safe-your-eyes` (`target/debug/safe-your-eyes` or `target/release/safe-your-eyes`)
 - **Global options**:
   - `--config <PATH>`: Override config TOML file path (default: OS config dir `safe-your-eyes/config.toml`).
   - `--socket <PATH>`: Override local IPC socket/pipe name (essential for isolated E2E runs).
   - `--headless`: Run daemon without system tray or GUI overlay subprocesses (logs break events / simulates break completion via timer; ideal for headless CI & E2E).
+  - `--background`: Start daemon silently in the system tray without opening the Settings window (used by OS login autostart entries).
+  - macOS LaunchServices `-psn_*` arguments are silently ignored during CLI argument parsing.
 - **Modes / Control Flags**:
-  - *(no control flag)*: Start daemon (single-instance). If already running on `--socket`, print `"Safe Your Eyes is already running"` to stdout and exit `0`.
+  - *(no control flag)*: Start daemon (single-instance). On interactive launch (`!headless && !background`), opens Settings immediately while keeping tray alive. If already running on `--socket`, forwards `IpcCommand::OpenSettings` when `!headless && !background`, prints `"Safe Your Eyes is already running"` to stdout, and exits `0`.
   - `--status`: Query running daemon status; print human-readable status (or JSON with `--json`) to stdout and exit `0`. If daemon not running, print `"Safe Your Eyes is not running"` to stderr and exit `1`.
   - `--status --json`: Print structured JSON status: `{"state": "...", "enabled": true/false, "next_break_type": "short"|"long"|null, "next_break_name": "...", "seconds_until_next_break": N, "consecutive_skips": N}`.
   - `-e, --enable`: Resume/enable running daemon. Exit `0` if running, `1` if not running.
@@ -144,10 +153,11 @@ Used by both `sye-cli` (M4) and `e2e/` (E2E Testing Track):
 
 ### 2. `sye-core` ↔ `sye-platform` & `sye-ui`
 Defined in `crates/sye-core/src/`:
-- `Config` (TOML-serializable): `short_break_interval_secs` (900), `short_break_duration_secs` (15), `long_break_interval_secs` (4500), `long_break_duration_secs` (60), `pre_break_warning_secs` (10), `strict_break` (false), `allow_postpone` (false), `postpone_duration_secs` (300), `random_order` (true), `shortcut_disable_secs` (2), `fade_in_ms` (1500), `persist_state` (false), `smart_pause` (`enabled`, `idle_threshold_secs`, `postpone_if_active`), `do_not_disturb` (`enabled`, `skip_break_windows`, `take_break_windows`, `while_on_battery`), `audible_alert` (`pre_break`, `post_break`, `volume`), `limit_consecutive_skips` (`enabled`, `max_skips`), `short_breaks: Vec<BreakSpec>`, `long_breaks: Vec<BreakSpec>`.
+- `ThemeMode` (`#[serde(rename_all = "snake_case")]`, default `System`): `System | Light | Dark`.
+- `Config` (TOML-serializable, `#[serde(default)]`): `theme: ThemeMode` (default `system`), `short_break_interval_secs` (900), `short_break_duration_secs` (15), `long_break_interval_secs` (4500), `long_break_duration_secs` (60), `pre_break_warning_secs` (10), `strict_break` (false), `allow_postpone` (false), `postpone_duration_secs` (300), `random_order` (true), `shortcut_disable_secs` (2), `fade_in_ms` (1500), `persist_state` (false), `smart_pause` (`enabled`, `idle_threshold_secs`, `postpone_if_active`), `do_not_disturb` (`enabled`, `skip_break_windows`, `take_break_windows`, `while_on_battery`), `audible_alert` (`pre_break`, `post_break`, `volume`), `limit_consecutive_skips` (`enabled`, `max_skips`), `short_breaks: Vec<BreakSpec>`, `long_breaks: Vec<BreakSpec>`.
 - `SchedulerState`: `Start`, `Waiting`, `PreBreak`, `Break`, `Stopped`, `Quit`, `Resting`.
 - `SchedulerAction`: `NotifyPreBreak { break_spec, warning_secs }`, `DismissNotification`, `PlayChime { kind: ChimeKind, volume: u8 }`, `ShowOverlay(OverlayRequest)`, `CloseOverlay`, `UpdateTray(TraySnapshot)`, `PersistSession(SessionState)`.
 - `OverlayRequest`: `{ break_type, title, duration_secs, strict_break, allow_postpone, postpone_duration_secs, shortcut_disable_secs, fade_in_ms, status_note: Option<String> }`.
 - `OverlayOutcome`: `Completed`, `Skipped`, `Postponed { duration_secs: u64 }`, `Closed`.
 - `IpcCommand` / `IpcResponse`: JSON-line messages over local socket (`Status`, `Enable`, `Disable { minutes: Option<u64> }`, `TakeBreak { kind: Option<BreakType> }`, `OpenSettings`, `Quit`).
-- Platform traits: `Clock`, `IdleProvider`, `DndProvider`, `Notifier`, `AudioPlayer`, `OverlayLauncher`.
+- Platform traits & adapters: `Clock`, `IdleProvider`, `DndProvider`, `Notifier`, `AudioPlayer`, `OverlayLauncher`, `PlatformEventLoop` (main-thread OS event loop init & pump for tray/reopen).

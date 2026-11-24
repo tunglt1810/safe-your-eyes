@@ -15,8 +15,9 @@ use sye_core::scheduler::{
 use sye_core::session::SessionState;
 use sye_core::traits::{DndProvider, IdleProvider, Notifier, OverlayLauncher};
 use sye_platform::{
-    AppPaths, IpcError, IpcServer, OsAudioPlayer, OsNotifier, SubprocessOverlayLauncher,
-    SystemClock, SystemDndProvider, SystemIdleProvider, TrayEvent, TrayHandle,
+    AppPaths, IpcClient, IpcError, IpcServer, OsAudioPlayer, OsNotifier, PlatformEventLoop,
+    SubprocessOverlayLauncher, SystemClock, SystemDndProvider, SystemIdleProvider, TrayEvent,
+    TrayHandle,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -29,6 +30,7 @@ struct DaemonHost<'a> {
     audio: OsAudioPlayer,
     overlay_launcher: Option<SubprocessOverlayLauncher>,
     settings_child: Option<Child>,
+    settings_exited: bool,
     tray: Option<TrayHandle>,
     headless_break_deadline: Option<Instant>,
 }
@@ -131,6 +133,19 @@ impl DaemonHost<'_> {
             && matches!(child.try_wait(), Ok(Some(_)) | Err(_))
         {
             self.settings_child = None;
+            self.settings_exited = true;
+        }
+    }
+
+    fn take_settings_exited(&mut self) -> bool {
+        self.reap_settings_child();
+        std::mem::take(&mut self.settings_exited)
+    }
+
+    fn close_settings(&mut self) {
+        if let Some(mut child) = self.settings_child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 
@@ -157,10 +172,13 @@ fn rng_seed_from_clock() -> u64 {
 }
 
 /// Runs the single-instance background daemon until `Quit`.
-pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
+pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> ExitCode {
     let server = match IpcServer::bind(&paths.socket_path) {
         Ok(srv) => srv,
         Err(IpcError::AlreadyRunning) => {
+            if !headless && !background {
+                let _ = IpcClient::send_command(&paths.socket_path, &IpcCommand::OpenSettings);
+            }
             println!("Safe Your Eyes is already running");
             return ExitCode::SUCCESS;
         }
@@ -199,6 +217,19 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
     let idle_provider = SystemIdleProvider::new();
     let dnd_provider = SystemDndProvider::new();
     let (tray_tx, tray_rx) = mpsc::channel::<TrayEvent>();
+    // Initialize the platform event loop before creating TrayHandle (required on macOS AppKit).
+    let app_loop = (!headless).then(|| PlatformEventLoop::new(tray_tx.clone()));
+    let tray = if headless {
+        None
+    } else {
+        match TrayHandle::try_new(&scheduler.tray_snapshot(), tray_tx) {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                eprintln!("Warning: system tray unavailable: {err}");
+                None
+            }
+        }
+    };
     let mut host = DaemonHost {
         headless,
         config_file: &paths.config_file,
@@ -209,15 +240,17 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
             .then(|| SubprocessOverlayLauncher::current_exe().ok())
             .flatten(),
         settings_child: None,
-        tray: (!headless)
-            .then(|| TrayHandle::try_new(&scheduler.tray_snapshot(), tray_tx).ok())
-            .flatten(),
+        settings_exited: false,
+        tray,
         headless_break_deadline: None,
     };
 
     let mut last_policy_check = Instant::now();
 
     host.execute(scheduler.handle_event(SchedulerEvent::Start));
+    if !headless && !background {
+        host.open_settings();
+    }
 
     loop {
         if !drain_ipc_requests(&server, &mut scheduler, &mut host)
@@ -226,7 +259,12 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
             break;
         }
 
-        host.reap_settings_child();
+        if host.take_settings_exited()
+            && let Ok(updated_cfg) = Config::load_from_path(&paths.config_file)
+            && updated_cfg != *scheduler.config()
+        {
+            host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
+        }
 
         if let Some(outcome) = host.poll_overlay_outcome() {
             host.execute(scheduler.handle_event(SchedulerEvent::OverlayFinished(outcome)));
@@ -261,10 +299,20 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool) -> ExitCode {
             host.execute(tick_actions);
         }
 
-        std::thread::sleep(POLL_INTERVAL);
+        if let Some(ref event_loop) = app_loop {
+            event_loop.pump_events(POLL_INTERVAL);
+        } else {
+            std::thread::sleep(POLL_INTERVAL);
+        }
     }
 
     host.close_overlay();
+    host.close_settings();
+    drop(host);
+    drop(server);
+    if let Some(event_loop) = app_loop {
+        event_loop.finish_termination();
+    }
 
     ExitCode::SUCCESS
 }

@@ -1264,7 +1264,11 @@ mod tests {
         let _ = sched.handle_event(SchedulerEvent::Start);
 
         clock.advance_secs(300); // 600s remaining
+        // Brief reading pauses must not trip the 300s default idle threshold.
         let _ = sched.handle_event(SchedulerEvent::IdleObserved(Duration::from_secs(5)));
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+
+        let _ = sched.handle_event(SchedulerEvent::IdleObserved(Duration::from_secs(300)));
         assert_eq!(sched.state(), SchedulerState::Resting);
 
         clock.advance_secs(20);

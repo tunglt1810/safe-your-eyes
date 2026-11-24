@@ -20,13 +20,14 @@ The Cargo workspace contains four crates and compiles into one binary named `saf
 
 1. The daemon runs on `std::thread` and `std::sync::mpsc` without `tokio`.
 2. In the `Waiting` state, the daemon creates no graphics context and uses 0% GPU.
-3. When the daemon needs to show a break overlay or the Settings window, the daemon starts a child process of `safe-your-eyes` with `--internal-overlay` or `--internal-settings`.
-4. When the child process exits, the operating system releases all graphics memory.
+3. On macOS and Windows, `PlatformEventLoop` pumps main-thread operating system events for the system tray and macOS application reopen callbacks without a window or GPU context.
+4. When the daemon needs to show a break overlay or the Settings window, the daemon starts a child process of `safe-your-eyes` with `--internal-overlay` or `--internal-settings`.
+5. When the child process exits, the operating system releases all graphics memory.
 
 ### 2.2 Safety and Build Rules
 
 - The workspace forbids `unsafe` code by default (`unsafe_code = "forbid"`).
-- Platform FFI code isolates any required `unsafe` blocks inside `sye-platform` on Windows.
+- Platform FFI code isolates required `unsafe` blocks inside `sye-platform` on Windows and macOS.
 - Clippy denies `unwrap_used`, `expect_used`, `panic`, `todo`, and `unimplemented`.
 - The release profile sets `opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, and `strip = "symbols"`.
 - Linux builds require `libgtk-4-dev` and `pkg-config` for `nsh-platform-linux`.
@@ -56,12 +57,14 @@ Each concept uses one name across this specification and the source code.
 | Smart Pause | `SmartPausePolicy` | Policy that enters `Resting` on idle, credits short idle time back, or resets the cycle. |
 | Do Not Disturb | `DoNotDisturbPolicy` | Policy that blocks breaks on battery, fullscreen windows, or excluded window titles. |
 | Skip limit | `SkipLimitPolicy` | Policy that counts consecutive skips or postpones and locks both actions at `max_skips`. |
+| Theme mode | `ThemeMode` | Persisted Settings window theme: `System`, `Light`, or `Dark`. |
 | Configuration | `Config` | TOML configuration structure with `schema_version` and validation. |
 | Session state | `SessionState` | Saved queue progress stored in `session.toml`. |
 | Chime kind | `ChimeKind` | Synthesized WAV chime type: `PreBreak` or `PostBreak`. |
 | IPC message | `IpcCommand`, `IpcResponse` | Single-line JSON messages exchanged between the CLI and the daemon. |
 | Status snapshot | `StatusSnapshot` | Status payload for `--status --json` and the system tray. |
 | Clock | `Clock` | Trait that supplies monotonic and Unix wall time to `Scheduler`. |
+| Platform event loop | `PlatformEventLoop` | Main-thread operating system event loop adapter for the system tray and reopen events. |
 
 ## 4. Break Queue (`BreakQueue`)
 
@@ -125,7 +128,7 @@ Every event handler runs synchronously and returns a list of `SchedulerAction` v
 
 ### 7.1 `SmartPause`
 
-1. In `Waiting`, when OS idle time reaches `idle_threshold_secs` (default 5 seconds), `SmartPausePolicy` returns `PauseResting`.
+1. In `Waiting`, when OS idle time reaches `idle_threshold_secs` (default 300 seconds), `SmartPausePolicy` returns `PauseResting`.
 2. When user activity resumes during `Resting`, the policy calculates total idle duration.
 3. When idle duration is less than `short_break_interval_secs`, the policy returns `ResumeCreditBack` to shift the next break forward.
 4. When idle duration is greater than or equal to `short_break_interval_secs`, the policy returns `ResumeResetCycle`.
@@ -163,8 +166,11 @@ The application stores configuration in `config.toml` with `schema_version = 1`.
 - Every `BreakSpec` has a non-empty name and positive overrides.
 
 When `config.toml` is missing or invalid, `Config::load_or_default` returns `Config::default()` so the daemon still starts.
+`Config` stores `theme` (`system`, `light`, or `dark`) with default `system`.
+When `config.toml` omits `theme`, `Config` defaults `theme` to `system` without increasing `schema_version`.
 When `persist_state` is `true`, the daemon writes `SessionState` to `session.toml` using `BreakQueue::persisted_short_index()` and `BreakQueue::persisted_long_index()` so restarts resume at the staged break.
-When `autostart` is `true`, saving Settings or starting the non-headless daemon writes a per-user OS login entry (`~/.config/autostart/safe-your-eyes.desktop` on Linux, `~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist` on macOS, or `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\safe-your-eyes.cmd` on Windows). When `autostart` is `false`, the application removes that entry.
+When `autostart` is `true`, saving Settings or starting the non-headless daemon writes a per-user OS login entry (`~/.config/autostart/safe-your-eyes.desktop` on Linux, `~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist` on macOS, or `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\safe-your-eyes.cmd` on Windows) that passes `--background`.
+When `autostart` is `false`, the application removes that entry.
 
 ## 9. Audio Chime and Local IPC
 
@@ -200,7 +206,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 |---|---|---|---|
 | `BACKGROUND_BODY` | `#FAEBDA` | `#18140E` | Main canvas (`bg-body`) |
 | `BACKGROUND_SURFACE` | `#FBF1E1` | `#231D16` | Unified Form Card, inputs, secondary buttons, and sticky toolbar (`bg-surface`) |
-| `BACKGROUND_MUTED` | `#F3DFC8` | `#30261D` | Segmented track and quiet emphasis (`bg-muted`) |
+| `BACKGROUND_MUTED` | `#F3DFC8` | `#30261D` | Quiet emphasis surface (`bg-muted`) |
 | `TRACK` | `#E6D2BC` | `#30271E` | Switch and progress tracks (`track`) |
 | `SIDEBAR_BG` / `SIDEBAR_ACTIVE` | `#C3CBB9` / `#F8E8D3` | `#29332A` / `#404A41` | Floating Sage Sidebar and active indicator pill (`nav-bg`, `nav-active`) |
 | `SIDEBAR_TEXT` / `SIDEBAR_TEXT_MUTED` | `#403B26` / `#55503A` | `#FFFEF7` / `#B8C4B6` | Sidebar labels and version caption (`nav-text`, `nav-text-muted`) |
@@ -219,11 +225,21 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 
 ### 10.2 Shape, Motion, and Screens
 
-- Border radii follow `tunglt1810/cozy` v0.2.0: `12px` (elements), `14px` (sidebar nav items), `18px` (Form Card), `20px` (Pastel KPI cards), `22px` (Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill controls).
-- Motion follows `tunglt1810/cozy` v0.2.0: `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) drives the sliding sidebar indicator, theme `SegmentedControl` thumb, and switch thumb; `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives tab panel entrances (`160ms`), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), highlighter sweeps (`380ms`), and theme color transitions (`200ms`); pressable pills scale to `0.97` on press.
+- Concentric desktop border radii keep inner corners parallel to native window corners: `8px` (elements and sidebar navigation items), `12px` (Floating Sage Sidebar, Form Card, and Pastel KPI cards), `28px` (overlay card), and `9999px` (pill controls).
+- Motion follows `tunglt1810/cozy` v0.2.0.
+- `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) moves the sliding sidebar indicator and the centered switch knob (`3pt` symmetrical inset, `18pt` horizontal travel).
+- `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives tab panel entrances (`160ms`), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), and highlighter sweeps (`380ms`).
+- Cozy Circular Theme Reveal uses an `nsh` `screen_transition()` WGSL shader (`480ms`, `cubic-bezier(0.4, 0, 0.2, 1)`) that expands a circle from the theme button center to the farthest window corner.
+- The reveal runs only when the resolved Light or Dark appearance changes and `reduce_motion()` is `false`.
+- Pressable pills scale to `0.97` on press.
 - All animations stop when the operating system enables Reduce Motion (`reduce_motion()`).
 - **Break Overlay**: Uses restful dark-roast tones (`#18140E` canvas, `#231D16` card), displays the embedded app icon, fades in over `fade_in_ms` with a `0.98 -> 1.0` scale-in, and shows the exercise title, `MM:SS` countdown, animated progress bar, shortcut lock notice, `Postpone (Space)`, and `Skip (Esc)`.
-- **Settings Window**: Uses the Floating Sage Sidebar (`Timing`, `Policies`, `Exercises`, `About & Support`, with embedded app icon and version footer), fixed page header with four Pastel KPI summary cards, and a unified rounded Form Card containing the scrollable form and clipped sticky toolbar (`Save`, `Reset`, `Cancel`). The About & Support tab provides a Light/Dark/System `SegmentedControl` and a **Buy Me a Coffee** link with QR code for `https://buymeacoffee.com/bbeeezzzzz`.
+- **Settings Window**: Uses `TitleBarStyle::Hidden` (`36pt` height, macOS traffic lights integrated inside the top-left of the Floating Sage Sidebar, and reactive top-right clearance on Windows and Linux) so the titlebar shares the active Cozy theme.
+- The Settings window opens directly in the saved `Config.theme` mode with zero flash.
+- The Floating Sage Sidebar has a matching `1px` border and switches between `Timing`, `Policies`, `Exercises`, and `About & Support`.
+- The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
+- The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar (`Save`, `Reset`, `Cancel`).
+- The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.
 
 ## 11. CLI Contract (`safe-your-eyes`)
@@ -233,10 +249,12 @@ Global options:
 - `--config <PATH>`: Override the TOML configuration file path.
 - `--socket <PATH>`: Override the local IPC socket or pipe name.
 - `--headless`: Run the daemon without the system tray or GUI subprocesses.
+- `--background`: Start the daemon silently in the system tray without opening the Settings window.
+- The argument parser ignores macOS LaunchServices `-psn_*` arguments with a non-empty suffix.
 
 Modes and control flags:
 
-- No control flag: Start the single-instance daemon. If a daemon already listens on `--socket`, print `Safe Your Eyes is already running` to stdout and exit with code 0.
+- No control flag: Start the single-instance daemon. When the user omits `--headless` and `--background`, the daemon opens the Settings window after startup and keeps the system tray active. When the Settings window closes after saving changes, the daemon reloads `config.toml` immediately. If a daemon already listens on `--socket`, the CLI sends `IpcCommand::OpenSettings` (unless `--headless` or `--background` is present), prints `Safe Your Eyes is already running` to stdout, and exits with code 0.
 - `--status`: Print human-readable daemon status to stdout and exit with code 0. If no daemon is running, print `Safe Your Eyes is not running` to stderr and exit with code 1.
 - `--status --json`: Print JSON with `state`, `enabled`, `next_break_type`, `next_break_name`, `seconds_until_next_break`, and `consecutive_skips`.
 - `-e`, `--enable`: Resume the running daemon.

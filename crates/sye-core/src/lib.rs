@@ -21,7 +21,7 @@ pub use chime::{
 pub use config::{
     AudibleAlertConfig, BreakSpec, BreakType, CONFIG_SCHEMA_VERSION, Config, ConfigError,
     DEFAULT_LONG_BREAK_NAMES, DEFAULT_SHORT_BREAK_NAMES, DoNotDisturbConfig, SkipLimitConfig,
-    SmartPauseConfig, ValidationError,
+    SmartPauseConfig, ThemeMode, ValidationError,
 };
 pub use ipc::{
     IpcCodecError, IpcCommand, IpcErrorCode, IpcResponse, MAX_IPC_LINE_BYTES, decode_command,

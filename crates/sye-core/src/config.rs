@@ -80,7 +80,7 @@ impl Default for SmartPauseConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            idle_threshold_secs: 5,
+            idle_threshold_secs: 300,
             postpone_if_active: false,
         }
     }
@@ -143,11 +143,22 @@ impl Default for SkipLimitConfig {
     }
 }
 
+/// Settings window visual theme mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 /// Root application configuration serialized to TOML.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub schema_version: u32,
+    pub theme: ThemeMode,
     pub short_break_interval_secs: u64,
     pub short_break_duration_secs: u64,
     pub long_break_interval_secs: u64,
@@ -173,6 +184,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             schema_version: CONFIG_SCHEMA_VERSION,
+            theme: ThemeMode::default(),
             short_break_interval_secs: 900,
             short_break_duration_secs: 15,
             long_break_interval_secs: 4500,
@@ -425,6 +437,7 @@ mod tests {
     fn default_config_is_valid_and_has_expected_defaults() {
         let cfg = Config::default();
         assert_eq!(cfg.schema_version, CONFIG_SCHEMA_VERSION);
+        assert_eq!(cfg.theme, ThemeMode::System);
         assert_eq!(cfg.short_break_interval_secs, 900);
         assert_eq!(cfg.short_break_duration_secs, 15);
         assert_eq!(cfg.long_break_interval_secs, 4500);
@@ -454,8 +467,33 @@ mod tests {
     }
 
     #[test]
+    fn theme_mode_round_trip_and_missing_field_defaults_to_system()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (mode, expected_toml) in [
+            (ThemeMode::System, "theme = \"system\""),
+            (ThemeMode::Light, "theme = \"light\""),
+            (ThemeMode::Dark, "theme = \"dark\""),
+        ] {
+            let cfg = Config {
+                theme: mode,
+                ..Config::default()
+            };
+            let toml_text = cfg.to_toml_string()?;
+            assert!(toml_text.contains(expected_toml));
+            let parsed = Config::from_toml_str(&toml_text)?;
+            assert_eq!(parsed.theme, mode);
+        }
+
+        let legacy =
+            Config::from_toml_str("schema_version = 1\nshort_break_interval_secs = 600\n")?;
+        assert_eq!(legacy.theme, ThemeMode::System);
+        Ok(())
+    }
+
+    #[test]
     fn partial_toml_uses_defaults() -> Result<(), Box<dyn std::error::Error>> {
         let parsed = Config::from_toml_str("short_break_interval_secs = 600\n")?;
+        assert_eq!(parsed.theme, ThemeMode::System);
         assert_eq!(parsed.short_break_interval_secs, 600);
         assert_eq!(parsed.long_break_interval_secs, 4500);
         assert_eq!(parsed.short_breaks.len(), 13);

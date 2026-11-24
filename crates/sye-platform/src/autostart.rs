@@ -24,7 +24,7 @@ impl AutostartEntry {
             app_id: "io.github.safeyoureyes.SafeYourEyes".to_owned(),
             app_name: "Safe Your Eyes".to_owned(),
             executable,
-            args: Vec::new(),
+            args: vec!["--background".to_owned()],
         }
     }
 }
@@ -105,10 +105,8 @@ pub fn sync_system_autostart(
     if let Some(cfg_path) = custom_config {
         let is_default = crate::AppPaths::resolve().is_ok_and(|p| p.config_file == cfg_path);
         if !is_default {
-            entry.args = vec![
-                "--config".to_owned(),
-                cfg_path.to_string_lossy().into_owned(),
-            ];
+            entry.args.push("--config".to_owned());
+            entry.args.push(cfg_path.to_string_lossy().into_owned());
         }
     }
     mgr.enable(&entry)
@@ -237,7 +235,15 @@ pub fn render_windows_startup_cmd(entry: &AutostartEntry) -> String {
     cmd.push('"');
     for arg in &entry.args {
         cmd.push(' ');
-        if arg.contains([' ', '"']) {
+        if arg.is_empty()
+            || arg.chars().any(|c| {
+                c.is_whitespace()
+                    || matches!(
+                        c,
+                        '"' | '&' | '|' | '<' | '>' | '(' | ')' | '^' | '!' | '%' | ',' | ';' | '='
+                    )
+            })
+        {
             cmd.push('"');
             push_cmd_escaped(&mut cmd, arg);
             cmd.push('"');
@@ -251,19 +257,38 @@ pub fn render_windows_startup_cmd(entry: &AutostartEntry) -> String {
 
 fn push_cmd_escaped(out: &mut String, input: &str) {
     for ch in input.chars() {
-        if ch == '"' {
-            out.push_str("\"\"");
-        } else {
-            out.push(ch);
+        match ch {
+            '"' => out.push_str("\"\""),
+            '%' => out.push_str("%%"),
+            _ => out.push(ch),
         }
     }
 }
 
 fn push_quoted_desktop_arg(out: &mut String, arg: &str) {
     let needs_quotes = arg.is_empty()
-        || arg
-            .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '"' | '\\' | '$' | '`' | '%'));
+        || arg.chars().any(|c| {
+            c.is_whitespace()
+                || matches!(
+                    c,
+                    '"' | '\''
+                        | '\\'
+                        | '>'
+                        | '<'
+                        | '~'
+                        | '|'
+                        | '&'
+                        | ';'
+                        | '$'
+                        | '*'
+                        | '?'
+                        | '#'
+                        | '('
+                        | ')'
+                        | '`'
+                        | '%'
+                )
+        });
     if !needs_quotes {
         out.push_str(arg);
         return;
@@ -351,6 +376,21 @@ mod tests {
     }
 
     #[test]
+    fn default_entry_includes_background_flag_across_platforms() {
+        let entry = AutostartEntry::for_safe_your_eyes(PathBuf::from("/usr/bin/safe-your-eyes"));
+        assert_eq!(entry.args, vec!["--background"]);
+
+        let desktop = render_linux_desktop_entry(&entry);
+        assert!(desktop.contains("Exec=/usr/bin/safe-your-eyes --background"));
+
+        let plist = render_macos_launch_agent_plist(&entry);
+        assert!(plist.contains("<string>--background</string>"));
+
+        let cmd = render_windows_startup_cmd(&entry);
+        assert!(cmd.contains(r#"start "" "/usr/bin/safe-your-eyes" --background"#));
+    }
+
+    #[test]
     fn manager_enable_disable_round_trip_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TestTempDir::new("autostart")?;
         let entry_path = tmp.path().join("autostart").join("safe-your-eyes.desktop");
@@ -362,6 +402,7 @@ mod tests {
         assert!(mgr.is_enabled());
         let content = fs::read_to_string(&entry_path)?;
         assert!(content.contains("/usr/bin/safe-your-eyes"));
+        assert!(content.contains("--background"));
 
         mgr.disable()?;
         assert!(!mgr.is_enabled());
@@ -373,5 +414,37 @@ mod tests {
         mgr.sync(false, &entry)?;
         assert!(!mgr.is_enabled());
         Ok(())
+    }
+
+    #[test]
+    fn linux_desktop_entry_quotes_xdg_reserved_chars_without_spaces() {
+        let mut entry =
+            AutostartEntry::for_safe_your_eyes(PathBuf::from("/usr/bin/safe-your-eyes"));
+        entry.args = vec![
+            "--background".to_owned(),
+            "--config".to_owned(),
+            "/home/o'brien&co/config.toml".to_owned(),
+        ];
+
+        let desktop = render_linux_desktop_entry(&entry);
+        assert!(desktop.contains(
+            r#"Exec=/usr/bin/safe-your-eyes --background --config "/home/o'brien&co/config.toml""#
+        ));
+    }
+
+    #[test]
+    fn windows_startup_cmd_quotes_metacharacters_and_escapes_percent() {
+        let mut entry =
+            AutostartEntry::for_safe_your_eyes(PathBuf::from(r"C:\Users\100%User\sye.exe"));
+        entry.args = vec![
+            "--background".to_owned(),
+            "--config".to_owned(),
+            r"C:\Users\A&B\100%cfg.toml".to_owned(),
+        ];
+
+        let cmd = render_windows_startup_cmd(&entry);
+        assert!(cmd.contains(
+            r#"start "" "C:\Users\100%%User\sye.exe" --background --config "C:\Users\A&B\100%%cfg.toml""#
+        ));
     }
 }

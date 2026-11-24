@@ -278,7 +278,11 @@ mod tests {
     #[test]
     fn smart_pause_enters_resting_and_credits_or_resets() {
         let mut policy = SmartPausePolicy::new();
-        let cfg = SmartPauseConfig::default();
+        assert_eq!(SmartPauseConfig::default().idle_threshold_secs, 300);
+        let cfg = SmartPauseConfig {
+            idle_threshold_secs: 5,
+            ..SmartPauseConfig::default()
+        };
 
         assert_eq!(
             policy.evaluate_idle(

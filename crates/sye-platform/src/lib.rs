@@ -32,7 +32,7 @@ pub use autostart::{
     render_windows_startup_cmd, sync_system_autostart,
 };
 pub use clock::SystemClock;
-pub use console::{detach_console, hide_child_console, mark_foreground_fullscreen};
+pub use console::{detach_console, hide_child_console, mark_own_windows_fullscreen};
 pub use dnd::SystemDndProvider;
 pub use idle::SystemIdleProvider;
 pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};

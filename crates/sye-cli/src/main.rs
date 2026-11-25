@@ -138,7 +138,7 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
     };
     match sye_ui::run_overlay_with_hook(
         request,
-        Some(Box::new(sye_platform::mark_foreground_fullscreen)),
+        Some(Box::new(sye_platform::mark_own_windows_fullscreen)),
     ) {
         Ok(outcome) => match serde_json::to_string(&outcome) {
             Ok(line) => {

@@ -20,31 +20,49 @@ pub fn hide_child_console(cmd: &mut Command) -> &mut Command {
     cmd
 }
 
-/// Tells the taskbar that this process's foreground window is full screen, so it stays below it.
-pub fn mark_foreground_fullscreen() {
+/// Tells the taskbar that this process's visible top-level windows are full screen, so it stays
+/// below them.
+pub fn mark_own_windows_fullscreen() {
     #[cfg(target_os = "windows")]
     {
-        use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Com::{
+            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+        };
         use windows::Win32::UI::Shell::{ITaskbarList2, TaskbarList};
+        use windows_sys::Win32::Foundation::{LPARAM, TRUE};
         use windows_sys::Win32::System::Threading::GetCurrentProcessId;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId,
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
         };
 
-        // SAFETY: plain Win32 calls; COM is initialized on the nsh UI thread that runs this hook,
-        // and the window handle is checked to belong to this process before use.
+        #[expect(unsafe_code, reason = "Win32 FFI callback")]
+        unsafe extern "system" fn collect(hwnd: *mut core::ffi::c_void, out: LPARAM) -> i32 {
+            let mut pid = 0;
+            // SAFETY: `hwnd` comes from `EnumWindows`; `out` is the `Vec` passed below.
+            unsafe {
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid == GetCurrentProcessId() && IsWindowVisible(hwnd) != 0 {
+                    (*(out as *mut Vec<usize>)).push(hwnd as usize);
+                }
+            }
+            TRUE
+        }
+
+        let mut own: Vec<usize> = Vec::new();
+        // SAFETY: `collect` only runs during the call, with this vector. The hook may run off the
+        // thread that initialized COM, so initialize it here; a repeat call is harmless.
         #[expect(unsafe_code, reason = "Win32 FFI")]
         let _ = unsafe {
-            let hwnd = GetForegroundWindow();
-            let mut pid = 0;
-            GetWindowThreadProcessId(hwnd, &mut pid);
-            if hwnd.is_null() || pid != GetCurrentProcessId() {
-                return;
-            }
+            EnumWindows(Some(collect), &mut own as *mut Vec<usize> as LPARAM);
+            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             CoCreateInstance::<_, ITaskbarList2>(&TaskbarList, None, CLSCTX_INPROC_SERVER).and_then(
                 |taskbar| {
                     taskbar.HrInit()?;
-                    taskbar.MarkFullscreenWindow(windows::Win32::Foundation::HWND(hwnd), true)
+                    for hwnd in &own {
+                        taskbar.MarkFullscreenWindow(HWND(*hwnd as *mut _), true)?;
+                    }
+                    Ok(())
                 },
             )
         };

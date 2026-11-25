@@ -4,10 +4,12 @@ mod cli;
 mod daemon;
 
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use sye_core::config::{BreakType, Config};
 use sye_core::ipc::{IpcCommand, IpcResponse};
-use sye_core::scheduler::OverlayRequest;
+use sye_core::scheduler::{OverlayOutcome, OverlayRequest};
 use sye_platform::{AppPaths, IpcClient, IpcError};
 
 use crate::cli::{CommandMode, HELP_TEXT, parse_args};
@@ -136,20 +138,27 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // nsh on Windows ends the process inside `run_app`, so `run_overlay_with_hook` never returns
+    // there: the outcome must be written from the hook.
+    let written = Arc::new(AtomicBool::new(false));
+    let hook_written = Arc::clone(&written);
+    let on_outcome: sye_ui::OverlayOutcomeCallback = Arc::new(move |outcome| {
+        if write_overlay_outcome(outcome) {
+            hook_written.store(true, Ordering::SeqCst);
+        }
+    });
     match sye_ui::run_overlay_with_hook(
         request,
         Some(Box::new(sye_platform::mark_own_windows_fullscreen)),
+        Some(on_outcome),
     ) {
-        Ok(outcome) => match serde_json::to_string(&outcome) {
-            Ok(line) => {
-                println!("{line}");
+        Ok(outcome) => {
+            if written.load(Ordering::SeqCst) || write_overlay_outcome(outcome) {
                 ExitCode::SUCCESS
-            }
-            Err(err) => {
-                eprintln!("Failed to serialize overlay outcome: {err}");
+            } else {
                 ExitCode::FAILURE
             }
-        },
+        }
         Err(err) => {
             eprintln!("{err}");
             ExitCode::FAILURE
@@ -175,6 +184,19 @@ fn run_settings_and_sync_autostart(config_file: &std::path::Path) -> ExitCode {
         Err(err) => {
             eprintln!("{err}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+fn write_overlay_outcome(outcome: OverlayOutcome) -> bool {
+    match serde_json::to_string(&outcome) {
+        Ok(line) => {
+            println!("{line}");
+            true
+        }
+        Err(err) => {
+            eprintln!("Failed to serialize overlay outcome: {err}");
+            false
         }
     }
 }

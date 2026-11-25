@@ -15,8 +15,8 @@ pub use monitors::{
     plan_overlay_viewports,
 };
 pub use overlay::{
-    OverlayKey, OverlayShownCallback, OverlayViewModel, format_mm_ss, run_overlay,
-    run_overlay_with_hook,
+    OverlayKey, OverlayOutcomeCallback, OverlayShownCallback, OverlayViewModel, format_mm_ss,
+    run_overlay, run_overlay_with_hook,
 };
 pub use settings::{
     AutostartChangeCallback, SettingsOutcome, SettingsTab, SettingsViewModel, run_settings,

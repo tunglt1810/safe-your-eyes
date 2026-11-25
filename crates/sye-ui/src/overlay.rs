@@ -241,10 +241,14 @@ const fn duration_secs_ceil(rem: Duration) -> u64 {
 /// Called once the break overlay window is shown and focused.
 pub type OverlayShownCallback = Box<dyn Fn() + Send>;
 
+/// Called once with the break outcome, before the overlay quits.
+pub type OverlayOutcomeCallback = Arc<dyn Fn(OverlayOutcome) + Send + Sync>;
+
 struct OverlayLaunch {
     request: OverlayRequest,
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
     on_shown: Option<OverlayShownCallback>,
+    on_outcome: Option<OverlayOutcomeCallback>,
 }
 
 static OVERLAY_LAUNCH: Mutex<Option<OverlayLaunch>> = Mutex::new(None);
@@ -514,13 +518,18 @@ pub(crate) fn build_overlay_view(
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
     quit_on_finish: bool,
     on_shown: Option<OverlayShownCallback>,
+    on_outcome: Option<OverlayOutcomeCallback>,
 ) -> impl IntoElement {
     let vm = signal(OverlayViewModel::new(request));
 
     let finish_if_ready = move || {
         let terminal = vm.with(|m| m.outcome().copied());
         if let Some(outcome) = terminal {
+            let first = outcome_sink.lock().map_or(false, |guard| guard.is_none());
             crate::store_outcome(&outcome_sink, outcome);
+            if first && let Some(hook) = on_outcome.as_ref() {
+                hook(outcome);
+            }
             if quit_on_finish {
                 quit();
             }
@@ -662,10 +671,14 @@ pub(crate) fn build_overlay_view(
 fn BreakOverlayRoot() -> impl IntoElement {
     let launch = OVERLAY_LAUNCH.lock().ok().and_then(|mut g| g.take());
     match launch {
-        Some(launch) => {
-            build_overlay_view(launch.request, launch.outcome_sink, true, launch.on_shown)
-                .into_element()
-        }
+        Some(launch) => build_overlay_view(
+            launch.request,
+            launch.outcome_sink,
+            true,
+            launch.on_shown,
+            launch.on_outcome,
+        )
+        .into_element(),
         None => view()
             .flex_1()
             .bg(colors::OVERLAY_CANVAS)
@@ -678,13 +691,15 @@ fn BreakOverlayRoot() -> impl IntoElement {
 
 /// Runs the Cozy fullscreen break overlay using Native Shell (`nsh`) and returns `OverlayOutcome`.
 pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
-    run_overlay_with_hook(request, None)
+    run_overlay_with_hook(request, None, None)
 }
 
-/// Runs the break overlay and calls `on_shown` once its window is shown and focused.
+/// Runs the break overlay. Calls `on_shown` once its window is shown and focused, and
+/// `on_outcome` once with the outcome before it quits.
 pub fn run_overlay_with_hook(
     request: OverlayRequest,
     on_shown: Option<OverlayShownCallback>,
+    on_outcome: Option<OverlayOutcomeCallback>,
 ) -> Result<OverlayOutcome, UiError> {
     let outcome_sink = Arc::new(Mutex::new(None));
     let Ok(mut guard) = OVERLAY_LAUNCH.lock() else {
@@ -696,6 +711,7 @@ pub fn run_overlay_with_hook(
         request,
         outcome_sink: Arc::clone(&outcome_sink),
         on_shown,
+        on_outcome,
     });
     drop(guard);
 
@@ -932,13 +948,21 @@ mod tests {
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
 
+        static OUTCOMES: Mutex<Vec<OverlayOutcome>> = Mutex::new(Vec::new());
+
         #[component]
         fn TestOverlay() -> impl IntoElement {
             let mut req = sample_request();
             req.shortcut_disable_secs = 0;
             req.fade_in_ms = 0;
             let sink = Arc::new(Mutex::new(None));
-            build_overlay_view(req, sink, false, None)
+            let on_outcome: OverlayOutcomeCallback = Arc::new(|outcome| {
+                OUTCOMES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(outcome);
+            });
+            build_overlay_view(req, sink, false, None, Some(on_outcome))
         }
 
         let mut app = Headless::start(EngineConfig {
@@ -952,6 +976,12 @@ mod tests {
         assert!(app.shows("Skip (Esc)"));
         assert!(app.shows("Postpone (Space)"));
         app.press("Skip (Esc)")?;
+        assert_eq!(
+            *OUTCOMES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![OverlayOutcome::Skipped]
+        );
         Ok(())
     }
 

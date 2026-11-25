@@ -411,9 +411,10 @@ mod macos_hover_tooltip {
     use objc2::runtime::ProtocolObject;
     use objc2::{MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSBackingStoreType, NSColor, NSEvent, NSFont, NSMenuDidBeginTrackingNotification,
-        NSStatusWindowLevel, NSTextField, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
-        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+        NSBackingStoreType, NSColor, NSEvent, NSFont, NSFontWeightRegular,
+        NSMenuDidBeginTrackingNotification, NSStatusWindowLevel, NSTextField,
+        NSVisualEffectBlendingMode, NSVisualEffectMaterial, NSVisualEffectState,
+        NSVisualEffectView, NSWindow, NSWindowAnimationBehavior, NSWindowCollectionBehavior,
         NSWindowStyleMask,
     };
     use objc2_foundation::{
@@ -460,6 +461,8 @@ mod macos_hover_tooltip {
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setHasShadow(true);
             window.setIgnoresMouseEvents(true);
+            // macOS 26+ animates `Default` borderless popups with an underdamped spring bounce.
+            window.setAnimationBehavior(NSWindowAnimationBehavior::None);
             window.setLevel(NSStatusWindowLevel + 1);
             window.setCollectionBehavior(
                 NSWindowCollectionBehavior::CanJoinAllSpaces
@@ -479,8 +482,13 @@ mod macos_hover_tooltip {
                 layer.setMasksToBounds(true);
             }
 
+            let tip_size = NSFont::toolTipsFontOfSize(0.0).pointSize();
+            // SAFETY: `NSFontWeightRegular` is an immutable AppKit constant.
+            let tip_font = NSFont::monospacedDigitSystemFontOfSize_weight(tip_size, unsafe {
+                NSFontWeightRegular
+            });
             let label = NSTextField::labelWithString(&NSString::new(), mtm);
-            label.setFont(Some(&NSFont::toolTipsFontOfSize(0.0)));
+            label.setFont(Some(&tip_font));
             label.setTextColor(Some(&NSColor::labelColor()));
             effect_view.addSubview(&label);
             window.setContentView(Some(&effect_view));
@@ -511,11 +519,12 @@ mod macos_hover_tooltip {
                 label_size.width.ceil() + PAD_X * 2.0,
                 label_size.height.ceil() + PAD_Y * 2.0,
             );
+            let was_visible = self.window.isVisible();
             let prev_frame = self.window.frame();
             let prev_size = prev_frame.size;
             let size_changed = (prev_size.width - win_size.width).abs() > 0.5
                 || (prev_size.height - win_size.height).abs() > 0.5;
-            if text_changed || size_changed {
+            if !was_visible || size_changed {
                 self.effect_view
                     .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), win_size));
                 self.label.setFrameOrigin(NSPoint::new(PAD_X, PAD_Y));
@@ -527,14 +536,14 @@ mod macos_hover_tooltip {
             );
             let origin_changed =
                 (prev_frame.origin.x - ox).abs() > 0.5 || (prev_frame.origin.y - oy).abs() > 0.5;
-            if text_changed || size_changed || origin_changed {
+            if !was_visible || size_changed || origin_changed {
                 self.window
-                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), win_size), true);
+                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), win_size), was_visible);
             }
-            if size_changed {
+            if size_changed && was_visible {
                 self.window.invalidateShadow();
             }
-            if !self.window.isVisible() {
+            if !was_visible {
                 self.window.orderFrontRegardless();
             }
         }

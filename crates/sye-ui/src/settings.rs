@@ -994,6 +994,7 @@ pub(crate) fn build_settings_view_with_hooks(
     let error_msg = computed(move || vm.with(|m| m.validation_error.clone()));
 
     let highlight_scale = animated_value(1.0);
+    let form_scroll_ref = element_ref();
     let prev_tab = Cell::new(None::<SettingsTab>);
 
     effect(move || {
@@ -1001,10 +1002,12 @@ pub(crate) fn build_settings_view_with_hooks(
         let previous = prev_tab.replace(Some(current));
         if let Some(prev) = previous
             && prev != current
-            && !reduce_motion()
         {
-            highlight_scale.set(0.0);
-            highlight_scale.timing(1.0, motion::HIGHLIGHT_SWEEP_MS, motion::COZY_EASE);
+            form_scroll_ref.scroll_to(point(px(0.0), px(0.0)), false);
+            if !reduce_motion() {
+                highlight_scale.set(0.0);
+                highlight_scale.timing(1.0, motion::HIGHLIGHT_SWEEP_MS, motion::COZY_EASE);
+            }
         }
     });
 
@@ -1171,6 +1174,7 @@ pub(crate) fn build_settings_view_with_hooks(
     let reset_hook = live_hook;
 
     let form_scroll = scroll()
+        .element_ref(&form_scroll_ref)
         .flex_1()
         .bg(colors::BACKGROUND_SURFACE)
         .transition_colors()
@@ -2319,6 +2323,69 @@ mod tests {
 
         let reloaded = Config::load_from_path(&path)?;
         assert!(reloaded.autostart);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_tab_switch_resets_form_scroll_to_top() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use nsh_core::Command;
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-scroll-reset")?;
+        static SCROLL_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        if let Ok(mut guard) = SCROLL_PATH.lock() {
+            *guard = Some(dir.file("scroll-reset.toml"));
+        }
+
+        #[component]
+        fn TestScrollResetSettings() -> impl IntoElement {
+            let path = SCROLL_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            build_settings_view(vm, sink, false)
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestScrollResetSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Break Schedule")?;
+
+        let reset_cmd = Command::ScrollTo {
+            x: Points::ZERO,
+            y: Points::ZERO,
+            animated: false,
+        };
+        assert!(!app.screen().sent(&reset_cmd));
+
+        app.scroll("Break Schedule", Points(200.0))?;
+        app.clear_commands();
+        app.press("Policies")?;
+        app.wait_for("Break Enforcement")?;
+        assert!(app.screen().sent(&reset_cmd));
+        assert!(
+            app.scroll("Break Enforcement", Points(-20.0)).is_err(),
+            "Scroll offset must reset to 0 after switching from Timing to Policies"
+        );
+
+        app.press("Exercises")?;
+        app.wait_for("Short Break Exercises")?;
+        app.scroll("Short Break Exercises", Points(300.0))?;
+        app.clear_commands();
+        app.press("Timing")?;
+        app.wait_for("Break Schedule")?;
+        assert!(app.screen().sent(&reset_cmd));
+        assert!(
+            app.scroll("Break Schedule", Points(-20.0)).is_err(),
+            "Scroll offset must reset to 0 after switching from Exercises to Timing"
+        );
         Ok(())
     }
 }

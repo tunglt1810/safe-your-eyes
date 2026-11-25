@@ -14,7 +14,7 @@ const APP_NAME: &str = "Safe Your Eyes";
 #[cfg(not(target_os = "macos"))]
 const APP_ICON: &str = "safe-your-eyes";
 
-/// Desktop notification adapter backed by `UserNotifications` on macOS and `notify-rust` elsewhere.
+/// Desktop notification adapter backed by a non-activating `AppKit` banner on macOS and `notify-rust` elsewhere.
 pub struct OsNotifier {
     enabled: bool,
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -82,12 +82,7 @@ impl OsNotifier {
     }
 
     /// Requests OS notification permission once per process when supported.
-    pub fn request_authorization(&self) {
-        #[cfg(target_os = "macos")]
-        if self.enabled {
-            macos_impl::request_authorization();
-        }
-        #[cfg(not(target_os = "macos"))]
+    pub const fn request_authorization(&self) {
         let _ = self.enabled;
     }
 }
@@ -117,6 +112,22 @@ pub fn format_pre_break_notification(
         trimmed.to_owned()
     };
     (summary, body)
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+pub(crate) fn compute_macos_banner_origin(
+    visible_frame: crate::tray::ScreenRect,
+    banner_size: (f64, f64),
+) -> (f64, f64) {
+    const RIGHT_MARGIN: f64 = 12.0;
+    const TOP_MARGIN: f64 = 12.0;
+
+    let min_x = visible_frame.x + RIGHT_MARGIN;
+    let max_x = (visible_frame.x + visible_frame.width - banner_size.0 - RIGHT_MARGIN).max(min_x);
+    let min_y = visible_frame.y + TOP_MARGIN;
+    let max_y = (visible_frame.y + visible_frame.height - banner_size.1 - TOP_MARGIN).max(min_y);
+    (max_x.round(), max_y.round())
 }
 
 impl Notifier for OsNotifier {
@@ -243,264 +254,319 @@ impl Notifier for OsNotifier {
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
-    reason = "UserNotifications.framework dynamic loading and Objective-C messaging"
+    reason = "Non-activating AppKit NSPanel banner for in-place pre-break countdown"
 )]
 mod macos_impl {
     use std::cell::RefCell;
-    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    use block2::{DynBlock, RcBlock};
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
-    use objc2::{AnyThread, MainThreadMarker, define_class, msg_send};
-    use objc2_foundation::{
-        NSArray, NSBundle, NSError, NSObject, NSObjectProtocol, NSSet, NSString,
+    use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+    use objc2_app_kit::{
+        NSBackingStoreType, NSColor, NSEvent, NSFont, NSFontWeightRegular, NSFontWeightSemibold,
+        NSImage, NSImageView, NSLineBreakMode, NSPanel, NSResponder, NSScreen, NSStatusWindowLevel,
+        NSTextField, NSView, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+        NSVisualEffectState, NSVisualEffectView, NSWindowAnimationBehavior,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
     };
+    use objc2_foundation::{NSData, NSObject, NSPoint, NSRect, NSSize, NSString};
     use sye_core::PlatformError;
 
-    const PRE_BREAK_NOTIFICATION_ID: &str = "io.github.safeyoureyes.pre-break";
-    // Alert/banner only: badges are unused and chimes play through `OsAudioPlayer`.
-    const AUTHORIZATION_OPTIONS: usize = 1 << 2;
-    // Banner only so transient pre-break countdown alerts stay out of Notification Center history.
-    const PRESENTATION: usize = 1 << 4;
+    use super::compute_macos_banner_origin;
+    use crate::tray::ScreenRect;
 
-    // Tracks whether a pre-break alert is still active so late async XPC deliveries clear themselves.
-    static NOTIFICATION_ACTIVE: AtomicBool = AtomicBool::new(false);
-    // Set when the user closes or clicks the banner so later countdown ticks do not re-post it.
+    const APP_ICON_PNG: &[u8] =
+        include_bytes!("../../../assets/icons/hicolor/128x128/apps/safe-your-eyes.png");
+    const BANNER_WIDTH: f64 = 356.0;
+    const MIN_HEIGHT: f64 = 64.0;
+    const CORNER_RADIUS: f64 = 16.0;
+    const ICON_SIZE: f64 = 38.0;
+    const ICON_X: f64 = 13.0;
+    const TEXT_X: f64 = 62.0;
+    const PAD_RIGHT: f64 = 14.0;
+    const PAD_Y: f64 = 12.0;
+    const LINE_GAP: f64 = 2.0;
+    const TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_RIGHT;
+    const MAX_FIT_HEIGHT: f64 = 10_000.0;
+
+    // `UNUserNotificationCenter::addNotificationRequest:` re-animates a new top-right banner on
+    // every countdown second and Temporary Banners auto-hide after ~5s, so macOS renders an
+    // in-place non-activating `NSPanel` instead.
     static USER_DISMISSED: AtomicBool = AtomicBool::new(false);
 
-    // `UNNotificationCategoryOptionCustomDismissAction`: macOS reports a banner close to the
-    // delegate only for categories with this option.
-    const CATEGORY_CUSTOM_DISMISS_ACTION: usize = 1 << 0;
-
     thread_local! {
-        // `UNUserNotificationCenter.delegate` is weak, so retain the delegate on the main thread.
-        static DELEGATE: RefCell<Option<Retained<SyeNotificationDelegate>>> =
-            const { RefCell::new(None) };
+        static BANNER: RefCell<Option<PreBreakBanner>> = const { RefCell::new(None) };
     }
 
     define_class!(
-        #[unsafe(super(NSObject))]
-        #[name = "SyeNotificationDelegate"]
-        struct SyeNotificationDelegate;
+        #[unsafe(super(NSView, NSResponder, NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SyePreBreakBannerClickView"]
+        struct BannerClickView;
 
-        unsafe impl NSObjectProtocol for SyeNotificationDelegate {}
-
-        impl SyeNotificationDelegate {
-            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
-            fn will_present(
-                &self,
-                _center: &AnyObject,
-                _notification: &AnyObject,
-                done: &DynBlock<dyn Fn(usize)>,
-            ) {
-                let options = if NOTIFICATION_ACTIVE.load(Ordering::Acquire) {
-                    PRESENTATION
-                } else {
-                    0
-                };
-                done.call((options,));
+        impl BannerClickView {
+            // Deliver the dismissal click immediately while another app holds focus.
+            #[unsafe(method(acceptsFirstMouse:))]
+            fn accepts_first_mouse(&self, _event: Option<&NSEvent>) -> bool {
+                true
             }
 
-            #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
-            fn did_receive_response(
-                &self,
-                _center: &AnyObject,
-                _response: &AnyObject,
-                done: &DynBlock<dyn Fn()>,
-            ) {
-                if NOTIFICATION_ACTIVE.load(Ordering::Acquire) {
-                    USER_DISMISSED.store(true, Ordering::Release);
+            #[unsafe(method(mouseDown:))]
+            fn mouse_down(&self, _event: &NSEvent) {
+                USER_DISMISSED.store(true, Ordering::Release);
+                // Hide immediately; defer panel destruction to avoid deallocating `self` inside `mouseDown:`.
+                if let Some(window) = self.window() {
+                    window.orderOut(None);
                 }
-                done.call(());
             }
         }
     );
 
-    pub(super) fn request_authorization() {
-        autoreleasepool(|_| {
-            let Ok(center) = notification_center() else {
-                return;
+    struct PreBreakBanner {
+        panel: Retained<NSPanel>,
+        effect_view: Retained<NSVisualEffectView>,
+        icon_view: Option<Retained<NSImageView>>,
+        title_label: Retained<NSTextField>,
+        body_label: Retained<NSTextField>,
+        click_shield: Retained<BannerClickView>,
+        last_summary: String,
+        last_body: String,
+    }
+
+    impl PreBreakBanner {
+        fn new(mtm: MainThreadMarker) -> Self {
+            let initial_rect = NSRect::new(
+                NSPoint::new(0.0, 0.0),
+                NSSize::new(BANNER_WIDTH, MIN_HEIGHT),
+            );
+            let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+                NSPanel::alloc(mtm),
+                initial_rect,
+                NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+                NSBackingStoreType::Buffered,
+                false,
+            );
+            // SAFETY: `PreBreakBanner` owns `panel` via `Retained<NSPanel>` and hides it with
+            // `orderOut` on drop, so AppKit must not auto-release it on close.
+            unsafe {
+                panel.setReleasedWhenClosed(false);
+            }
+            panel.setFloatingPanel(true);
+            panel.setBecomesKeyOnlyIfNeeded(true);
+            panel.setWorksWhenModal(true);
+            panel.setOpaque(false);
+            panel.setBackgroundColor(Some(&NSColor::clearColor()));
+            panel.setHasShadow(true);
+            panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
+            panel.setLevel(NSStatusWindowLevel);
+            panel.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+
+            let effect_view =
+                NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), initial_rect);
+            effect_view.setMaterial(NSVisualEffectMaterial::Popover);
+            effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            effect_view.setState(NSVisualEffectState::Active);
+            effect_view.setWantsLayer(true);
+            if let Some(layer) = effect_view.layer() {
+                layer.setCornerRadius(CORNER_RADIUS);
+                layer.setMasksToBounds(true);
+            }
+
+            let icon_data = NSData::with_bytes(APP_ICON_PNG);
+            let icon_view = NSImage::initWithData(NSImage::alloc(), &icon_data).map(|image| {
+                image.setSize(NSSize::new(ICON_SIZE, ICON_SIZE));
+                let view = NSImageView::imageViewWithImage(&image, mtm);
+                effect_view.addSubview(&view);
+                view
+            });
+
+            // SAFETY: `NSFontWeightSemibold` and `NSFontWeightRegular` are immutable AppKit constants.
+            let (title_font, body_font) = unsafe {
+                (
+                    NSFont::monospacedDigitSystemFontOfSize_weight(13.0, NSFontWeightSemibold),
+                    NSFont::systemFontOfSize_weight(13.0, NSFontWeightRegular),
+                )
             };
-            install_delegate(&center);
-            ensure_authorization(&center);
-        });
+
+            let title_label = NSTextField::labelWithString(&NSString::new(), mtm);
+            title_label.setFont(Some(&title_font));
+            title_label.setTextColor(Some(&NSColor::labelColor()));
+            title_label.setMaximumNumberOfLines(1);
+            title_label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            effect_view.addSubview(&title_label);
+
+            let body_label = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
+            body_label.setSelectable(false);
+            body_label.setFont(Some(&body_font));
+            body_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            body_label.setMaximumNumberOfLines(2);
+            body_label.setPreferredMaxLayoutWidth(TEXT_WIDTH);
+            if let Some(cell) = body_label.cell() {
+                cell.setTruncatesLastVisibleLine(true);
+            }
+            effect_view.addSubview(&body_label);
+
+            // SAFETY: `BannerClickView` inherits `-[NSView initWithFrame:]` with no custom ivars.
+            let click_shield: Retained<BannerClickView> =
+                unsafe { msg_send![BannerClickView::alloc(mtm), initWithFrame: initial_rect] };
+            effect_view.addSubview(&click_shield);
+            panel.setContentView(Some(&effect_view));
+
+            Self {
+                panel,
+                effect_view,
+                icon_view,
+                title_label,
+                body_label,
+                click_shield,
+                last_summary: String::new(),
+                last_body: String::new(),
+            }
+        }
+
+        fn show_or_update(
+            &mut self,
+            summary: &str,
+            body: &str,
+            mtm: MainThreadMarker,
+        ) -> Result<(), PlatformError> {
+            let summary_changed = self.last_summary != summary;
+            let body_changed = self.last_body != body;
+            let was_visible = self.panel.isVisible();
+
+            if summary_changed {
+                self.last_summary.clear();
+                self.last_summary.push_str(summary);
+                self.title_label
+                    .setStringValue(&NSString::from_str(summary));
+            }
+            if !was_visible || body_changed {
+                if body_changed {
+                    self.last_body.clear();
+                    self.last_body.push_str(body);
+                    self.body_label.setStringValue(&NSString::from_str(body));
+                }
+
+                let visible = active_screen_visible_frame(mtm).ok_or_else(|| {
+                    PlatformError::Unavailable("macOS display screen unavailable".to_owned())
+                })?;
+
+                let fit_bounds = NSSize::new(TEXT_WIDTH, MAX_FIT_HEIGHT);
+                let title_h = self.title_label.sizeThatFits(fit_bounds).height.ceil();
+                let body_h = self.body_label.sizeThatFits(fit_bounds).height.ceil();
+                let text_block_h = title_h + LINE_GAP + body_h;
+                let banner_h = (text_block_h + PAD_Y * 2.0).max(MIN_HEIGHT).ceil();
+                let banner_size = NSSize::new(BANNER_WIDTH, banner_h);
+
+                self.effect_view
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
+                self.click_shield
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
+                if let Some(icon_view) = &self.icon_view {
+                    let icon_y = ((banner_h - ICON_SIZE) * 0.5).round();
+                    icon_view.setFrame(NSRect::new(
+                        NSPoint::new(ICON_X, icon_y),
+                        NSSize::new(ICON_SIZE, ICON_SIZE),
+                    ));
+                }
+
+                let body_y = ((banner_h - text_block_h) * 0.5).round();
+                let title_y = body_y + body_h + LINE_GAP;
+                self.body_label.setFrame(NSRect::new(
+                    NSPoint::new(TEXT_X, body_y),
+                    NSSize::new(TEXT_WIDTH, body_h),
+                ));
+                self.title_label.setFrame(NSRect::new(
+                    NSPoint::new(TEXT_X, title_y),
+                    NSSize::new(TEXT_WIDTH, title_h),
+                ));
+
+                let (ox, oy) = compute_macos_banner_origin(visible, (BANNER_WIDTH, banner_h));
+                self.panel
+                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), banner_size), was_visible);
+                if !was_visible {
+                    self.panel.orderFrontRegardless();
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for PreBreakBanner {
+        fn drop(&mut self) {
+            self.panel.orderOut(None);
+        }
+    }
+
+    fn clear_banner() {
+        if MainThreadMarker::new().is_some() {
+            autoreleasepool(|_| {
+                BANNER.with(|slot| {
+                    if let Ok(mut guard) = slot.try_borrow_mut() {
+                        let _ = guard.take();
+                    }
+                });
+            });
+        }
+    }
+
+    fn ns_rect_to_screen_rect(rect: NSRect) -> ScreenRect {
+        ScreenRect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
+        }
+    }
+
+    fn active_screen_visible_frame(mtm: MainThreadMarker) -> Option<ScreenRect> {
+        let cursor = NSEvent::mouseLocation();
+        let screens = NSScreen::screens(mtm);
+        for screen in &screens {
+            let full = ns_rect_to_screen_rect(screen.frame());
+            if full.contains((cursor.x, cursor.y)) {
+                return Some(ns_rect_to_screen_rect(screen.visibleFrame()));
+            }
+        }
+        NSScreen::mainScreen(mtm).map(|s| ns_rect_to_screen_rect(s.visibleFrame()))
     }
 
     pub(super) fn show_pre_break(summary: &str, body: &str) -> Result<(), PlatformError> {
         if USER_DISMISSED.load(Ordering::Acquire) {
+            clear_banner();
             return Ok(());
         }
+        let mtm = MainThreadMarker::new().ok_or_else(|| {
+            PlatformError::Unavailable(
+                "macOS pre-break banner must run on the main thread".to_owned(),
+            )
+        })?;
         autoreleasepool(|_| {
-            let center = notification_center()?;
-            install_delegate(&center);
-            ensure_authorization(&center);
-
-            let content_cls = AnyClass::get(c"UNMutableNotificationContent").ok_or_else(|| {
-                PlatformError::Unavailable("UNMutableNotificationContent unavailable".to_owned())
-            })?;
-            let request_cls = AnyClass::get(c"UNNotificationRequest").ok_or_else(|| {
-                PlatformError::Unavailable("UNNotificationRequest unavailable".to_owned())
-            })?;
-
-            NOTIFICATION_ACTIVE.store(true, Ordering::Release);
-
-            let title_ns = NSString::from_str(summary);
-            let body_ns = NSString::from_str(body);
-            let id_ns = NSString::from_str(PRE_BREAK_NOTIFICATION_ID);
-            let trigger: Option<&AnyObject> = None;
-            let req_done = RcBlock::new(|_err: *mut NSError| {
-                if !NOTIFICATION_ACTIVE.load(Ordering::Acquire) {
-                    clear_notifications();
-                }
-            });
-
-            // SAFETY: Documented `UserNotifications.framework` initializers, string setters, and
-            // `addNotificationRequest:withCompletionHandler:` with a nil trigger for immediate delivery.
-            unsafe {
-                let content: Retained<AnyObject> = msg_send![content_cls, new];
-                let _: () = msg_send![&*content, setTitle: &*title_ns];
-                let _: () = msg_send![&*content, setBody: &*body_ns];
-                let _: () = msg_send![&*content, setCategoryIdentifier: &*id_ns];
-                let request: Retained<AnyObject> = msg_send![
-                    request_cls,
-                    requestWithIdentifier: &*id_ns,
-                    content: &*content,
-                    trigger: trigger
-                ];
-                let _: () = msg_send![
-                    &*center,
-                    addNotificationRequest: &*request,
-                    withCompletionHandler: &*req_done
-                ];
-            }
-            Ok(())
+            BANNER.with(|slot| {
+                let mut guard = slot.try_borrow_mut().map_err(|_| {
+                    PlatformError::Unavailable("macOS pre-break banner busy".to_owned())
+                })?;
+                let banner = guard.get_or_insert_with(|| PreBreakBanner::new(mtm));
+                banner.show_or_update(summary, body, mtm)
+            })
         })
     }
 
     pub(super) fn dismiss() {
-        NOTIFICATION_ACTIVE.store(false, Ordering::Release);
         USER_DISMISSED.store(false, Ordering::Release);
-        clear_notifications();
-    }
-
-    fn clear_notifications() {
-        autoreleasepool(|_| {
-            let Ok(center) = notification_center() else {
-                return;
-            };
-            let ids =
-                NSArray::from_retained_slice(&[NSString::from_str(PRE_BREAK_NOTIFICATION_ID)]);
-            // SAFETY: Documented `UNUserNotificationCenter` selectors removing pending and delivered alerts.
-            unsafe {
-                let _: () =
-                    msg_send![&*center, removePendingNotificationRequestsWithIdentifiers: &*ids];
-                let _: () = msg_send![&*center, removeDeliveredNotificationsWithIdentifiers: &*ids];
-            }
-        });
-    }
-
-    fn ensure_authorization(center: &AnyObject) {
-        static AUTH_REQUESTED: OnceLock<()> = OnceLock::new();
-        AUTH_REQUESTED.get_or_init(|| {
-            register_category(center);
-            let auth_done = RcBlock::new(|_granted: Bool, _err: *mut NSError| {});
-            // SAFETY: `requestAuthorizationWithOptions:completionHandler:` is a documented
-            // `UNUserNotificationCenter` selector accepting `UNAuthorizationOptions` and `(BOOL, NSError *)`.
-            unsafe {
-                let _: () = msg_send![
-                    center,
-                    requestAuthorizationWithOptions: AUTHORIZATION_OPTIONS,
-                    completionHandler: &*auth_done
-                ];
-            }
-        });
-    }
-
-    fn register_category(center: &AnyObject) {
-        let Some(category_cls) = AnyClass::get(c"UNNotificationCategory") else {
-            return;
-        };
-        let id_ns = NSString::from_str(PRE_BREAK_NOTIFICATION_ID);
-        let empty = NSArray::<AnyObject>::new();
-        // SAFETY: Documented `UNNotificationCategory` factory and `UNUserNotificationCenter`
-        // `setNotificationCategories:` selector accepting `NSSet<UNNotificationCategory *> *`.
-        unsafe {
-            let category: Option<Retained<AnyObject>> = msg_send![
-                category_cls,
-                categoryWithIdentifier: &*id_ns,
-                actions: &*empty,
-                intentIdentifiers: &*empty,
-                options: CATEGORY_CUSTOM_DISMISS_ACTION
-            ];
-            let Some(category) = category else {
-                return;
-            };
-            let categories = NSSet::from_retained_slice(&[category]);
-            let _: () = msg_send![center, setNotificationCategories: &*categories];
-        }
-    }
-
-    fn install_delegate(center: &AnyObject) {
-        if MainThreadMarker::new().is_none() {
-            return;
-        }
-        // SAFETY: `delegate` is a documented `UNUserNotificationCenter` property.
-        let current: Option<Retained<AnyObject>> = unsafe { msg_send![center, delegate] };
-        if current.is_some() {
-            return;
-        }
-        // SAFETY: `SyeNotificationDelegate` inherits `-[NSObject init]` with no ivars.
-        let delegate: Retained<SyeNotificationDelegate> =
-            unsafe { msg_send![SyeNotificationDelegate::alloc(), init] };
-        // SAFETY: `setDelegate:` is weak; `DELEGATE` retains the instance on the main thread.
-        let _: () = unsafe { msg_send![center, setDelegate: &*delegate] };
-        DELEGATE.with(|slot| *slot.borrow_mut() = Some(delegate));
-    }
-
-    fn notification_center() -> Result<Retained<AnyObject>, PlatformError> {
-        // `currentNotificationCenter` throws an Objective-C exception outside an `.app` bundle.
-        let in_app_bundle = std::env::current_exe()
-            .ok()
-            .map(|p| p.canonicalize().unwrap_or(p))
-            .is_some_and(|p| crate::is_macos_app_bundle_executable(&p));
-        if !in_app_bundle || NSBundle::mainBundle().bundleIdentifier().is_none() {
-            return Err(PlatformError::Unavailable(
-                "macOS notifications require an .app bundle".to_owned(),
-            ));
-        }
-        if !load_framework() {
-            return Err(PlatformError::Unavailable(
-                "UserNotifications.framework unavailable".to_owned(),
-            ));
-        }
-        let class = AnyClass::get(c"UNUserNotificationCenter").ok_or_else(|| {
-            PlatformError::Unavailable("UNUserNotificationCenter unavailable".to_owned())
-        })?;
-        // SAFETY: Verified `.app` bundle executable and non-nil `bundleIdentifier` above.
-        let center: Option<Retained<AnyObject>> =
-            unsafe { msg_send![class, currentNotificationCenter] };
-        center.ok_or_else(|| {
-            PlatformError::Unavailable(
-                "UNUserNotificationCenter.currentNotificationCenter returned nil".to_owned(),
-            )
-        })
-    }
-
-    fn load_framework() -> bool {
-        static LOADED: OnceLock<bool> = OnceLock::new();
-        *LOADED.get_or_init(|| {
-            let path = c"/System/Library/Frameworks/UserNotifications.framework/UserNotifications";
-            // SAFETY: `path` is a valid NUL-terminated system framework path; handle stays loaded.
-            !unsafe { libc::dlopen(path.as_ptr(), libc::RTLD_LAZY) }.is_null()
-        })
+        clear_banner();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tray::ScreenRect;
 
     #[test]
     fn format_pre_break_notification_handles_short_long_and_empty_title() {
@@ -511,6 +577,31 @@ mod tests {
         let (long_summary, long_body) = format_pre_break_notification(BreakType::Long, "   ", 15);
         assert_eq!(long_summary, "Safe Your Eyes — Long break in 15s");
         assert_eq!(long_body, "Prepare to rest your eyes.");
+    }
+
+    #[test]
+    fn macos_banner_anchors_top_right_inside_visible_frame() {
+        let visible = ScreenRect {
+            x: 0.0,
+            y: 54.0,
+            width: 1512.0,
+            height: 904.0,
+        };
+        assert_eq!(
+            compute_macos_banner_origin(visible, (356.0, 64.0)),
+            (1144.0, 882.0)
+        );
+
+        let tiny = ScreenRect {
+            x: 100.0,
+            y: 40.0,
+            width: 300.0,
+            height: 60.0,
+        };
+        assert_eq!(
+            compute_macos_banner_origin(tiny, (356.0, 64.0)),
+            (112.0, 52.0)
+        );
     }
 
     #[test]

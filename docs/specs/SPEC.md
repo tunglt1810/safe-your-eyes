@@ -201,9 +201,9 @@ When the user cancels or closes the Settings window without `Save`, or when the 
 Each chime uses a smooth attack and exponential decay envelope to prevent clicks.
 Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
-On macOS `.app` bundles, `OsNotifier` requests alert permission once on daemon startup, updates the pre-break banner in place each second through `UserNotifications.framework` (`UNUserNotificationCenter`), and clears the pending and delivered pre-break alert on dismissal.
+On macOS, `OsNotifier` shows a lazy non-activating `NSPanel` banner in the top-right corner of the active display, updates its countdown title in place each second without window animations, and destroys the panel on dismissal.
 On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second and closes it on dismissal.
-On macOS and Linux, when the user closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
+On macOS and Linux, when the user clicks or closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
 On Windows, `OsNotifier` sends one `notify-rust` pre-break toast per cycle to avoid stacking separate toasts.
 
 ### 9.2 Local IPC Protocol
@@ -276,6 +276,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - The Settings window focuses itself on launch to appear in front of the active application.
 - The Settings window opens directly in the saved `Config.theme` mode with zero flash.
 - The Floating Sage Sidebar has a matching `1px` border and switches between `Timing`, `Policies`, `Exercises`, and `About & Support`.
+- Switching Settings tabs resets the Form Card scroll offset to the top.
 - When `strict_break` is `true`, the `Policies` screen sets `limit_consecutive_skips.enabled` to `false` and disables `Limit consecutive skips` and `Max consecutive skips`.
 - When `strict_break` is `true`, the `Skip Limit` KPI card shows `Strict`.
 - The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.

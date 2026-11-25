@@ -203,8 +203,8 @@ Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
 On macOS, `OsNotifier` shows a lazy non-activating `NSPanel` banner in the top-right corner of the active display, updates its countdown title in place each second without window animations, and destroys the panel on dismissal.
 On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second and closes it on dismissal.
-On macOS and Linux, when the user clicks or closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
-On Windows, `OsNotifier` sends one `notify-rust` pre-break toast per cycle to avoid stacking separate toasts.
+On Windows, `OsNotifier` shows a lazy per-monitor-DPI-aware, topmost, non-activating Win32 popup banner in the bottom-right corner of the work area on the display under the cursor, updates its countdown title in place each second, and destroys the window on dismissal.
+On macOS, Linux, and Windows, when the user clicks or closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
 
 ### 9.2 Local IPC Protocol
 

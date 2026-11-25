@@ -1,26 +1,25 @@
 //! Cross-platform desktop pre-break notification adapter (`sye_core::Notifier`).
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::sync::{Arc, Mutex, PoisonError};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 use notify_rust::{Notification, Timeout};
 use sye_core::{BreakType, Notifier, PlatformError};
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const APP_NAME: &str = "Safe Your Eyes";
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const APP_ICON: &str = "safe-your-eyes";
 
-/// Desktop notification adapter backed by a non-activating `AppKit` banner on macOS and `notify-rust` elsewhere.
+/// Desktop notification adapter backed by a non-activating banner window on macOS and Windows and
+/// `notify-rust` on Linux.
 pub struct OsNotifier {
     enabled: bool,
     #[cfg(all(unix, not(target_os = "macos")))]
     active: Mutex<Option<LinuxActive>>,
-    #[cfg(not(unix))]
-    active: AtomicBool,
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -64,8 +63,6 @@ impl OsNotifier {
             enabled: true,
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
-            #[cfg(not(unix))]
-            active: AtomicBool::new(false),
         }
     }
 
@@ -76,8 +73,6 @@ impl OsNotifier {
             enabled: false,
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
-            #[cfg(not(unix))]
-            active: AtomicBool::new(false),
         }
     }
 }
@@ -107,6 +102,26 @@ pub fn format_pre_break_notification(
         trimmed.to_owned()
     };
     (summary, body)
+}
+
+/// Returns the bottom-right banner origin inside a Win32 work area given as
+/// `(left, top, right, bottom)` in top-down screen coordinates.
+#[cfg(any(windows, test))]
+#[must_use]
+pub(crate) const fn compute_windows_banner_origin(
+    work_area: (i32, i32, i32, i32),
+    banner_size: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let (left, top, right, bottom) = work_area;
+    let min_x = left + margin;
+    let min_y = top + margin;
+    let x = right - banner_size.0 - margin;
+    let y = bottom - banner_size.1 - margin;
+    (
+        if x > min_x { x } else { min_x },
+        if y > min_y { y } else { min_y },
+    )
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -143,80 +158,60 @@ impl Notifier for OsNotifier {
             macos_impl::show_pre_break(&summary, &body)
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            windows_impl::show_pre_break(&summary, &body)
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let timeout_ms = u32::try_from(warning_secs.saturating_mul(1000)).unwrap_or(u32::MAX);
 
-            #[cfg(all(unix, not(target_os = "macos")))]
             {
-                {
-                    let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Some(active) = guard.as_mut() {
-                        if active.user_closed.load(Ordering::Acquire) {
-                            return Ok(());
-                        }
-                        active
-                            .handle
-                            .summary(&summary)
-                            .body(&body)
-                            .timeout(Timeout::Milliseconds(timeout_ms));
-                        if active.handle.update().is_ok() {
-                            // The server can assign a new id when the replaced notification expired.
-                            let id = active.handle.id();
-                            if id != active.listened_id {
-                                active.listened_id = id;
-                                spawn_close_listener(id, &active.user_closed);
-                            }
-                            return Ok(());
-                        }
-                        *guard = None;
-                    }
-                }
-
-                let mut notification = Notification::new();
-                notification
-                    .appname(APP_NAME)
-                    .icon(APP_ICON)
-                    .summary(&summary)
-                    .body(&body)
-                    .timeout(Timeout::Milliseconds(timeout_ms));
-                let handle = notification
-                    .show()
-                    .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
-                let user_closed = Arc::new(AtomicBool::new(false));
-                let listened_id = handle.id();
-                spawn_close_listener(listened_id, &user_closed);
                 let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
-                *guard = Some(LinuxActive {
-                    handle,
-                    listened_id,
-                    user_closed,
-                });
-                drop(guard);
-                Ok(())
+                if let Some(active) = guard.as_mut() {
+                    if active.user_closed.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
+                    active
+                        .handle
+                        .summary(&summary)
+                        .body(&body)
+                        .timeout(Timeout::Milliseconds(timeout_ms));
+                    if active.handle.update().is_ok() {
+                        // The server can assign a new id when the replaced notification expired.
+                        let id = active.handle.id();
+                        if id != active.listened_id {
+                            active.listened_id = id;
+                            spawn_close_listener(id, &active.user_closed);
+                        }
+                        return Ok(());
+                    }
+                    *guard = None;
+                }
             }
 
-            #[cfg(not(unix))]
-            {
-                // `notify-rust` on Windows cannot update an existing toast in place, so avoid
-                // stacking a separate toast on each countdown tick.
-                if self.active.swap(true, Ordering::AcqRel) {
-                    return Ok(());
-                }
-
-                let mut notification = Notification::new();
-                notification
-                    .appname(APP_NAME)
-                    .icon(APP_ICON)
-                    .summary(&summary)
-                    .body(&body)
-                    .timeout(Timeout::Milliseconds(timeout_ms));
-                if let Err(err) = notification.show() {
-                    self.active.store(false, Ordering::Release);
-                    return Err(PlatformError::Unavailable(err.to_string()));
-                }
-                Ok(())
-            }
+            let mut notification = Notification::new();
+            notification
+                .appname(APP_NAME)
+                .icon(APP_ICON)
+                .summary(&summary)
+                .body(&body)
+                .timeout(Timeout::Milliseconds(timeout_ms));
+            let handle = notification
+                .show()
+                .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
+            let user_closed = Arc::new(AtomicBool::new(false));
+            let listened_id = handle.id();
+            spawn_close_listener(listened_id, &user_closed);
+            let mut guard = self.active.lock().unwrap_or_else(PoisonError::into_inner);
+            *guard = Some(LinuxActive {
+                handle,
+                listened_id,
+                user_closed,
+            });
+            drop(guard);
+            Ok(())
         }
     }
 
@@ -239,8 +234,8 @@ impl Notifier for OsNotifier {
             }
         }
 
-        #[cfg(not(unix))]
-        self.active.store(false, Ordering::Release);
+        #[cfg(windows)]
+        windows_impl::dismiss();
 
         Ok(())
     }
@@ -565,6 +560,532 @@ mod macos_impl {
     }
 }
 
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "Win32 non-activating popup banner for in-place pre-break countdown"
+)]
+mod windows_impl {
+    use std::cell::RefCell;
+    use std::ffi::c_void;
+    use std::mem::{size_of, zeroed};
+    use std::ptr;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use sye_core::PlatformError;
+    use windows_sys::Win32::Foundation::{
+        GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    };
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{
+        BeginPaint, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
+        DRAW_TEXT_FORMAT, DT_CALCRECT, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
+        DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW,
+        GetSysColor, GetSysColorBrush, GetTextMetricsW, HDC, HFONT, InvalidateRect,
+        MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ReleaseDC,
+        SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
+        MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CS_DROPSHADOW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
+        DrawIconEx, GetClientRect, GetCursorPos, HICON, HWND_TOPMOST, IDC_ARROW, IMAGE_ICON,
+        IsWindowVisible, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MA_NOACTIVATE,
+        NONCLIENTMETRICSW, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_HIDE, SWP_NOACTIVATE,
+        SWP_SHOWWINDOW, SetWindowPos, ShowWindow, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+        WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    };
+
+    use super::compute_windows_banner_origin;
+
+    const CLASS_NAME: &str = "SyePreBreakBanner";
+    const WINDOW_TITLE: &str = "Safe Your Eyes";
+    // `sye-cli/build.rs` embeds the app icon through `winresource::set_icon`, which uses ID 1.
+    const APP_ICON_RESOURCE_ID: usize = 1;
+    const BASE_DPI: i32 = 96;
+    const BANNER_WIDTH: i32 = 356;
+    const MIN_HEIGHT: i32 = 64;
+    const ICON_SIZE: i32 = 38;
+    const ICON_X: i32 = 13;
+    const TEXT_X: i32 = 62;
+    const PAD_RIGHT: i32 = 14;
+    const PAD_Y: i32 = 12;
+    const LINE_GAP: i32 = 2;
+    const MARGIN: i32 = 12;
+    const BODY_MAX_LINES: i32 = 2;
+    const TITLE_FONT_WEIGHT: i32 = 600;
+
+    static USER_DISMISSED: AtomicBool = AtomicBool::new(false);
+
+    thread_local! {
+        static BANNER: RefCell<Option<Banner>> = const { RefCell::new(None) };
+    }
+
+    const fn size_u32<T>() -> u32 {
+        size_of::<T>() as u32
+    }
+
+    const fn scale(value: i32, dpi: i32) -> i32 {
+        value * dpi / BASE_DPI
+    }
+
+    fn wide_z(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
+    }
+
+    fn draw_text(hdc: HDC, text: &[u16], rect: &mut RECT, format: DRAW_TEXT_FORMAT) -> i32 {
+        let len = i32::try_from(text.len()).unwrap_or(i32::MAX);
+        // SAFETY: `DrawTextW` writes to the text buffer only with `DT_MODIFYSTRING`, which no
+        // caller passes, and `rect` is a valid writable `RECT`.
+        unsafe { DrawTextW(hdc, text.as_ptr().cast_mut(), len, rect, format) }
+    }
+
+    fn message_font(dpi: i32, weight: Option<i32>) -> HFONT {
+        // SAFETY: all-zero bytes are a valid `NONCLIENTMETRICSW` value.
+        let mut metrics: NONCLIENTMETRICSW = unsafe { zeroed() };
+        metrics.cbSize = size_u32::<NONCLIENTMETRICSW>();
+        // SAFETY: `metrics` is writable storage of `cbSize` bytes. On failure the zeroed
+        // `LOGFONTW` still yields the default GUI font.
+        unsafe {
+            SystemParametersInfoForDpi(
+                SPI_GETNONCLIENTMETRICS,
+                metrics.cbSize,
+                (&raw mut metrics).cast::<c_void>(),
+                0,
+                dpi.unsigned_abs(),
+            );
+        }
+        let mut font = metrics.lfMessageFont;
+        if let Some(weight) = weight {
+            font.lfWeight = weight;
+        }
+        // SAFETY: `font` is a fully initialized `LOGFONTW`.
+        unsafe { CreateFontIndirectW(&font) }
+    }
+
+    /// Runs banner Win32 calls per-monitor DPI aware so text stays sharp on scaled displays
+    /// without changing the process-wide awareness that the tray icon uses.
+    struct DpiScope(DPI_AWARENESS_CONTEXT);
+
+    impl DpiScope {
+        fn per_monitor() -> Self {
+            // SAFETY: the predefined context constant is always a valid argument.
+            Self(unsafe {
+                SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)
+            })
+        }
+    }
+
+    impl Drop for DpiScope {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` is the context that `SetThreadDpiAwarenessContext` returned.
+                unsafe {
+                    SetThreadDpiAwarenessContext(self.0);
+                }
+            }
+        }
+    }
+
+    struct Banner {
+        hwnd: HWND,
+        hinstance: HINSTANCE,
+        dpi: i32,
+        icon: HICON,
+        title_font: HFONT,
+        body_font: HFONT,
+        summary: Vec<u16>,
+        body: Vec<u16>,
+        size: (i32, i32),
+        icon_rect: RECT,
+        title_rect: RECT,
+        body_rect: RECT,
+    }
+
+    impl Banner {
+        fn new() -> Result<Self, PlatformError> {
+            // SAFETY: a null module name returns the handle of the current executable.
+            let hinstance = unsafe { GetModuleHandleW(ptr::null()) };
+            let class_name = wide_z(CLASS_NAME);
+            let window_title = wide_z(WINDOW_TITLE);
+            // SAFETY: all-zero bytes are a valid `WNDCLASSEXW` (null handles, no window procedure).
+            let mut class: WNDCLASSEXW = unsafe { zeroed() };
+            class.cbSize = size_u32::<WNDCLASSEXW>();
+            class.style = CS_DROPSHADOW;
+            class.lpfnWndProc = Some(wnd_proc);
+            class.hInstance = hinstance;
+            // SAFETY: `IDC_ARROW` is a predefined system cursor.
+            class.hCursor = unsafe { LoadCursorW(ptr::null_mut(), IDC_ARROW) };
+            class.lpszClassName = class_name.as_ptr();
+            // SAFETY: `class` and `class_name` stay alive for the call. Registration fails with
+            // `ERROR_CLASS_ALREADY_EXISTS` after the first banner, which is harmless.
+            unsafe {
+                RegisterClassExW(&class);
+            }
+
+            // SAFETY: the class is registered above and both strings are NUL-terminated.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    class_name.as_ptr(),
+                    window_title.as_ptr(),
+                    WS_POPUP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    hinstance,
+                    ptr::null(),
+                )
+            };
+            if hwnd.is_null() {
+                // SAFETY: reads the calling thread's last-error value.
+                let code = unsafe { GetLastError() };
+                return Err(PlatformError::Unavailable(format!(
+                    "Windows pre-break banner creation failed (error {code})"
+                )));
+            }
+
+            let corner = DWMWCP_ROUND;
+            // SAFETY: `corner` outlives the call and the size matches its type. Windows 10 rejects
+            // the attribute and keeps square corners.
+            unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&raw const corner).cast::<c_void>(),
+                    size_u32::<i32>(),
+                );
+            }
+
+            Ok(Self {
+                hwnd,
+                hinstance,
+                dpi: 0,
+                icon: ptr::null_mut(),
+                title_font: ptr::null_mut(),
+                body_font: ptr::null_mut(),
+                summary: Vec::new(),
+                body: Vec::new(),
+                size: (0, 0),
+                icon_rect: RECT::default(),
+                title_rect: RECT::default(),
+                body_rect: RECT::default(),
+            })
+        }
+
+        fn release_resources(&mut self) {
+            // SAFETY: each handle is either null or owned by this banner and not selected into a DC.
+            unsafe {
+                if !self.title_font.is_null() {
+                    DeleteObject(self.title_font);
+                }
+                if !self.body_font.is_null() {
+                    DeleteObject(self.body_font);
+                }
+                if !self.icon.is_null() {
+                    DestroyIcon(self.icon);
+                }
+            }
+            self.title_font = ptr::null_mut();
+            self.body_font = ptr::null_mut();
+            self.icon = ptr::null_mut();
+        }
+
+        fn apply_dpi(&mut self, dpi: i32) {
+            self.release_resources();
+            self.dpi = dpi;
+            self.title_font = message_font(dpi, Some(TITLE_FONT_WEIGHT));
+            self.body_font = message_font(dpi, None);
+            let icon_px = scale(ICON_SIZE, dpi);
+            // SAFETY: the resource ID is a valid `MAKEINTRESOURCEW` value. Test executables have
+            // no icon resource and get null, so the banner draws text only.
+            self.icon = unsafe {
+                LoadImageW(
+                    self.hinstance,
+                    ptr::without_provenance(APP_ICON_RESOURCE_ID),
+                    IMAGE_ICON,
+                    icon_px,
+                    icon_px,
+                    LR_DEFAULTCOLOR,
+                )
+            };
+        }
+
+        fn measure(&self, hdc: HDC, font: HFONT, text: &[u16], format: DRAW_TEXT_FORMAT) -> i32 {
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: self.text_width(),
+                bottom: 0,
+            };
+            // SAFETY: `hdc` is a live DC and `font` a live font owned by this banner.
+            let previous = unsafe { SelectObject(hdc, font) };
+            draw_text(hdc, text, &mut rect, format | DT_CALCRECT | DT_NOPREFIX);
+            // SAFETY: restores the object that `SelectObject` returned.
+            unsafe { SelectObject(hdc, previous) };
+            rect.bottom
+        }
+
+        fn line_height(hdc: HDC, font: HFONT) -> i32 {
+            // SAFETY: all-zero bytes are a valid `TEXTMETRICW` value.
+            let mut metrics: TEXTMETRICW = unsafe { zeroed() };
+            // SAFETY: `hdc` is a live DC, `font` a live font, and `metrics` writable storage.
+            unsafe {
+                let previous = SelectObject(hdc, font);
+                GetTextMetricsW(hdc, &mut metrics);
+                SelectObject(hdc, previous);
+            }
+            metrics.tmHeight
+        }
+
+        const fn text_width(&self) -> i32 {
+            scale(BANNER_WIDTH - TEXT_X - PAD_RIGHT, self.dpi)
+        }
+
+        fn layout(&mut self) {
+            let dpi = self.dpi;
+            // SAFETY: `self.hwnd` is the live banner window.
+            let hdc = unsafe { GetDC(self.hwnd) };
+            let title_h = self.measure(hdc, self.title_font, &self.summary, DT_SINGLELINE);
+            let body_full_h = self.measure(hdc, self.body_font, &self.body, DT_WORDBREAK);
+            let body_line_h = Self::line_height(hdc, self.body_font);
+            // SAFETY: releases the DC that `GetDC` returned for this window.
+            unsafe { ReleaseDC(self.hwnd, hdc) };
+
+            let body_h = body_full_h.min(body_line_h * BODY_MAX_LINES);
+            let gap = scale(LINE_GAP, dpi);
+            let text_block_h = title_h + gap + body_h;
+            let width = scale(BANNER_WIDTH, dpi);
+            let height = (text_block_h + scale(PAD_Y, dpi) * 2).max(scale(MIN_HEIGHT, dpi));
+            self.size = (width, height);
+
+            let icon = scale(ICON_SIZE, dpi);
+            let icon_x = scale(ICON_X, dpi);
+            let icon_y = (height - icon) / 2;
+            self.icon_rect = RECT {
+                left: icon_x,
+                top: icon_y,
+                right: icon_x + icon,
+                bottom: icon_y + icon,
+            };
+
+            let text_x = scale(TEXT_X, dpi);
+            let text_right = text_x + self.text_width();
+            let title_top = (height - text_block_h) / 2;
+            self.title_rect = RECT {
+                left: text_x,
+                top: title_top,
+                right: text_right,
+                bottom: title_top + title_h,
+            };
+            let body_top = title_top + title_h + gap;
+            self.body_rect = RECT {
+                left: text_x,
+                top: body_top,
+                right: text_right,
+                bottom: body_top + body_h,
+            };
+        }
+
+        fn show_or_update(&mut self, summary: &str, body: &str) -> Result<(), PlatformError> {
+            let mut cursor = POINT { x: 0, y: 0 };
+            // SAFETY: `cursor` is writable storage for a `POINT`.
+            unsafe { GetCursorPos(&mut cursor) };
+            // SAFETY: `MONITOR_DEFAULTTOPRIMARY` always returns a monitor handle.
+            let monitor = unsafe { MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY) };
+            // SAFETY: all-zero bytes are a valid `MONITORINFO` value.
+            let mut info: MONITORINFO = unsafe { zeroed() };
+            info.cbSize = size_u32::<MONITORINFO>();
+            // SAFETY: `monitor` is non-null and `info.cbSize` is initialized.
+            if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+                return Err(PlatformError::Unavailable(
+                    "Windows display monitor unavailable".to_owned(),
+                ));
+            }
+            let (mut dpi_x, mut dpi_y) = (BASE_DPI.unsigned_abs(), BASE_DPI.unsigned_abs());
+            // SAFETY: `monitor` is non-null and both outputs are writable. On failure the
+            // outputs keep the 96 DPI default.
+            unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y) };
+            let dpi = i32::try_from(dpi_x).unwrap_or(BASE_DPI);
+
+            let summary: Vec<u16> = summary.encode_utf16().collect();
+            let body: Vec<u16> = body.encode_utf16().collect();
+            let body_changed = self.body != body;
+            let dpi_changed = self.dpi != dpi;
+            // SAFETY: `self.hwnd` is the live banner window.
+            let was_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+            self.summary = summary;
+            self.body = body;
+            if dpi_changed {
+                self.apply_dpi(dpi);
+            }
+            if !was_visible || body_changed || dpi_changed {
+                self.layout();
+            }
+
+            let work = info.rcWork;
+            let (x, y) = compute_windows_banner_origin(
+                (work.left, work.top, work.right, work.bottom),
+                self.size,
+                scale(MARGIN, self.dpi),
+            );
+            let show_flag = if was_visible { 0 } else { SWP_SHOWWINDOW };
+            // SAFETY: `self.hwnd` is the live banner window. `SWP_NOACTIVATE` keeps the
+            // foreground app focused.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    x,
+                    y,
+                    self.size.0,
+                    self.size.1,
+                    SWP_NOACTIVATE | show_flag,
+                );
+            }
+            if was_visible {
+                // SAFETY: `self.hwnd` is the live banner window.
+                unsafe { InvalidateRect(self.hwnd, ptr::null(), 0) };
+            }
+            Ok(())
+        }
+
+        fn paint(&self, hdc: HDC) {
+            let mut client = RECT::default();
+            let mut title_rect = self.title_rect;
+            let mut body_rect = self.body_rect;
+            // SAFETY: `hdc` comes from `BeginPaint` for `self.hwnd`, and every handle is live.
+            unsafe {
+                GetClientRect(self.hwnd, &mut client);
+                FillRect(hdc, &client, GetSysColorBrush(COLOR_WINDOW));
+                if !self.icon.is_null() {
+                    DrawIconEx(
+                        hdc,
+                        self.icon_rect.left,
+                        self.icon_rect.top,
+                        self.icon,
+                        self.icon_rect.right - self.icon_rect.left,
+                        self.icon_rect.bottom - self.icon_rect.top,
+                        0,
+                        ptr::null_mut(),
+                        DI_NORMAL,
+                    );
+                }
+                SetBkMode(hdc, TRANSPARENT as i32);
+                let previous = SelectObject(hdc, self.title_font);
+                SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+                draw_text(
+                    hdc,
+                    &self.summary,
+                    &mut title_rect,
+                    DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+                SelectObject(hdc, self.body_font);
+                SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
+                draw_text(
+                    hdc,
+                    &self.body,
+                    &mut body_rect,
+                    DT_WORDBREAK | DT_EDITCONTROL | DT_END_ELLIPSIS | DT_NOPREFIX,
+                );
+                SelectObject(hdc, previous);
+            }
+        }
+    }
+
+    impl Drop for Banner {
+        fn drop(&mut self) {
+            // SAFETY: `self.hwnd` is the live banner window owned by this value.
+            unsafe {
+                DestroyWindow(self.hwnd);
+            }
+            self.release_resources();
+        }
+    }
+
+    unsafe extern "system" fn wnd_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        match msg {
+            WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
+            WM_LBUTTONDOWN => {
+                USER_DISMISSED.store(true, Ordering::Release);
+                // Hide only: `DestroyWindow` here would free the window while it dispatches.
+                // SAFETY: `hwnd` is the live banner window that received this message.
+                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                0
+            }
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                let painted = BANNER.with(|slot| {
+                    let Ok(guard) = slot.try_borrow() else {
+                        return false;
+                    };
+                    let Some(banner) = guard.as_ref().filter(|b| b.hwnd == hwnd) else {
+                        return false;
+                    };
+                    // SAFETY: all-zero bytes are a valid `PAINTSTRUCT` value.
+                    let mut paint: PAINTSTRUCT = unsafe { zeroed() };
+                    // SAFETY: `hwnd` is the live banner window and `paint` is writable storage.
+                    let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+                    banner.paint(hdc);
+                    // SAFETY: ends the paint cycle that `BeginPaint` started.
+                    unsafe { EndPaint(hwnd, &paint) };
+                    true
+                });
+                if painted {
+                    0
+                } else {
+                    // SAFETY: forwards the original message arguments.
+                    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+                }
+            }
+            // SAFETY: forwards the original message arguments.
+            _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    fn clear_banner() {
+        let banner = BANNER.with(|slot| slot.try_borrow_mut().ok().and_then(|mut g| g.take()));
+        drop(banner);
+    }
+
+    pub(super) fn show_pre_break(summary: &str, body: &str) -> Result<(), PlatformError> {
+        if USER_DISMISSED.load(Ordering::Acquire) {
+            clear_banner();
+            return Ok(());
+        }
+        let _dpi_scope = DpiScope::per_monitor();
+        BANNER.with(|slot| {
+            let mut guard = slot.try_borrow_mut().map_err(|_| {
+                PlatformError::Unavailable("Windows pre-break banner busy".to_owned())
+            })?;
+            if guard.is_none() {
+                *guard = Some(Banner::new()?);
+            }
+            guard
+                .as_mut()
+                .map_or(Ok(()), |banner| banner.show_or_update(summary, body))
+        })
+    }
+
+    pub(super) fn dismiss() {
+        USER_DISMISSED.store(false, Ordering::Release);
+        clear_banner();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +1124,22 @@ mod tests {
         assert_eq!(
             compute_macos_banner_origin(tiny, (356.0, 64.0)),
             (112.0, 52.0)
+        );
+    }
+
+    #[test]
+    fn windows_banner_anchors_bottom_right_inside_work_area() {
+        assert_eq!(
+            compute_windows_banner_origin((0, 0, 1920, 1032), (356, 64), 12),
+            (1552, 956)
+        );
+        assert_eq!(
+            compute_windows_banner_origin((-1280, 0, 0, 984), (445, 80), 15),
+            (-460, 889)
+        );
+        assert_eq!(
+            compute_windows_banner_origin((100, 40, 400, 100), (356, 64), 12),
+            (112, 52)
         );
     }
 

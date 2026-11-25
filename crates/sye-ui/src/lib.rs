@@ -14,7 +14,10 @@ pub use monitors::{
     MonitorRect, OverlayViewportPlan, detect_monitors, parse_xrandr_monitors,
     plan_overlay_viewports,
 };
-pub use overlay::{OverlayKey, OverlayViewModel, format_mm_ss, run_overlay};
+pub use overlay::{
+    OverlayKey, OverlayShownCallback, OverlayViewModel, format_mm_ss, run_overlay,
+    run_overlay_with_hook,
+};
 pub use settings::{
     AutostartChangeCallback, SettingsOutcome, SettingsTab, SettingsViewModel, run_settings,
     run_settings_with_autostart,

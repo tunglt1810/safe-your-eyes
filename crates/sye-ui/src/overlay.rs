@@ -238,9 +238,13 @@ const fn duration_secs_ceil(rem: Duration) -> u64 {
     }
 }
 
+/// Called once the break overlay window is shown and focused.
+pub type OverlayShownCallback = Box<dyn Fn() + Send>;
+
 struct OverlayLaunch {
     request: OverlayRequest,
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
+    on_shown: Option<OverlayShownCallback>,
 }
 
 static OVERLAY_LAUNCH: Mutex<Option<OverlayLaunch>> = Mutex::new(None);
@@ -460,7 +464,8 @@ fn build_overlay_card(
                         .rounded(radii::PILL)
                         .bg(colors::ACCENT)
                         .transition_all()
-                        .duration(180.0)
+                        // Same as the tick interval: a longer one restarts mid-way every tick and stutters.
+                        .duration(100.0)
                         .ease_linear()
                         .w(move || percentage(vm.with(OverlayViewModel::progress))),
                 ),
@@ -494,10 +499,21 @@ fn build_overlay_card(
 }
 
 /// Builds the Cozy break overlay surface for both desktop runs and headless tests.
+/// The 100 ms tick only steps the fade 10 times a second; the engine animates it per frame.
+fn fade_in_value(vm: Signal<OverlayViewModel>) -> AnimatedValue {
+    let (alpha, fade_ms) = vm.with(|m| (m.fade_in_alpha(), m.request.fade_in_ms));
+    let value = animated_value(alpha);
+    if alpha < 1.0 {
+        let _ = value.timing(1.0, fade_ms as f32 * (1.0 - alpha), Easing::Linear);
+    }
+    value
+}
+
 pub(crate) fn build_overlay_view(
     request: OverlayRequest,
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
     quit_on_finish: bool,
+    on_shown: Option<OverlayShownCallback>,
 ) -> impl IntoElement {
     let vm = signal(OverlayViewModel::new(request));
 
@@ -542,7 +558,7 @@ pub(crate) fn build_overlay_view(
         .items_center()
         .justify_center()
         .p_6()
-        .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
+        .bind_opacity(&fade_in_value(vm))
         .child(build_overlay_card(vm, finish_if_ready.clone()));
 
     if quit_on_finish {
@@ -579,6 +595,9 @@ pub(crate) fn build_overlay_view(
                 }
             }
             focus_win.focus();
+            if let Some(hook) = on_shown {
+                hook();
+            }
         }));
 
         let secondary_displays = computed(|| {
@@ -629,7 +648,7 @@ pub(crate) fn build_overlay_view(
                         .items_center()
                         .justify_center()
                         .p_6()
-                        .opacity(move || vm.with(OverlayViewModel::fade_in_alpha))
+                        .bind_opacity(&fade_in_value(vm))
                         .child(build_overlay_card(vm, finish_if_ready.clone()))
                 })
             },
@@ -644,7 +663,8 @@ fn BreakOverlayRoot() -> impl IntoElement {
     let launch = OVERLAY_LAUNCH.lock().ok().and_then(|mut g| g.take());
     match launch {
         Some(launch) => {
-            build_overlay_view(launch.request, launch.outcome_sink, true).into_element()
+            build_overlay_view(launch.request, launch.outcome_sink, true, launch.on_shown)
+                .into_element()
         }
         None => view()
             .flex_1()
@@ -658,6 +678,14 @@ fn BreakOverlayRoot() -> impl IntoElement {
 
 /// Runs the Cozy fullscreen break overlay using Native Shell (`nsh`) and returns `OverlayOutcome`.
 pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
+    run_overlay_with_hook(request, None)
+}
+
+/// Runs the break overlay and calls `on_shown` once its window is shown and focused.
+pub fn run_overlay_with_hook(
+    request: OverlayRequest,
+    on_shown: Option<OverlayShownCallback>,
+) -> Result<OverlayOutcome, UiError> {
     let outcome_sink = Arc::new(Mutex::new(None));
     let Ok(mut guard) = OVERLAY_LAUNCH.lock() else {
         return Err(UiError::WindowInit(
@@ -667,6 +695,7 @@ pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
     *guard = Some(OverlayLaunch {
         request,
         outcome_sink: Arc::clone(&outcome_sink),
+        on_shown,
     });
     drop(guard);
 
@@ -909,7 +938,7 @@ mod tests {
             req.shortcut_disable_secs = 0;
             req.fade_in_ms = 0;
             let sink = Arc::new(Mutex::new(None));
-            build_overlay_view(req, sink, false)
+            build_overlay_view(req, sink, false, None)
         }
 
         let mut app = Headless::start(EngineConfig {

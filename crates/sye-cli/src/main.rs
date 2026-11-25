@@ -136,7 +136,10 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match sye_ui::run_overlay(request) {
+    match sye_ui::run_overlay_with_hook(
+        request,
+        Some(Box::new(sye_platform::mark_foreground_fullscreen)),
+    ) {
         Ok(outcome) => match serde_json::to_string(&outcome) {
             Ok(line) => {
                 println!("{line}");

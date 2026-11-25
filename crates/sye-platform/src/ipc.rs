@@ -406,11 +406,10 @@ mod tests {
             let sock = dir.join(format!("s{attempt}.sock"));
             let raw_listener = std::os::unix::net::UnixListener::bind(&sock)?;
             drop(raw_listener);
-            if matches!(
-                std::os::unix::net::UnixStream::connect(&sock),
-                Err(err) if err.kind() == io::ErrorKind::ConnectionRefused
-            ) {
-                return Ok(sock);
+            match std::os::unix::net::UnixStream::connect(&sock) {
+                Err(err) if err.kind() == io::ErrorKind::ConnectionRefused => return Ok(sock),
+                Err(err) => return Err(err),
+                Ok(_inherited) => {}
             }
         }
         Err(io::Error::other(

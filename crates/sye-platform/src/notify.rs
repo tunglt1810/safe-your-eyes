@@ -574,20 +574,23 @@ mod windows_impl {
 
     use sye_core::PlatformError;
     use windows_sys::Win32::Foundation::{
-        GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        COLORREF, ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
+        WPARAM,
     };
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmSetWindowAttribute,
     };
     use windows_sys::Win32::Graphics::Gdi::{
         BeginPaint, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW,
-        DRAW_TEXT_FORMAT, DT_CALCRECT, DT_EDITCONTROL, DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE,
-        DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW,
-        GetSysColor, GetSysColorBrush, GetTextMetricsW, HDC, HFONT, InvalidateRect,
+        CreateSolidBrush, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_EDITCONTROL, DT_END_ELLIPSIS,
+        DT_NOPREFIX, DT_SINGLELINE, DT_WORDBREAK, DeleteObject, DrawTextW, EndPaint, FillRect,
+        GetDC, GetMonitorInfoW, GetSysColor, GetTextMetricsW, HDC, HFONT, InvalidateRect,
         MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, ReleaseDC,
         SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     use windows_sys::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor,
         MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
@@ -619,6 +622,22 @@ mod windows_impl {
     const MARGIN: i32 = 12;
     const BODY_MAX_LINES: i32 = 2;
     const TITLE_FONT_WEIGHT: i32 = 600;
+    const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
+    const APPS_USE_LIGHT_THEME: &str = "AppsUseLightTheme";
+
+    struct Palette {
+        background: COLORREF,
+        title: COLORREF,
+        body: COLORREF,
+    }
+
+    // `GetSysColor` ignores the app dark mode setting, so dark mode uses the Windows 11 flyout
+    // colors. `COLORREF` is `0x00BBGGRR`.
+    const DARK_PALETTE: Palette = Palette {
+        background: 0x002C_2C2C,
+        title: 0x00FF_FFFF,
+        body: 0x00CF_CFCF,
+    };
 
     static USER_DISMISSED: AtomicBool = AtomicBool::new(false);
 
@@ -643,6 +662,40 @@ mod windows_impl {
         // SAFETY: `DrawTextW` writes to the text buffer only with `DT_MODIFYSTRING`, which no
         // caller passes, and `rect` is a valid writable `RECT`.
         unsafe { DrawTextW(hdc, text.as_ptr().cast_mut(), len, rect, format) }
+    }
+
+    fn apps_use_dark_theme() -> bool {
+        let key = wide_z(PERSONALIZE_KEY);
+        let value = wide_z(APPS_USE_LIGHT_THEME);
+        let mut data: u32 = 1;
+        let mut size = size_u32::<u32>();
+        // SAFETY: both names are NUL-terminated and `data` is writable storage of `size` bytes.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_DWORD,
+                ptr::null_mut(),
+                (&raw mut data).cast::<c_void>(),
+                &mut size,
+            )
+        };
+        status == ERROR_SUCCESS && data == 0
+    }
+
+    fn palette(dark: bool) -> Palette {
+        if dark {
+            return DARK_PALETTE;
+        }
+        // SAFETY: `GetSysColor` only reads the current system color table.
+        unsafe {
+            Palette {
+                background: GetSysColor(COLOR_WINDOW),
+                title: GetSysColor(COLOR_WINDOWTEXT),
+                body: GetSysColor(COLOR_GRAYTEXT),
+            }
+        }
     }
 
     fn message_font(dpi: i32, weight: Option<i32>) -> HFONT {
@@ -696,6 +749,7 @@ mod windows_impl {
         hwnd: HWND,
         hinstance: HINSTANCE,
         dpi: i32,
+        dark: Option<bool>,
         icon: HICON,
         title_font: HFONT,
         body_font: HFONT,
@@ -769,6 +823,7 @@ mod windows_impl {
                 hwnd,
                 hinstance,
                 dpi: 0,
+                dark: None,
                 icon: ptr::null_mut(),
                 title_font: ptr::null_mut(),
                 body_font: ptr::null_mut(),
@@ -797,6 +852,21 @@ mod windows_impl {
             self.title_font = ptr::null_mut();
             self.body_font = ptr::null_mut();
             self.icon = ptr::null_mut();
+        }
+
+        fn apply_theme(&mut self, dark: bool) {
+            self.dark = Some(dark);
+            let enabled = i32::from(dark);
+            // SAFETY: `enabled` outlives the call and the size matches its `BOOL` type. The dark
+            // attribute only recolors the DWM border and shadow.
+            unsafe {
+                DwmSetWindowAttribute(
+                    self.hwnd,
+                    DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                    (&raw const enabled).cast::<c_void>(),
+                    size_u32::<i32>(),
+                );
+            }
         }
 
         fn apply_dpi(&mut self, dpi: i32) {
@@ -927,6 +997,10 @@ mod windows_impl {
             if dpi_changed {
                 self.apply_dpi(dpi);
             }
+            let dark = apps_use_dark_theme();
+            if self.dark != Some(dark) {
+                self.apply_theme(dark);
+            }
             if !was_visible || body_changed || dpi_changed {
                 self.layout();
             }
@@ -962,10 +1036,13 @@ mod windows_impl {
             let mut client = RECT::default();
             let mut title_rect = self.title_rect;
             let mut body_rect = self.body_rect;
+            let colors = palette(self.dark.unwrap_or(false));
             // SAFETY: `hdc` comes from `BeginPaint` for `self.hwnd`, and every handle is live.
             unsafe {
                 GetClientRect(self.hwnd, &mut client);
-                FillRect(hdc, &client, GetSysColorBrush(COLOR_WINDOW));
+                let background = CreateSolidBrush(colors.background);
+                FillRect(hdc, &client, background);
+                DeleteObject(background);
                 if !self.icon.is_null() {
                     DrawIconEx(
                         hdc,
@@ -981,7 +1058,7 @@ mod windows_impl {
                 }
                 SetBkMode(hdc, TRANSPARENT as i32);
                 let previous = SelectObject(hdc, self.title_font);
-                SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+                SetTextColor(hdc, colors.title);
                 draw_text(
                     hdc,
                     &self.summary,
@@ -989,7 +1066,7 @@ mod windows_impl {
                     DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                 );
                 SelectObject(hdc, self.body_font);
-                SetTextColor(hdc, GetSysColor(COLOR_GRAYTEXT));
+                SetTextColor(hdc, colors.body);
                 draw_text(
                     hdc,
                     &self.body,

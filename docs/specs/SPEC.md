@@ -200,8 +200,9 @@ When the user cancels or closes the Settings window without `Save`, or when the 
 Each chime uses a smooth attack and exponential decay envelope to prevent clicks.
 Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
-On macOS `.app` bundles, `OsNotifier` requests alert permission once on daemon startup, updates the pre-break banner in place each second through `UserNotifications.framework` (`UNUserNotificationCenter`), and clears pending and delivered alerts on dismissal.
+On macOS `.app` bundles, `OsNotifier` requests alert permission once on daemon startup, updates the pre-break banner in place each second through `UserNotifications.framework` (`UNUserNotificationCenter`), and clears the pending and delivered pre-break alert on dismissal.
 On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second and closes it on dismissal.
+On macOS and Linux, when the user closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
 On Windows, `OsNotifier` sends one `notify-rust` pre-break toast per cycle to avoid stacking separate toasts.
 
 ### 9.2 Local IPC Protocol

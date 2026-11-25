@@ -46,6 +46,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSObjCRuntime",
     "NSObject",
     "NSRunLoop",
+    "NSSet",
     "NSString",
     "NSTimer",
 ] }

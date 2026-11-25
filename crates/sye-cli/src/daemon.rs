@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::path::Path;
-use std::process::{Child, Command, ExitCode};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -477,7 +477,11 @@ fn spawn_settings_subprocess(config_file: &Path) -> std::io::Result<Child> {
     let mut cmd = Command::new(resolved);
     cmd.arg("--internal-settings")
         .arg("--config")
-        .arg(config_file);
+        .arg(config_file)
+        // After `detach_console`, inherited std handles are stale on Windows and `spawn` fails.
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     sye_platform::hide_child_console(&mut cmd).spawn()
 }
 

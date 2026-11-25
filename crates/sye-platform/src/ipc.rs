@@ -398,14 +398,31 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn create_stale_unix_socket(dir: &Path) -> io::Result<PathBuf> {
+        // On macOS, UnixListener::bind sets FD_CLOEXEC after socket(), so a
+        // concurrent test spawning a child process can inherit the fd and keep
+        // the listener alive after drop.
+        for attempt in 0..16 {
+            let sock = dir.join(format!("s{attempt}.sock"));
+            let raw_listener = std::os::unix::net::UnixListener::bind(&sock)?;
+            drop(raw_listener);
+            if matches!(
+                std::os::unix::net::UnixStream::connect(&sock),
+                Err(err) if err.kind() == io::ErrorKind::ConnectionRefused
+            ) {
+                return Ok(sock);
+            }
+        }
+        Err(io::Error::other(
+            "failed to create stale Unix socket without an inherited listener fd",
+        ))
+    }
+
+    #[cfg(unix)]
     #[test]
     fn ipc_recovers_from_stale_unix_socket() -> Result<(), Box<dyn std::error::Error>> {
         let tmp = TestTempDir::new("st")?;
-        let sock = tmp.path().join("s.sock");
-
-        // Create a real Unix socket and drop the listener without removing the file.
-        let raw_listener = std::os::unix::net::UnixListener::bind(&sock)?;
-        drop(raw_listener);
+        let sock = create_stale_unix_socket(tmp.path())?;
         assert!(sock.exists());
 
         let server = IpcServer::bind(&sock)?;

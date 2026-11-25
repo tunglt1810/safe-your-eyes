@@ -13,6 +13,7 @@ pub mod app_loop;
 mod audio;
 mod autostart;
 mod clock;
+mod console;
 mod dnd;
 mod idle;
 mod ipc;
@@ -31,6 +32,7 @@ pub use autostart::{
     render_windows_startup_cmd, sync_system_autostart,
 };
 pub use clock::SystemClock;
+pub use console::{detach_console, hide_child_console};
 pub use dnd::SystemDndProvider;
 pub use idle::SystemIdleProvider;
 pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};

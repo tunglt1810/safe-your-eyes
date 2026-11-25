@@ -56,7 +56,7 @@ impl OverlayLauncher for SubprocessOverlayLauncher {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
 
-        let child = cmd
+        let child = crate::console::hide_child_console(&mut cmd)
             .spawn()
             .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
         self.child = Some(child);

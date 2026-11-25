@@ -205,6 +205,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             return ExitCode::FAILURE;
         }
     };
+    if !headless {
+        sye_platform::detach_console();
+    }
     if let Err(err) = server.set_accept_nonblocking() {
         eprintln!("Failed to configure non-blocking IPC listener: {err}");
         return ExitCode::FAILURE;
@@ -471,11 +474,11 @@ const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
 fn spawn_settings_subprocess(config_file: &Path) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().unwrap_or(exe);
-    Command::new(resolved)
-        .arg("--internal-settings")
+    let mut cmd = Command::new(resolved);
+    cmd.arg("--internal-settings")
         .arg("--config")
-        .arg(config_file)
-        .spawn()
+        .arg(config_file);
+    sye_platform::hide_child_console(&mut cmd).spawn()
 }
 
 /// Formats a human-readable `--status` line for CLI users.

@@ -270,10 +270,11 @@ fn overlay_main_window_options_for_primary(
     if let Some(rect) = primary {
         main_window.default_position = Some(WindowPosition::At(point(px(rect.x), px(rect.y))));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         // Avoid `WindowMode::FullScreen` on macOS: AppKit's `toggleFullScreen:` conflicts with
         // `Workspaces::All` and triggers a slow Space slide animation instead of instant cover.
+        // Avoid it on Windows too: the card was off-centre. Both set the display bounds instead.
         main_window.default_mode = Some(nsh_core::desktop::WindowMode::FullScreen);
     }
     main_window.attributes = attrs;
@@ -539,7 +540,7 @@ pub(crate) fn build_overlay_view(
                 .find(|d| d.primary)
                 .or_else(|| disp_list.first())
             {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 if primary.bounds.size.width.is_finite()
                     && primary.bounds.size.width.0 > 0.0
                     && primary.bounds.size.height.is_finite()
@@ -553,7 +554,7 @@ pub(crate) fn build_overlay_view(
                         animated: Some(false),
                     });
                 }
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 {
                     let _ = primary;
                     effect_win.set_mode(nsh_core::desktop::WindowMode::FullScreen);
@@ -592,10 +593,10 @@ pub(crate) fn build_overlay_view(
                     .display(disp_id)
                     .default_position(WindowPosition::At(disp_bounds.origin))
                     .default_size(disp_bounds.size);
-                #[cfg(not(target_os = "macos"))]
+                #[cfg(not(any(target_os = "macos", target_os = "windows")))]
                 let sec_win_el = sec_win_el.default_mode(nsh_core::desktop::WindowMode::FullScreen);
                 sec_win_el.content(move || {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
                     {
                         // AppKit constrains initial placement below the menu bar before
                         // `NSStatusWindowLevel` applies, and drops requests sent before mount.
@@ -942,12 +943,12 @@ mod tests {
         assert_eq!(opts.attributes.close_on_press, Some(false));
         assert_eq!(opts.attributes.taskbar, Some(false));
         assert_eq!(opts.attributes.shadow, Some(false));
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(
             opts.default_mode,
             Some(nsh_core::desktop::WindowMode::FullScreen)
         );
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         assert_eq!(opts.default_mode, None);
 
         let fallback = overlay_main_window_options_for_primary(None);

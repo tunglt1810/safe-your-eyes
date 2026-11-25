@@ -14,6 +14,7 @@ jobs:
   check-and-test:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    environment: CI
     strategy:
       fail-fast: false
       matrix:

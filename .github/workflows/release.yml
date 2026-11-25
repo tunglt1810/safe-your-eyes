@@ -22,6 +22,7 @@ jobs:
   build:
     name: Build (${{ matrix.asset_name }})
     runs-on: ${{ matrix.os }}
+    environment: CI
     strategy:
       fail-fast: false
       matrix:
@@ -143,7 +144,7 @@ jobs:
           cp "${{ matrix.bin_path }}" "dist/${{ matrix.asset_name }}"
 
       - name: Sign Windows binary with SignPath
-        if: runner.os == 'Windows' && env.SIGNPATH_API_TOKEN != ''
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -151,6 +152,10 @@ jobs:
           SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG || 'safe-your-eyes' }}
           SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG || 'Safe_your_eyes_Test_Signing' }}
         run: |
+          if ([string]::IsNullOrEmpty($env:SIGNPATH_API_TOKEN)) {
+            Write-Host "SIGNPATH_API_TOKEN not configured; skipping Windows code signing"
+            exit 0
+          }
           Install-Module -Name SignPath -Scope CurrentUser -Force
           $unsigned = "dist/${{ matrix.asset_name }}"
           $signed = "dist/signed-${{ matrix.asset_name }}"
@@ -196,6 +201,7 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    environment: CI
     steps:
       - uses: actions/checkout@v4
 

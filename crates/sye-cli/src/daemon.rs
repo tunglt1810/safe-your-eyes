@@ -255,9 +255,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let notifier = if headless {
         OsNotifier::noop()
     } else {
-        let n = OsNotifier::new();
-        n.request_authorization();
-        n
+        OsNotifier::new()
     };
     let mut host = DaemonHost {
         headless,

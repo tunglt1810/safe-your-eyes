@@ -80,11 +80,6 @@ impl OsNotifier {
             active: AtomicBool::new(false),
         }
     }
-
-    /// Requests OS notification permission once per process when supported.
-    pub const fn request_authorization(&self) {
-        let _ = self.enabled;
-    }
 }
 
 impl Default for OsNotifier {
@@ -445,23 +440,25 @@ mod macos_impl {
                 self.title_label
                     .setStringValue(&NSString::from_str(summary));
             }
-            if !was_visible || body_changed {
+            let visible = active_screen_visible_frame(mtm).ok_or_else(|| {
+                PlatformError::Unavailable("macOS display screen unavailable".to_owned())
+            })?;
+            let prev_frame = self.panel.frame();
+            let needs_layout = !was_visible || body_changed;
+            let mut banner_size = prev_frame.size;
+            if needs_layout {
                 if body_changed {
                     self.last_body.clear();
                     self.last_body.push_str(body);
                     self.body_label.setStringValue(&NSString::from_str(body));
                 }
 
-                let visible = active_screen_visible_frame(mtm).ok_or_else(|| {
-                    PlatformError::Unavailable("macOS display screen unavailable".to_owned())
-                })?;
-
                 let fit_bounds = NSSize::new(TEXT_WIDTH, MAX_FIT_HEIGHT);
                 let title_h = self.title_label.sizeThatFits(fit_bounds).height.ceil();
                 let body_h = self.body_label.sizeThatFits(fit_bounds).height.ceil();
                 let text_block_h = title_h + LINE_GAP + body_h;
                 let banner_h = (text_block_h + PAD_Y * 2.0).max(MIN_HEIGHT).ceil();
-                let banner_size = NSSize::new(BANNER_WIDTH, banner_h);
+                banner_size = NSSize::new(BANNER_WIDTH, banner_h);
 
                 self.effect_view
                     .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
@@ -485,13 +482,18 @@ mod macos_impl {
                     NSPoint::new(TEXT_X, title_y),
                     NSSize::new(TEXT_WIDTH, title_h),
                 ));
+            }
 
-                let (ox, oy) = compute_macos_banner_origin(visible, (BANNER_WIDTH, banner_h));
+            let (ox, oy) =
+                compute_macos_banner_origin(visible, (banner_size.width, banner_size.height));
+            let origin_changed =
+                (prev_frame.origin.x - ox).abs() > 0.5 || (prev_frame.origin.y - oy).abs() > 0.5;
+            if needs_layout || origin_changed {
                 self.panel
                     .setFrame_display(NSRect::new(NSPoint::new(ox, oy), banner_size), was_visible);
-                if !was_visible {
-                    self.panel.orderFrontRegardless();
-                }
+            }
+            if !was_visible {
+                self.panel.orderFrontRegardless();
             }
             Ok(())
         }
@@ -618,15 +620,5 @@ mod tests {
         let res = notifier.show_pre_break(BreakType::Short, "Look away", 5);
         assert!(matches!(res, Ok(()) | Err(PlatformError::Unavailable(_))));
         assert!(notifier.dismiss().is_ok());
-    }
-
-    #[test]
-    fn request_authorization_succeeds_for_noop_and_active_notifiers() {
-        let noop = OsNotifier::noop();
-        noop.request_authorization();
-
-        let active = OsNotifier::new();
-        active.request_authorization();
-        active.request_authorization();
     }
 }

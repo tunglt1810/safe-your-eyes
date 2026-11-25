@@ -179,7 +179,7 @@ fn spawn_first_available_player(
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        match cmd.spawn() {
+        match crate::console::hide_child_console(&mut cmd).spawn() {
             Ok(child) => return Ok(child),
             Err(err) => {
                 last_error = Some(format!("{}: {err}", spec.program));

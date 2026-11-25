@@ -401,7 +401,7 @@ pub(crate) fn compute_macos_tooltip_origin(
     reason = "Borderless non-activating AppKit tooltip window and NSMenu tracking observer"
 )]
 mod macos_hover_tooltip {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::ptr::NonNull;
     use std::rc::Rc;
     use std::time::Instant;
@@ -419,7 +419,7 @@ mod macos_hover_tooltip {
     use objc2_foundation::{
         NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
     };
-    use sye_core::TraySnapshot;
+    use sye_core::{SchedulerState, TraySnapshot};
     use tray_icon::TrayIcon;
 
     use super::{
@@ -511,7 +511,8 @@ mod macos_hover_tooltip {
                 label_size.width.ceil() + PAD_X * 2.0,
                 label_size.height.ceil() + PAD_Y * 2.0,
             );
-            let prev_size = self.window.frame().size;
+            let prev_frame = self.window.frame();
+            let prev_size = prev_frame.size;
             let size_changed = (prev_size.width - win_size.width).abs() > 0.5
                 || (prev_size.height - win_size.height).abs() > 0.5;
             if text_changed || size_changed {
@@ -524,8 +525,12 @@ mod macos_hover_tooltip {
                 screen_frame,
                 (win_size.width, win_size.height),
             );
-            self.window
-                .setFrame_display(NSRect::new(NSPoint::new(ox, oy), win_size), true);
+            let origin_changed =
+                (prev_frame.origin.x - ox).abs() > 0.5 || (prev_frame.origin.y - oy).abs() > 0.5;
+            if text_changed || size_changed || origin_changed {
+                self.window
+                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), win_size), true);
+            }
             if size_changed {
                 self.window.invalidateShadow();
             }
@@ -546,6 +551,7 @@ mod macos_hover_tooltip {
     pub(super) struct MacHoverTooltip {
         panel: SharedTooltipPanel,
         gate: HoverGate,
+        menu_opened: Rc<Cell<bool>>,
         menu_observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
     }
 
@@ -553,8 +559,11 @@ mod macos_hover_tooltip {
         pub(super) fn new() -> Self {
             let panel: SharedTooltipPanel = Rc::new(RefCell::new(None));
             let menu_panel = Rc::clone(&panel);
+            let menu_opened = Rc::new(Cell::new(false));
+            let menu_opened_flag = Rc::clone(&menu_opened);
             let menu_observer = autoreleasepool(|_| {
                 let block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+                    menu_opened_flag.set(true);
                     if let Ok(mut guard) = menu_panel.try_borrow_mut() {
                         let _ = guard.take();
                     }
@@ -574,6 +583,7 @@ mod macos_hover_tooltip {
             Self {
                 panel,
                 gate: HoverGate::default(),
+                menu_opened,
                 menu_observer,
             }
         }
@@ -586,12 +596,22 @@ mod macos_hover_tooltip {
             let Some(mtm) = MainThreadMarker::new() else {
                 return;
             };
+            // Menu tracking blocks the daemon loop, so `poll` never sees the click that opened it.
+            if self.menu_opened.replace(false) {
+                self.gate = HoverGate::default();
+            }
             autoreleasepool(|_| {
                 let (icon_frame, screen_frame) = status_item_frames(tray_icon, mtm);
                 let cursor = NSEvent::mouseLocation();
                 let pressed = NSEvent::pressedMouseButtons() != 0;
-                let hovered =
-                    is_status_item_hovered((cursor.x, cursor.y), icon_frame, screen_frame, pressed);
+                // The break overlay covers the menu bar at a lower window level than the tooltip.
+                let hovered = snapshot.state != SchedulerState::Break
+                    && is_status_item_hovered(
+                        (cursor.x, cursor.y),
+                        icon_frame,
+                        screen_frame,
+                        pressed,
+                    );
                 if !self.gate.evaluate(hovered, Instant::now()) {
                     if let Ok(mut guard) = self.panel.try_borrow_mut() {
                         let _ = guard.take();

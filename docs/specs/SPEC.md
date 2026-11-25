@@ -215,6 +215,7 @@ The daemon accepts connections in non-blocking mode so `Scheduler::tick()` never
 
 `sye-ui` renders native desktop controls through `longbridge/nsh` (AppKit on macOS, Win32 and Direct2D on Windows, GTK 4 on Linux).
 The visual tokens, contrast pairs, component patterns, and motion presets follow the [Cozy Design System](https://github.com/tunglt1810/cozy) (`v0.2.0`: `tokens/cozy.tokens.json`, `css/effects.css`, `docs/motion.md`, `docs/patterns.md`) together with Astryx layout rules (`meta/astryx`).
+Border radii deviate from `tokens/cozy.tokens.json` to align with the native macOS window frame (§10.2).
 All visual tokens and motion presets live in `crates/sye-ui/src/theme.rs` using `AdaptiveColor` for Light, Dark, and System modes.
 All reusable controls live in `crates/sye-ui/src/ui.rs`.
 

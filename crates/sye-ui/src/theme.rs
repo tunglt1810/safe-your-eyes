@@ -141,15 +141,16 @@ pub(crate) mod kpi {
     pub(crate) const MIST_ACCENT: AdaptiveColor = tone(rgb(0xA2B3C1), rgb(0x6D8296));
 }
 
-/// Concentric Cozy border-radius scale matching `tokens/cozy.tokens.json`.
+/// Concentric Cozy border-radius scale calibrated to the 16pt native macOS `NSWindow` corner
+/// (titled without `NSToolbar`) with 8pt outer Settings padding.
 pub(crate) mod radii {
     use super::{Points, px};
 
-    pub(crate) const ELEMENT: Points = px(12.0);
-    pub(crate) const NAV_ITEM: Points = px(14.0);
-    pub(crate) const CONTAINER: Points = px(18.0);
-    pub(crate) const KPI: Points = px(20.0);
-    pub(crate) const SIDEBAR: Points = px(22.0);
+    pub(crate) const ELEMENT: Points = px(8.0);
+    pub(crate) const NAV_ITEM: Points = px(8.0);
+    pub(crate) const CONTAINER: Points = px(10.0);
+    pub(crate) const KPI: Points = px(10.0);
+    pub(crate) const SIDEBAR: Points = px(10.0);
     pub(crate) const PAGE: Points = px(28.0);
     pub(crate) const PILL: Points = px(9999.0);
 }
@@ -222,15 +223,15 @@ mod tests {
         const {
             assert!(radii::ELEMENT.0 < radii::CONTAINER.0);
             assert!(radii::NAV_ITEM.0 < radii::SIDEBAR.0);
-            assert!(radii::CONTAINER.0 < radii::KPI.0);
-            assert!(radii::KPI.0 < radii::SIDEBAR.0);
+            assert!(radii::SIDEBAR.0 < 16.0);
+            assert!(radii::CONTAINER.0 < 16.0);
             assert!(radii::SIDEBAR.0 < radii::PAGE.0);
         }
-        assert_eq!(radii::ELEMENT, px(12.0));
-        assert_eq!(radii::NAV_ITEM, px(14.0));
-        assert_eq!(radii::CONTAINER, px(18.0));
-        assert_eq!(radii::KPI, px(20.0));
-        assert_eq!(radii::SIDEBAR, px(22.0));
+        assert_eq!(radii::ELEMENT, px(8.0));
+        assert_eq!(radii::NAV_ITEM, px(8.0));
+        assert_eq!(radii::CONTAINER, px(10.0));
+        assert_eq!(radii::KPI, px(10.0));
+        assert_eq!(radii::SIDEBAR, px(10.0));
         assert_eq!(radii::PAGE, px(28.0));
         assert_eq!(motion::COZY_STANDARD_BEZIER, (0.4, 0.0, 0.2, 1.0));
     }

@@ -913,7 +913,7 @@ fn settings_main_window_options() -> MainWindowOptions {
     #[cfg(target_os = "macos")]
     {
         // Aligns macOS traffic lights cleanly inside the top-left of the Floating Sage Sidebar.
-        tb.controls_offset = Some(point(px(22.0), px(20.0)));
+        tb.controls_offset = Some(point(px(20.0), px(18.0)));
     }
     let mut main_window = MainWindowOptions::default();
     main_window.attributes.title_bar = Some(tb);
@@ -1290,7 +1290,7 @@ pub(crate) fn build_settings_view_with_hooks(
             move || title_bar().right.0 > 0.0,
             || {
                 view()
-                    .h(move || px((title_bar().top.0 - 12.0).max(0.0)))
+                    .h(move || px((title_bar().top.0 - 8.0).max(0.0)))
                     .w_full()
                     .window_drag(true)
             },
@@ -1305,7 +1305,7 @@ pub(crate) fn build_settings_view_with_hooks(
         .duration(motion::THEME_COLOR_MS)
         .ease_bezier(bx1, by1, bx2, by2)
         .flex_row()
-        .p_3()
+        .p_2()
         .gap_3()
         .child(sidebar)
         .child(right_pane)
@@ -1664,6 +1664,19 @@ mod tests {
         })
         .map_err(|e| e.to_string())?;
         app.wait_for("Safe Your Eyes")?;
+        let sidebar_node = app
+            .screen()
+            .layout_nodes()
+            .into_iter()
+            .find(|n| (n.bounds.size.width.0 - 210.0).abs() < 0.01)
+            .ok_or("expected 210pt Floating Sage Sidebar node")?;
+        assert!(
+            (sidebar_node.bounds.origin.x.0 - 8.0).abs() < 0.01
+                && (sidebar_node.bounds.origin.y.0 - 8.0).abs() < 0.01
+                && (sidebar_node.bounds.size.height.0 - 664.0).abs() < 0.01,
+            "Expected 8pt concentric outer inset for sidebar in 920x680 window, got {:?}",
+            sidebar_node.bounds
+        );
         assert!(!app.shows("Settings"));
         assert!(app.shows("Timing"));
         assert!(app.shows("Break Schedule"));

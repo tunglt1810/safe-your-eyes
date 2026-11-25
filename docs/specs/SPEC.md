@@ -25,10 +25,11 @@ The Cargo workspace contains four crates and compiles into one binary named `saf
 5. On macOS, `PlatformEventLoop` detects Login Item launches (`keyAELaunchedAsLogInItem`).
 6. On macOS, `PlatformEventLoop` yields foreground activation rights to the break overlay and Settings child processes.
 7. The daemon updates `TrayHandle` on each loop iteration when the tray snapshot changes.
-8. On macOS, `TrayHandle` runs a timer in `NSEventTrackingRunLoopMode` to update the countdown while the menu stays open.
-9. When the daemon needs to show a break overlay or the Settings window, the daemon resolves the executable symlink and starts a child process of `safe-your-eyes` with `--internal-overlay` or `--internal-settings`.
-10. The daemon ignores `OpenSettings` and `TrayEvent::Reopen` during `PreBreak`, `Break`, or when the tray menu is locked.
-11. When the child process exits, the operating system releases all graphics memory.
+8. On Linux and Windows, `TrayHandle` updates the native tray hover tooltip with the break countdown; on macOS, `TrayHandle` leaves `NSStatusBarButton.toolTip` unset and shows a lazy icon-anchored tooltip window only while the pointer hovers over the status item for at least 500ms, destroying that window as soon as hover ends or the menu opens.
+9. On macOS, `TrayHandle` runs a timer in `NSEventTrackingRunLoopMode` to update the countdown while the menu stays open.
+10. When the daemon needs to show a break overlay or the Settings window, the daemon resolves the executable symlink and starts a child process of `safe-your-eyes` with `--internal-overlay` or `--internal-settings`.
+11. The daemon ignores `OpenSettings` and `TrayEvent::Reopen` during `PreBreak`, `Break`, or when the tray menu is locked.
+12. When the child process exits, the operating system releases all graphics memory.
 
 ### 2.2 Safety and Build Rules
 
@@ -247,7 +248,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 
 ### 10.2 Shape, Motion, and Screens
 
-- Concentric Cozy border radii follow `tokens/cozy.tokens.json`: `12px` (elements), `14px` (sidebar navigation items), `18px` (Form Card and QR container), `20px` (Pastel KPI cards), `22px` (Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill controls).
+- Concentric Cozy border radii align with the 16pt native macOS window frame and 8pt outer Settings padding: `8px` (elements and sidebar navigation items), `10px` (Form Card, QR container, Pastel KPI cards, and Floating Sage Sidebar), `28px` (overlay card), and `9999px` (pill controls).
 - Motion follows `tunglt1810/cozy` v0.2.0.
 - `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) moves the sliding sidebar indicator and the centered switch knob (`3pt` symmetrical inset, `18pt` horizontal travel).
 - `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives staggered list-item entrances on tab switch (`10px` rise, `260ms`, `28ms` step capped at row 12), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), and highlighter sweeps (`380ms`).

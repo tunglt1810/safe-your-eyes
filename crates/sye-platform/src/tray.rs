@@ -44,6 +44,8 @@ pub enum TrayEvent {
 struct ActiveTray {
     #[cfg(target_os = "macos")]
     menu_timer: macos_menu_timer::MacMenuTimer,
+    #[cfg(target_os = "macos")]
+    hover_tooltip: macos_hover_tooltip::MacHoverTooltip,
     tray_icon: TrayIcon,
     icon_state: TrayIconState,
     last_snapshot: Option<TraySnapshot>,
@@ -143,9 +145,11 @@ impl TrayHandle {
         let icon_state = icon_state_for_snapshot(initial);
         let icon = build_tray_icon(icon_state)?;
 
-        let builder = TrayIconBuilder::new()
-            .with_menu(Box::new(menu))
-            .with_tooltip(format_tooltip(initial));
+        let builder = TrayIconBuilder::new().with_menu(Box::new(menu));
+        let builder = match tray_tooltip(initial) {
+            Some(tooltip) => builder.with_tooltip(tooltip),
+            None => builder,
+        };
         #[cfg(target_os = "macos")]
         let builder = builder.with_icon_templated(icon);
         #[cfg(not(target_os = "macos"))]
@@ -162,12 +166,20 @@ impl TrayHandle {
         }));
 
         #[cfg(target_os = "macos")]
-        let menu_timer = macos_menu_timer::MacMenuTimer::new(initial, status_item.clone());
+        let hover_tooltip = macos_hover_tooltip::MacHoverTooltip::new();
+        #[cfg(target_os = "macos")]
+        let menu_timer = macos_menu_timer::MacMenuTimer::new(
+            initial,
+            status_item.clone(),
+            hover_tooltip.shared_panel(),
+        );
 
         let mut handle = Self {
             active: Some(ActiveTray {
                 #[cfg(target_os = "macos")]
                 menu_timer,
+                #[cfg(target_os = "macos")]
+                hover_tooltip,
                 tray_icon,
                 icon_state,
                 last_snapshot: None,
@@ -208,6 +220,8 @@ impl TrayHandle {
         let Some(active) = self.active.as_mut() else {
             return Ok(());
         };
+        #[cfg(target_os = "macos")]
+        active.hover_tooltip.poll(&active.tray_icon, snapshot);
         if !should_apply_snapshot(&mut active.last_snapshot, snapshot) {
             return Ok(());
         }
@@ -235,7 +249,9 @@ impl TrayHandle {
         active.settings_item.set_enabled(unlocked);
         active.quit_item.set_enabled(unlocked);
 
-        let _ = active.tray_icon.set_tooltip(Some(format_tooltip(snapshot)));
+        if let Some(tooltip) = tray_tooltip(snapshot) {
+            let _ = active.tray_icon.set_tooltip(Some(tooltip));
+        }
 
         let next_icon_state = icon_state_for_snapshot(snapshot);
         if next_icon_state != active.icon_state {
@@ -282,6 +298,362 @@ pub(crate) fn advance_snapshot_countdown(
     live
 }
 
+#[cfg(any(target_os = "macos", test))]
+pub(crate) const MACOS_TOOLTIP_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ScreenRect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl ScreenRect {
+    #[must_use]
+    pub(crate) fn contains(self, point: (f64, f64)) -> bool {
+        self.width > 0.0
+            && self.height > 0.0
+            && point.0 >= self.x
+            && point.0 <= self.x + self.width
+            && point.1 >= self.y
+            && point.1 <= self.y + self.height
+    }
+
+    #[must_use]
+    pub(crate) fn intersects(self, other: Self) -> bool {
+        self.width > 0.0
+            && self.height > 0.0
+            && other.width > 0.0
+            && other.height > 0.0
+            && self.x < other.x + other.width
+            && self.x + self.width > other.x
+            && self.y < other.y + other.height
+            && self.y + self.height > other.y
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Debug, Default)]
+pub(crate) struct HoverGate {
+    hovered_since: Option<std::time::Instant>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl HoverGate {
+    #[must_use]
+    pub(crate) fn evaluate(&mut self, hovered: bool, now: std::time::Instant) -> bool {
+        if !hovered {
+            self.hovered_since = None;
+            return false;
+        }
+        let since = *self.hovered_since.get_or_insert(now);
+        now.saturating_duration_since(since) >= MACOS_TOOLTIP_DELAY
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+pub(crate) fn is_status_item_hovered(
+    cursor: (f64, f64),
+    icon_frame: Option<ScreenRect>,
+    screen_frame: Option<ScreenRect>,
+    mouse_buttons_pressed: bool,
+) -> bool {
+    if mouse_buttons_pressed {
+        return false;
+    }
+    let Some(icon) = icon_frame else {
+        return false;
+    };
+    if !icon.contains(cursor) {
+        return false;
+    }
+    screen_frame.is_none_or(|screen| icon.intersects(screen))
+}
+
+#[cfg(any(target_os = "macos", test))]
+#[must_use]
+pub(crate) fn compute_macos_tooltip_origin(
+    icon_frame: ScreenRect,
+    screen_frame: Option<ScreenRect>,
+    tooltip_size: (f64, f64),
+) -> (f64, f64) {
+    const SCREEN_MARGIN: f64 = 6.0;
+    const VERTICAL_GAP: f64 = 6.0;
+
+    let mut x = (icon_frame.x + (icon_frame.width - tooltip_size.0) * 0.5).round();
+    let mut y = (icon_frame.y - tooltip_size.1 - VERTICAL_GAP).round();
+    if let Some(screen) = screen_frame {
+        let min_x = screen.x + SCREEN_MARGIN;
+        let max_x = (screen.x + screen.width - tooltip_size.0 - SCREEN_MARGIN).max(min_x);
+        x = x.clamp(min_x, max_x);
+        y = y.max(screen.y + SCREEN_MARGIN);
+    }
+    (x, y)
+}
+
+#[cfg(target_os = "macos")]
+#[expect(
+    unsafe_code,
+    reason = "Borderless non-activating AppKit tooltip window and NSMenu tracking observer"
+)]
+mod macos_hover_tooltip {
+    use std::cell::RefCell;
+    use std::ptr::NonNull;
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    use block2::RcBlock;
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::ProtocolObject;
+    use objc2::{MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSBackingStoreType, NSColor, NSEvent, NSFont, NSMenuDidBeginTrackingNotification,
+        NSStatusWindowLevel, NSTextField, NSVisualEffectBlendingMode, NSVisualEffectMaterial,
+        NSVisualEffectState, NSVisualEffectView, NSWindow, NSWindowCollectionBehavior,
+        NSWindowStyleMask,
+    };
+    use objc2_foundation::{
+        NSNotification, NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    };
+    use sye_core::TraySnapshot;
+    use tray_icon::TrayIcon;
+
+    use super::{
+        HoverGate, ScreenRect, compute_macos_tooltip_origin, format_tooltip, is_status_item_hovered,
+    };
+
+    const PAD_X: f64 = 8.0;
+    const PAD_Y: f64 = 4.0;
+    const CORNER_RADIUS: f64 = 6.0;
+
+    pub(super) struct TooltipWindow {
+        window: Retained<NSWindow>,
+        effect_view: Retained<NSVisualEffectView>,
+        label: Retained<NSTextField>,
+        last_text: String,
+    }
+
+    impl TooltipWindow {
+        fn new(mtm: MainThreadMarker) -> Self {
+            let initial_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(10.0, 10.0));
+            // SAFETY: `mtm` guarantees main-thread execution; `initial_rect` is finite and
+            // `NSBackingStoreType::Buffered` is AppKit's standard window backing store.
+            let window = unsafe {
+                NSWindow::initWithContentRect_styleMask_backing_defer(
+                    NSWindow::alloc(mtm),
+                    initial_rect,
+                    NSWindowStyleMask::Borderless,
+                    NSBackingStoreType::Buffered,
+                    false,
+                )
+            };
+            // SAFETY: `TooltipWindow` owns `window` via `Retained<NSWindow>` and hides it with
+            // `orderOut` on drop, so AppKit must not auto-release it on close.
+            unsafe {
+                window.setReleasedWhenClosed(false);
+            }
+            window.setOpaque(false);
+            window.setBackgroundColor(Some(&NSColor::clearColor()));
+            window.setHasShadow(true);
+            window.setIgnoresMouseEvents(true);
+            window.setLevel(NSStatusWindowLevel + 1);
+            window.setCollectionBehavior(
+                NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary,
+            );
+
+            let effect_view =
+                NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), initial_rect);
+            effect_view.setMaterial(NSVisualEffectMaterial::ToolTip);
+            effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
+            effect_view.setState(NSVisualEffectState::Active);
+            effect_view.setWantsLayer(true);
+            if let Some(layer) = effect_view.layer() {
+                layer.setCornerRadius(CORNER_RADIUS);
+                layer.setMasksToBounds(true);
+            }
+
+            let label = NSTextField::labelWithString(&NSString::new(), mtm);
+            label.setFont(Some(&NSFont::toolTipsFontOfSize(0.0)));
+            label.setTextColor(Some(&NSColor::labelColor()));
+            effect_view.addSubview(&label);
+            window.setContentView(Some(&effect_view));
+
+            Self {
+                window,
+                effect_view,
+                label,
+                last_text: String::new(),
+            }
+        }
+
+        fn show_at(
+            &mut self,
+            text: &str,
+            icon_frame: ScreenRect,
+            screen_frame: Option<ScreenRect>,
+        ) {
+            let text_changed = self.last_text != text;
+            if text_changed {
+                self.last_text.clear();
+                self.last_text.push_str(text);
+                self.label.setStringValue(&NSString::from_str(text));
+                self.label.sizeToFit();
+            }
+            let label_size = self.label.frame().size;
+            let win_size = NSSize::new(
+                label_size.width.ceil() + PAD_X * 2.0,
+                label_size.height.ceil() + PAD_Y * 2.0,
+            );
+            let prev_size = self.window.frame().size;
+            let size_changed = (prev_size.width - win_size.width).abs() > 0.5
+                || (prev_size.height - win_size.height).abs() > 0.5;
+            if text_changed || size_changed {
+                self.effect_view
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), win_size));
+                self.label.setFrameOrigin(NSPoint::new(PAD_X, PAD_Y));
+            }
+            let (ox, oy) = compute_macos_tooltip_origin(
+                icon_frame,
+                screen_frame,
+                (win_size.width, win_size.height),
+            );
+            self.window
+                .setFrame_display(NSRect::new(NSPoint::new(ox, oy), win_size), true);
+            if size_changed {
+                self.window.invalidateShadow();
+            }
+            if !self.window.isVisible() {
+                self.window.orderFrontRegardless();
+            }
+        }
+    }
+
+    impl Drop for TooltipWindow {
+        fn drop(&mut self) {
+            self.window.orderOut(None);
+        }
+    }
+
+    pub(super) type SharedTooltipPanel = Rc<RefCell<Option<TooltipWindow>>>;
+
+    pub(super) struct MacHoverTooltip {
+        panel: SharedTooltipPanel,
+        gate: HoverGate,
+        menu_observer: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    }
+
+    impl MacHoverTooltip {
+        pub(super) fn new() -> Self {
+            let panel: SharedTooltipPanel = Rc::new(RefCell::new(None));
+            let menu_panel = Rc::clone(&panel);
+            let menu_observer = autoreleasepool(|_| {
+                let block = RcBlock::new(move |_note: NonNull<NSNotification>| {
+                    if let Ok(mut guard) = menu_panel.try_borrow_mut() {
+                        let _ = guard.take();
+                    }
+                });
+                let center = NSNotificationCenter::defaultCenter();
+                // SAFETY: `NSMenuDidBeginTrackingNotification` is an immutable AppKit notification
+                // posted on the main thread; the returned token is unregistered in `Drop`.
+                unsafe {
+                    center.addObserverForName_object_queue_usingBlock(
+                        Some(NSMenuDidBeginTrackingNotification),
+                        None,
+                        None,
+                        &block,
+                    )
+                }
+            });
+            Self {
+                panel,
+                gate: HoverGate::default(),
+                menu_observer,
+            }
+        }
+
+        pub(super) fn shared_panel(&self) -> SharedTooltipPanel {
+            Rc::clone(&self.panel)
+        }
+
+        pub(super) fn poll(&mut self, tray_icon: &TrayIcon, snapshot: &TraySnapshot) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            autoreleasepool(|_| {
+                let (icon_frame, screen_frame) = status_item_frames(tray_icon, mtm);
+                let cursor = NSEvent::mouseLocation();
+                let pressed = NSEvent::pressedMouseButtons() != 0;
+                let hovered =
+                    is_status_item_hovered((cursor.x, cursor.y), icon_frame, screen_frame, pressed);
+                if !self.gate.evaluate(hovered, Instant::now()) {
+                    if let Ok(mut guard) = self.panel.try_borrow_mut() {
+                        let _ = guard.take();
+                    }
+                    return;
+                }
+                let Some(icon) = icon_frame else {
+                    return;
+                };
+                if let Ok(mut guard) = self.panel.try_borrow_mut() {
+                    let tooltip = format_tooltip(snapshot);
+                    let win = guard.get_or_insert_with(|| TooltipWindow::new(mtm));
+                    win.show_at(&tooltip, icon, screen_frame);
+                }
+            });
+        }
+    }
+
+    impl Drop for MacHoverTooltip {
+        fn drop(&mut self) {
+            let center = NSNotificationCenter::defaultCenter();
+            // SAFETY: `self.menu_observer` was registered on `defaultCenter` in `Self::new`.
+            unsafe {
+                center.removeObserver(self.menu_observer.as_ref());
+            }
+            if let Ok(mut guard) = self.panel.try_borrow_mut() {
+                let _ = guard.take();
+            }
+        }
+    }
+
+    fn ns_rect_to_screen_rect(rect: NSRect) -> ScreenRect {
+        ScreenRect {
+            x: rect.origin.x,
+            y: rect.origin.y,
+            width: rect.size.width,
+            height: rect.size.height,
+        }
+    }
+
+    fn status_item_frames(
+        tray_icon: &TrayIcon,
+        mtm: MainThreadMarker,
+    ) -> (Option<ScreenRect>, Option<ScreenRect>) {
+        let Some(status_item) = tray_icon.ns_status_item() else {
+            return (None, None);
+        };
+        let Some(button) = status_item.button(mtm) else {
+            return (None, None);
+        };
+        let Some(window) = button.window() else {
+            return (None, None);
+        };
+        if !window.isVisible() {
+            return (None, None);
+        }
+        let icon = ns_rect_to_screen_rect(window.frame());
+        let screen = window.screen().map(|s| ns_rect_to_screen_rect(s.frame()));
+        (Some(icon), screen)
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[expect(
     unsafe_code,
@@ -300,6 +672,7 @@ mod macos_menu_timer {
     use sye_core::TraySnapshot;
     use tray_icon::menu::MenuItem;
 
+    use super::macos_hover_tooltip::SharedTooltipPanel;
     use super::{advance_snapshot_countdown, format_status_label};
 
     struct MacMenuLiveState {
@@ -315,7 +688,11 @@ mod macos_menu_timer {
     }
 
     impl MacMenuTimer {
-        pub(super) fn new(initial: &TraySnapshot, status_item: MenuItem) -> Self {
+        pub(super) fn new(
+            initial: &TraySnapshot,
+            status_item: MenuItem,
+            tooltip_panel: SharedTooltipPanel,
+        ) -> Self {
             let state = Rc::new(RefCell::new(MacMenuLiveState {
                 snapshot: initial.clone(),
                 updated_at: Instant::now(),
@@ -327,6 +704,9 @@ mod macos_menu_timer {
             // pausing `daemon.rs`'s main loop; this timer keeps the countdown label ticking live.
             let timer = autoreleasepool(|_| {
                 let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+                    if let Ok(mut panel) = tooltip_panel.try_borrow_mut() {
+                        let _ = panel.take();
+                    }
                     let Ok(mut guard) = timer_state.try_borrow_mut() else {
                         return;
                     };
@@ -447,10 +827,24 @@ pub fn format_status_label(snapshot: &TraySnapshot) -> String {
     }
 }
 
-/// Formats the hover tooltip for the system tray icon.
+/// Formats the hover tooltip text for tray hosts that use hover tooltips.
 #[must_use]
 pub fn format_tooltip(snapshot: &TraySnapshot) -> String {
     format!("Safe Your Eyes — {}", format_status_label(snapshot))
+}
+
+/// Returns the tray hover tooltip for the current OS (`None` on macOS).
+#[must_use]
+pub fn tray_tooltip(snapshot: &TraySnapshot) -> Option<String> {
+    tray_tooltip_for_platform(snapshot, cfg!(target_os = "macos"))
+}
+
+/// Returns `None` on macOS and `Some(format_tooltip(snapshot))` on other platforms.
+#[must_use]
+pub fn tray_tooltip_for_platform(snapshot: &TraySnapshot, is_macos: bool) -> Option<String> {
+    // AppKit's `NSToolTipManager` on macOS 27 can leave the `NSStatusItem` tooltip window stuck
+    // after sleep/wake or brief menu bar passes and moves it to the cursor on `setToolTip:`.
+    (!is_macos).then(|| format_tooltip(snapshot))
 }
 
 fn build_tray_icon(state: TrayIconState) -> Result<Icon, PlatformError> {
@@ -619,6 +1013,11 @@ mod tests {
             format_tooltip(&waiting),
             "Safe Your Eyes — Next short break in 14:50"
         );
+        assert_eq!(tray_tooltip_for_platform(&waiting, true), None);
+        assert_eq!(
+            tray_tooltip_for_platform(&waiting, false).as_deref(),
+            Some("Safe Your Eyes — Next short break in 14:50")
+        );
         assert_eq!(icon_state_for_snapshot(&waiting), TrayIconState::Enabled);
 
         let mut pre = sample_snapshot(SchedulerState::PreBreak, true);
@@ -685,5 +1084,74 @@ mod tests {
 
         let disabled = sample_snapshot(SchedulerState::Waiting, false);
         assert_eq!(advance_snapshot_countdown(&disabled, 30), disabled);
+    }
+
+    #[test]
+    fn macos_hover_tooltip_gate_and_icon_anchored_positioning() {
+        use std::time::{Duration, Instant};
+
+        let screen = ScreenRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1512.0,
+            height: 982.0,
+        };
+        let icon = ScreenRect {
+            x: 1320.0,
+            y: 958.0,
+            width: 28.0,
+            height: 24.0,
+        };
+
+        // Cursor inside icon with no mouse buttons pressed -> hovered.
+        assert!(is_status_item_hovered(
+            (1334.0, 970.0),
+            Some(icon),
+            Some(screen),
+            false
+        ));
+        // Cursor down in editor/Dock -> not hovered.
+        assert!(!is_status_item_hovered(
+            (700.0, 220.0),
+            Some(icon),
+            Some(screen),
+            false
+        ));
+        // Mouse button pressed (opening menu) -> not hovered.
+        assert!(!is_status_item_hovered(
+            (1334.0, 970.0),
+            Some(icon),
+            Some(screen),
+            true
+        ));
+        // Auto-hidden menu bar slid above screen top -> not hovered.
+        let hidden_icon = ScreenRect { y: 990.0, ..icon };
+        assert!(!is_status_item_hovered(
+            (1334.0, 995.0),
+            Some(hidden_icon),
+            Some(screen),
+            false
+        ));
+
+        // Brief pass (< 500ms) never opens tooltip; continuous hover >= 500ms opens, leaving resets.
+        let mut gate = HoverGate::default();
+        let t0 = Instant::now();
+        assert!(!gate.evaluate(true, t0));
+        assert!(!gate.evaluate(true, t0 + Duration::from_millis(200)));
+        assert!(!gate.evaluate(false, t0 + Duration::from_millis(250)));
+        assert!(!gate.evaluate(true, t0 + Duration::from_millis(600)));
+        assert!(gate.evaluate(true, t0 + Duration::from_millis(1100)));
+        assert!(!gate.evaluate(false, t0 + Duration::from_millis(1125)));
+
+        // Tooltip anchors centered below `icon_frame` (never at cursor) and clamps to screen right edge.
+        assert_eq!(
+            compute_macos_tooltip_origin(icon, Some(screen), (240.0, 26.0)),
+            (1214.0, 926.0)
+        );
+        let right_edge_icon = ScreenRect { x: 1490.0, ..icon };
+        assert_eq!(
+            compute_macos_tooltip_origin(right_edge_icon, Some(screen), (240.0, 26.0)),
+            (1266.0, 926.0)
+        );
     }
 }

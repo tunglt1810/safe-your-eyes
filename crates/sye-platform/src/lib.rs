@@ -41,4 +41,5 @@ pub use sye_core::traits;
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
     icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba, render_tray_icon_rgba,
+    tray_tooltip, tray_tooltip_for_platform,
 };

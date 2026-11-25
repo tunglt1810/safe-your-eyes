@@ -3,6 +3,7 @@ use std::process::Command;
 pub fn detach_console() {
     #[cfg(target_os = "windows")]
     {
+        // SAFETY: `FreeConsole` takes no parameters and only detaches this process from its console.
         #[expect(unsafe_code, reason = "Win32 FFI")]
         let _ = unsafe { windows_sys::Win32::System::Console::FreeConsole() };
     }

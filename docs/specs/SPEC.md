@@ -95,7 +95,7 @@ When both `short_breaks` and `long_breaks` are empty, `BreakQueue::from_config` 
 
 - `Start`: Initial state before the first timer starts.
 - `Waiting`: Daemon counts down to the pre-break warning time.
-- `PreBreak`: Daemon shows a pre-break notification for `pre_break_warning_secs` (default 10 seconds).
+- `PreBreak`: Daemon shows a pre-break notification that counts down each second for `pre_break_warning_secs` (default 10 seconds), then launches the break overlay and dismisses the notification.
 - `Break`: Daemon shows the break overlay for the exercise duration.
 - `Stopped`: Daemon pauses by user request or because no valid exercises exist.
 - `Resting`: Daemon pauses because the user is idle or the computer suspended.
@@ -200,8 +200,9 @@ When the user cancels or closes the Settings window without `Save`, or when the 
 Each chime uses a smooth attack and exponential decay envelope to prevent clicks.
 Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
-On macOS `.app` bundles, `OsNotifier` requests alert permission once on daemon startup and sends pre-break banners through `UserNotifications.framework` (`UNUserNotificationCenter`).
-On Linux and Windows, `OsNotifier` sends pre-break banners through `notify-rust`.
+On macOS `.app` bundles, `OsNotifier` requests alert permission once on daemon startup, updates the pre-break banner in place each second through `UserNotifications.framework` (`UNUserNotificationCenter`), and clears pending and delivered alerts on dismissal.
+On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second and closes it on dismissal.
+On Windows, `OsNotifier` sends one `notify-rust` pre-break toast per cycle to avoid stacking separate toasts.
 
 ### 9.2 Local IPC Protocol
 

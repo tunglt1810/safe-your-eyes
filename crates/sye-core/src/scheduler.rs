@@ -122,6 +122,7 @@ pub struct Scheduler<C: Clock> {
     smart_pause: SmartPausePolicy,
     skip_limit: SkipLimitPolicy,
     pre_break_notification_active: bool,
+    last_pre_break_notified_secs: Option<u64>,
 
     // Active monotonic deadlines in milliseconds.
     pre_break_at_ms: u64,
@@ -151,6 +152,7 @@ impl<C: Clock> Scheduler<C> {
             smart_pause: SmartPausePolicy::new(),
             skip_limit: SkipLimitPolicy::new(0),
             pre_break_notification_active: false,
+            last_pre_break_notified_secs: None,
             pre_break_at_ms: 0,
             next_break_at_ms: 0,
             break_started_ms: 0,
@@ -438,6 +440,7 @@ impl<C: Clock> Scheduler<C> {
             {
                 self.state = SchedulerState::PreBreak;
                 self.pre_break_notification_active = false;
+                self.last_pre_break_notified_secs = None;
                 let delay_ms = delay.as_secs().max(1).saturating_mul(1000);
                 self.next_break_at_ms = now.saturating_add(delay_ms);
                 return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
@@ -446,6 +449,7 @@ impl<C: Clock> Scheduler<C> {
         }
         self.state = SchedulerState::PreBreak;
         self.pre_break_notification_active = true;
+        self.last_pre_break_notified_secs = Some(effective_warning_secs);
         let warning_ms = effective_warning_secs.saturating_mul(1000);
         // Ensure the user still receives a warning window if tick() arrived late.
         self.next_break_at_ms = self.next_break_at_ms.max(now.saturating_add(warning_ms));
@@ -470,6 +474,21 @@ impl<C: Clock> Scheduler<C> {
         dnd_ctx: Option<&DndContext>,
     ) -> Vec<SchedulerAction> {
         if now < self.next_break_at_ms {
+            if self.pre_break_notification_active {
+                let remaining_secs = self.next_break_at_ms.saturating_sub(now).div_ceil(1000);
+                if remaining_secs > 0
+                    && self
+                        .last_pre_break_notified_secs
+                        .is_none_or(|prev| remaining_secs < prev)
+                    && let Some(spec) = self.queue.as_ref().map(|q| q.current().spec.clone())
+                {
+                    self.last_pre_break_notified_secs = Some(remaining_secs);
+                    return vec![SchedulerAction::NotifyPreBreak {
+                        break_spec: spec,
+                        warning_secs: remaining_secs,
+                    }];
+                }
+            }
             return Vec::new();
         }
         if let Some(ctx) = dnd_ctx
@@ -483,16 +502,21 @@ impl<C: Clock> Scheduler<C> {
         {
             return self.handle_defer_break(delay.as_secs().max(1));
         }
-        let mut actions = Vec::new();
-        if std::mem::take(&mut self.pre_break_notification_active) {
-            actions.push(SchedulerAction::DismissNotification);
-        }
+        let dismiss_notification = std::mem::take(&mut self.pre_break_notification_active);
+        self.last_pre_break_notified_secs = None;
         let Some(spec) = self.queue.as_ref().map(|q| q.current().spec.clone()) else {
             self.state = SchedulerState::Stopped;
+            let mut actions = Vec::new();
+            if dismiss_notification {
+                actions.push(SchedulerAction::DismissNotification);
+            }
             actions.push(SchedulerAction::UpdateTray(self.tray_snapshot()));
             return actions;
         };
-        actions.extend(self.enter_break(now, spec));
+        let mut actions = self.enter_break(now, spec);
+        if dismiss_notification {
+            actions.push(SchedulerAction::DismissNotification);
+        }
         actions
     }
 
@@ -665,6 +689,7 @@ impl<C: Clock> Scheduler<C> {
         }
         let delay_ms = delay_secs.max(1).saturating_mul(1000);
         self.next_break_at_ms = self.now_mono_ms().saturating_add(delay_ms);
+        self.last_pre_break_notified_secs = None;
         let mut actions = Vec::new();
         if std::mem::take(&mut self.pre_break_notification_active) {
             actions.push(SchedulerAction::DismissNotification);
@@ -680,6 +705,7 @@ impl<C: Clock> Scheduler<C> {
         if let Some(queue) = self.queue.as_mut() {
             queue.advance();
         }
+        self.last_pre_break_notified_secs = None;
         let mut actions = Vec::new();
         if std::mem::take(&mut self.pre_break_notification_active) {
             actions.push(SchedulerAction::DismissNotification);
@@ -734,6 +760,7 @@ impl<C: Clock> Scheduler<C> {
     fn push_active_state_cleanup(&mut self, actions: &mut Vec<SchedulerAction>) {
         match self.state {
             SchedulerState::PreBreak => {
+                self.last_pre_break_notified_secs = None;
                 if std::mem::take(&mut self.pre_break_notification_active) {
                     actions.push(SchedulerAction::DismissNotification);
                 }
@@ -757,6 +784,7 @@ impl<C: Clock> Scheduler<C> {
     fn enter_break(&mut self, now_ms: u64, spec: ResolvedBreak) -> Vec<SchedulerAction> {
         self.state = SchedulerState::Break;
         self.pre_break_notification_active = false;
+        self.last_pre_break_notified_secs = None;
         self.break_started_ms = now_ms;
         self.break_ends_ms = now_ms.saturating_add(spec.duration_secs.saturating_mul(1000));
 
@@ -814,6 +842,7 @@ impl<C: Clock> Scheduler<C> {
         let Some(wait_secs) = self.queue.as_ref().map(|q| q.current().wait_secs) else {
             self.state = SchedulerState::Stopped;
             self.pre_break_notification_active = false;
+            self.last_pre_break_notified_secs = None;
             return vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
         };
         self.enter_waiting_with_wait_secs(wait_secs, true)
@@ -831,6 +860,7 @@ impl<C: Clock> Scheduler<C> {
 
         self.state = SchedulerState::Waiting;
         self.pre_break_notification_active = false;
+        self.last_pre_break_notified_secs = None;
         self.next_break_at_ms = now.saturating_add(wait_ms);
         self.pre_break_at_ms = self.next_break_at_ms.saturating_sub(warning_ms);
 
@@ -1694,5 +1724,80 @@ mod tests {
             SchedulerAction::ShowOverlay(req)
                 if req.strict_break && req.allow_postpone && req.status_note.is_none()
         )));
+    }
+
+    #[test]
+    fn pre_break_notification_counts_down_each_second_and_dismisses_after_overlay() {
+        let clock = FakeClock::default();
+        let mut sched = Scheduler::new(test_config(), &clock, 42);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(890);
+        let entry_actions = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert!(entry_actions.iter().any(|a| matches!(
+            a,
+            SchedulerAction::NotifyPreBreak {
+                warning_secs: 10,
+                ..
+            }
+        )));
+        assert!(has_pre_break_chime(&entry_actions));
+
+        let mut notified_secs = vec![10_u64];
+        for expected in (1_u64..=9).rev() {
+            clock.advance(Duration::from_millis(250));
+            assert!(sched.tick().is_empty());
+            clock.advance(Duration::from_millis(750));
+            let actions = sched.tick();
+            assert!(!has_pre_break_chime(&actions));
+            assert_eq!(actions.len(), 1);
+            assert!(matches!(
+                actions.first(),
+                Some(SchedulerAction::NotifyPreBreak { warning_secs, .. }) if *warning_secs == expected
+            ));
+            notified_secs.push(expected);
+        }
+        assert_eq!(notified_secs, vec![10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+
+        clock.advance(Duration::from_millis(500));
+        assert!(sched.tick().is_empty());
+
+        clock.advance(Duration::from_millis(500));
+        let brk_actions = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::Break);
+        let overlay_idx = brk_actions
+            .iter()
+            .position(|a| matches!(a, SchedulerAction::ShowOverlay(_)));
+        let dismiss_idx = brk_actions
+            .iter()
+            .position(|a| matches!(a, SchedulerAction::DismissNotification));
+        assert!(overlay_idx.is_some());
+        assert!(dismiss_idx.is_some());
+        assert!(overlay_idx < dismiss_idx);
+    }
+
+    #[test]
+    fn deferred_pre_break_does_not_restart_countdown_notifications() {
+        let clock = FakeClock::default();
+        let mut cfg = test_config();
+        cfg.smart_pause.postpone_if_active = true;
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(890);
+        let _ = sched.tick_with_policies(Some(Duration::ZERO), None);
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+
+        clock.advance_secs(10);
+        let defer_actions = sched.tick_with_policies(Some(Duration::ZERO), None);
+        assert!(
+            defer_actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+
+        clock.advance_secs(1);
+        assert!(sched.tick().is_empty());
     }
 }

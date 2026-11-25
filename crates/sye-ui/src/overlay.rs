@@ -274,7 +274,6 @@ fn overlay_main_window_options_for_primary(
     {
         // Avoid `WindowMode::FullScreen` on macOS: AppKit's `toggleFullScreen:` conflicts with
         // `Workspaces::All` and triggers a slow Space slide animation instead of instant cover.
-        // Avoid it on Windows too: the card was off-centre. Both set the display bounds instead.
         main_window.default_mode = Some(nsh_core::desktop::WindowMode::FullScreen);
     }
     main_window.attributes = attrs;

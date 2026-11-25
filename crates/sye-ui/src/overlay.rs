@@ -260,7 +260,8 @@ fn overlay_main_window_options_for_primary(
     attrs.focusable = Some(true);
     attrs.activate = Some(true);
     attrs.close_on_press = Some(false);
-    attrs.taskbar = Some(false);
+    // Explorer lowers the taskbar only for a full-screen window that has a taskbar button.
+    attrs.taskbar = Some(cfg!(target_os = "windows"));
     attrs.shadow = Some(false);
 
     let mut main_window = MainWindowOptions::default();
@@ -939,7 +940,7 @@ mod tests {
         assert_eq!(opts.attributes.focusable, Some(true));
         assert_eq!(opts.attributes.activate, Some(true));
         assert_eq!(opts.attributes.close_on_press, Some(false));
-        assert_eq!(opts.attributes.taskbar, Some(false));
+        assert_eq!(opts.attributes.taskbar, Some(cfg!(target_os = "windows")));
         assert_eq!(opts.attributes.shadow, Some(false));
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         assert_eq!(

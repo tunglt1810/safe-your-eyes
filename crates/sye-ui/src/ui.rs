@@ -79,7 +79,6 @@ pub(crate) fn page_heading(
     title: impl IntoReactive<SharedString>,
     highlight_scale: &AnimatedValue,
 ) -> impl IntoElement {
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     view()
         .gap_1()
         .child(
@@ -94,9 +93,6 @@ pub(crate) fn page_heading(
                 .h(px(4.0))
                 .rounded(radii::PILL)
                 .bg(colors::HEADING_HIGHLIGHT)
-                .transition_colors()
-                .duration(motion::THEME_COLOR_MS)
-                .ease_bezier(bx1, by1, bx2, by2)
                 .origin_left()
                 .bind_transform(nsh_core::TransformKind::ScaleX, highlight_scale),
         )
@@ -127,9 +123,23 @@ pub(crate) fn stagger_item(
 
 pub(crate) fn theme_toggle_button(
     mode: impl Fn() -> ThemeMode + Copy + 'static,
-    on_press: impl Fn() + 'static,
+    measured_center: Signal<Option<[f32; 2]>>,
+    on_press: impl Fn(Option<[f32; 2]>) + 'static,
 ) -> impl IntoElement {
+    let btn_ref = element_ref();
     let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+
+    effect(move || {
+        let _ = nsh_core::element::desktop::title_bar();
+        let _ = window();
+        spawn(async move {
+            if let Some(m) = btn_ref.measure().await {
+                let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
+                let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
+                measured_center.set(Some([cx, cy]));
+            }
+        });
+    });
 
     let icon = canvas(move || {
         let svg = match mode() {
@@ -150,32 +160,48 @@ pub(crate) fn theme_toggle_button(
     .h(px(16.0))
     .flex_shrink_0();
 
-    view().window_drag(false).child(
-        button()
-            .on_press(on_press)
-            .h(px(36.0))
-            .px_3()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .gap_2()
-            .rounded(radii::PILL)
-            .bg(colors::BACKGROUND_SURFACE)
-            .border_1()
-            .border_color(colors::BORDER_EMPHASIZED)
-            .transition()
-            .duration(motion::THEME_COLOR_MS)
-            .ease_bezier(bx1, by1, bx2, by2)
-            .hover(|s| s.bg(colors::OVERLAY_HOVER))
-            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
-            .child(icon)
-            .child(
-                text(move || theme_mode_label(mode()))
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors::TEXT_PRIMARY),
-            ),
-    )
+    view()
+        .element_ref(&btn_ref)
+        .role(AccessibilityRole::Button)
+        .focusable(true)
+        .window_drag(false)
+        .on_layout(move |_: &Bounds<Points>| {
+            spawn(async move {
+                if let Some(m) = btn_ref.measure().await {
+                    let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
+                    let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
+                    measured_center.set(Some([cx, cy]));
+                }
+            });
+        })
+        .on_press(move |ev: &PressEvent| {
+            let p = ev.page_position;
+            let live_press = (p.x.0 > 0.0 || p.y.0 > 0.0).then_some([p.x.0, p.y.0]);
+            let origin = live_press.or_else(|| measured_center.get());
+            on_press(origin);
+        })
+        .h(px(36.0))
+        .px_3()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded(radii::PILL)
+        .bg(colors::BACKGROUND_SURFACE)
+        .border_1()
+        .border_color(colors::BORDER_EMPHASIZED)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
+        .hover(|s| s.bg(colors::OVERLAY_HOVER))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+        .child(icon)
+        .child(
+            text(move || theme_mode_label(mode()))
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::TEXT_PRIMARY),
+        )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,8 +229,6 @@ pub(crate) fn countdown_status_pill(
     tone: impl Fn() -> CountdownTone + 'static,
     label: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
-
     view()
         .h(px(36.0))
         .px_3()
@@ -215,9 +239,6 @@ pub(crate) fn countdown_status_pill(
         .bg(colors::BACKGROUND_SURFACE)
         .border_1()
         .border_color(colors::BORDER_EMPHASIZED)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .w(px(8.0))
@@ -248,13 +269,7 @@ pub(crate) fn section_header(title: &'static str, caption: &'static str) -> impl
 }
 
 pub(crate) fn section_divider() -> impl IntoElement {
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
-    view()
-        .h(px(1.0))
-        .bg(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
+    view().h(px(1.0)).bg(colors::BORDER)
 }
 
 pub(crate) fn primary_button_with_disabled(
@@ -358,16 +373,12 @@ pub(crate) fn pastel_kpi_card(
     label: &'static str,
     value: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     view()
         .flex_1()
         .rounded(radii::KPI)
         .bg(tone.bg())
         .border_1()
         .border_color(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .px_4()
         .py_3()
         .gap_1()
@@ -517,7 +528,7 @@ pub(crate) fn sidebar_nav_indicator(active_index: impl Fn() -> u8 + 'static) -> 
         .rounded(radii::NAV_ITEM)
         .bg(colors::SIDEBAR_ACTIVE)
         .translate_y(move || px(f32::from(active_index()) * step))
-        .transition()
+        .transition_transform()
         .ease_spring(motion::COZY_SPRING)
 }
 
@@ -852,19 +863,38 @@ mod tests {
     }
 
     #[test]
-    fn theme_toggle_button_cycles_mode_on_press() -> Result<(), String> {
+    fn theme_toggle_button_cycles_mode_and_reports_fresh_origin() -> Result<(), String> {
+        use std::sync::Mutex;
+
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
+
+        static LAST_ORIGIN: Mutex<Option<[f32; 2]>> = Mutex::new(None);
 
         #[component]
         fn ToggleHost() -> impl IntoElement {
             let mode = signal(ThemeMode::System);
-            view().p_3().child(theme_toggle_button(
-                move || mode.get(),
-                move || mode.update(|m| *m = crate::theme::next_theme_mode(*m)),
-            ))
+            let measured = signal(None::<[f32; 2]>);
+            let shift = signal(0.0_f32);
+            view()
+                .p_3()
+                .child(view().h(move || px(shift.get())))
+                .child(secondary_button("Shift", move || shift.set(36.0)))
+                .child(theme_toggle_button(
+                    move || mode.get(),
+                    measured,
+                    move |origin| {
+                        if let Ok(mut guard) = LAST_ORIGIN.lock() {
+                            *guard = origin;
+                        }
+                        mode.update(|m| *m = crate::theme::next_theme_mode(*m));
+                    },
+                ))
         }
 
+        if let Ok(mut guard) = LAST_ORIGIN.lock() {
+            *guard = None;
+        }
         let mut app = Headless::start(EngineConfig {
             viewport: Size::new(Points(400.0), Points(200.0)),
             ..EngineConfig::new(Root::of::<ToggleHost>())
@@ -874,8 +904,24 @@ mod tests {
 
         app.press("Theme: System")?;
         app.wait_for("Theme: Light")?;
+        let before = LAST_ORIGIN
+            .lock()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "expected non-None origin on initial press".to_owned())?;
+
+        app.press("Shift")?;
+        app.settle();
         app.press("Theme: Light")?;
         app.wait_for("Theme: Dark")?;
+        let after = LAST_ORIGIN
+            .lock()
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "expected non-None origin after shift".to_owned())?;
+        assert!(
+            after[1] - before[1] > 30.0,
+            "Expected fresh origin y to shift by ~36pt, before={before:?}, after={after:?}"
+        );
+
         app.press("Theme: Dark")?;
         app.wait_for("Theme: System")?;
         Ok(())

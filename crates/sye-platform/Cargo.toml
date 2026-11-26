@@ -76,10 +76,31 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSString",
     "NSTimer",
 ] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFCGTypes",
+    "CFString",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "CGAffineTransform",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+    "CGPath",
+    "objc2",
+] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
     "std",
+    "CAAnimation",
     "CALayer",
+    "CAMediaTiming",
+    "CAMediaTimingFunction",
+    "CAShapeLayer",
+    "CATransaction",
+    "block2",
     "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
 
 [target.'cfg(windows)'.dependencies]

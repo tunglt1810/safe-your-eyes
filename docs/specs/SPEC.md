@@ -255,7 +255,9 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - `COZY_SPRING` (`stiffness: 420`, `damping: 32`, `mass: 0.9`) moves the sliding sidebar indicator and the centered switch knob (`3pt` symmetrical inset, `18pt` horizontal travel).
 - `COZY_EASE` (`cubic-bezier(0.22, 1, 0.36, 1)`) drives staggered list-item entrances on tab switch (`10px` rise, `260ms`, `28ms` step capped at row 12), overlay dialog scale-in (`0.98 -> 1.0`, `200ms`), and highlighter sweeps (`380ms`).
 - The Settings window skips staggered list-item entrances on initial window load and during in-place exercise edits.
-- Theme switching uses native `transition_colors` (`200ms`, `cubic-bezier(0.4, 0, 0.2, 1)`) on Cozy surfaces so appearance changes render without a blank-frame flash.
+- Cozy Circular Theme Reveal expands a circle from the theme toggle button to the farthest window corner (`480ms`, `cubic-bezier(0.4, 0, 0.2, 1)`) whenever the resolved Light or Dark appearance changes and `reduce_motion()` is `false`.
+- On macOS, the reveal pins a snapshot `CALayer` of the previous theme above the live view tree and animates an even-odd `CAShapeLayer` mask so the window switches with zero blank-frame flash.
+- On Linux and Windows, the reveal uses `nsh`'s `screen_transition()` WGSL shader (`THEME_REVEAL_WGSL`).
 - Toggling the theme writes `Config.theme` to `config.toml` immediately without saving unsaved form edits.
 - A theme-only configuration reload keeps the daemon's active break countdown unchanged.
 - Pressable pills scale to `0.97` on press.

@@ -220,11 +220,27 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         on_poll_status: Some(Arc::new(move || query_daemon_status(&status_socket_path))),
     };
 
+    let theme_hooks = sye_ui::ThemeTransitionHooks {
+        on_theme_change: Some(Arc::new(sye_platform::sync_own_windows_appearance)),
+        #[cfg(target_os = "macos")]
+        capture_snapshot: Some(Arc::new(sye_platform::capture_theme_transition_snapshot)),
+        #[cfg(target_os = "macos")]
+        reveal_snapshot: Some(Arc::new(sye_platform::reveal_theme_transition_snapshot)),
+        #[cfg(target_os = "macos")]
+        cancel_snapshot: Some(Arc::new(sye_platform::cancel_theme_transition_snapshot)),
+        #[cfg(not(target_os = "macos"))]
+        capture_snapshot: None,
+        #[cfg(not(target_os = "macos"))]
+        reveal_snapshot: None,
+        #[cfg(not(target_os = "macos"))]
+        cancel_snapshot: None,
+    };
+
     match sye_ui::run_settings_with_hooks(
         config_file.clone(),
         initial_system_autostart,
         Some(on_autostart_change),
-        Some(Arc::new(sye_platform::sync_own_windows_appearance)),
+        theme_hooks,
         update_config,
         status_config,
     ) {

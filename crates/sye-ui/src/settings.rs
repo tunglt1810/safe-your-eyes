@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
@@ -335,6 +335,25 @@ impl WindowList {
 
 pub type AutostartChangeCallback = Box<dyn Fn(bool) + Send + Sync>;
 pub type ThemeChangeCallback = Arc<dyn Fn(ThemeMode) + Send + Sync>;
+pub type SnapshotCaptureCallback = Arc<dyn Fn() -> bool + Send + Sync>;
+pub type SnapshotRevealCallback = Arc<dyn Fn([f32; 2], u64) + Send + Sync>;
+pub type SnapshotCancelCallback = Arc<dyn Fn() + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct ThemeTransitionHooks {
+    pub on_theme_change: Option<ThemeChangeCallback>,
+    pub capture_snapshot: Option<SnapshotCaptureCallback>,
+    pub reveal_snapshot: Option<SnapshotRevealCallback>,
+    pub cancel_snapshot: Option<SnapshotCancelCallback>,
+}
+
+const fn may_change_resolved_dark(current_dark: bool, next_mode: ThemeMode) -> bool {
+    match next_mode {
+        ThemeMode::Light => current_dark,
+        ThemeMode::Dark => !current_dark,
+        ThemeMode::System => true,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyUpdateOutcome {
@@ -349,6 +368,7 @@ pub type StatusPollCallback = Arc<dyn Fn() -> Option<StatusSnapshot> + Send + Sy
 
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STATUS_MISSES_BEFORE_HIDE: u32 = 2;
+const NATIVE_REVEAL_FALLBACK_CANCEL_MS: u64 = 120;
 
 #[derive(Clone, Default)]
 pub struct SettingsUpdateConfig {
@@ -402,7 +422,7 @@ struct SettingsLaunch {
     vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     on_autostart_change: Option<AutostartHook>,
-    on_theme_change: Option<ThemeChangeCallback>,
+    theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
 }
@@ -881,7 +901,6 @@ fn exercise_tier_section(
             "long",
         ),
     };
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     let initial_remaining = Rc::new(Cell::new(if animate {
         vm.with_untracked(|m| match kind {
             BreakType::Short => m.config.short_breaks.len(),
@@ -959,9 +978,6 @@ fn exercise_tier_section(
                         .justify_between()
                         .rounded(radii::ELEMENT)
                         .bg(colors::BACKGROUND_MUTED)
-                        .transition_colors()
-                        .duration(motion::THEME_COLOR_MS)
-                        .ease_bezier(bx1, by1, bx2, by2)
                         .px_3()
                         .py_2()
                         .child(
@@ -1332,6 +1348,76 @@ fn settings_main_window_options() -> MainWindowOptions {
     main_window
 }
 
+type PendingNativeReveal = Rc<RefCell<Option<(u64, [f32; 2], ThemeMode)>>>;
+
+fn dispatch_theme_transition(
+    next_mode: ThemeMode,
+    resolved_origin: [f32; 2],
+    hooks: &ThemeTransitionHooks,
+    pending_reveal: &PendingNativeReveal,
+    reveal_gen: &Rc<Cell<u64>>,
+    apply_state: impl FnOnce() + 'static,
+) {
+    if !reduce_motion()
+        && may_change_resolved_dark(dark(), next_mode)
+        && let (Some(capture_cb), Some(_reveal_cb)) = (
+            hooks.capture_snapshot.clone(),
+            hooks.reveal_snapshot.as_ref(),
+        )
+    {
+        let generation = reveal_gen.get().wrapping_add(1).max(1);
+        reveal_gen.set(generation);
+        let pending = Rc::clone(pending_reveal);
+        let sync_cb = hooks.on_theme_change.clone();
+        let cancel_cb = hooks.cancel_snapshot.clone();
+        spawn(async move {
+            let captured = run_on_main_thread(move || capture_cb())
+                .await
+                .unwrap_or(false);
+            if captured {
+                *pending.borrow_mut() = Some((generation, resolved_origin, next_mode));
+                let pending_timeout = Rc::clone(&pending);
+                let sync_timeout = sync_cb.clone();
+                let cancel_timeout = cancel_cb.clone();
+                drop(set_timeout(
+                    Duration::from_millis(NATIVE_REVEAL_FALLBACK_CANCEL_MS),
+                    move || {
+                        let stale = {
+                            let mut guard = pending_timeout.borrow_mut();
+                            if guard.as_ref().is_some_and(|(id, _, _)| *id == generation) {
+                                guard.take()
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some((_, _, mode)) = stale {
+                            let sync_cb = sync_timeout.clone();
+                            let cancel_cb = cancel_timeout.clone();
+                            drop(run_on_main_thread(move || {
+                                if let Some(cb) = sync_cb {
+                                    cb(mode);
+                                }
+                                if let Some(cb) = cancel_cb {
+                                    cb();
+                                }
+                            }));
+                        }
+                    },
+                ));
+            }
+            apply_state();
+            if !captured && let Some(cb) = sync_cb {
+                drop(run_on_main_thread(move || cb(next_mode)));
+            }
+        });
+    } else {
+        apply_state();
+        if let Some(cb) = hooks.on_theme_change.clone() {
+            drop(run_on_main_thread(move || cb(next_mode)));
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn build_settings_view(
     initial_vm: SettingsViewModel,
@@ -1343,7 +1429,7 @@ pub(crate) fn build_settings_view(
         outcome_sink,
         quit_on_finish,
         None,
-        None,
+        ThemeTransitionHooks::default(),
         SettingsUpdateConfig::default(),
         SettingsStatusConfig::default(),
     )
@@ -1354,7 +1440,7 @@ pub(crate) fn build_settings_view_with_hooks(
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
     on_autostart_change: Option<AutostartHook>,
-    on_theme_change: Option<ThemeChangeCallback>,
+    theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
 ) -> impl IntoElement {
@@ -1367,11 +1453,16 @@ pub(crate) fn build_settings_view_with_hooks(
         }));
     }
 
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
     let initial_appearance = appearance_for_theme_mode(initial_vm.config.theme);
     let vm = signal(initial_vm);
     let appearance = signal(initial_appearance);
     let has_switched_tab = signal(false);
+    let measured_theme_btn_center = signal(None::<[f32; 2]>);
+    let reveal_origin = signal([860.0_f32, 32.0_f32]);
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let reveal_epoch = signal(0_u32);
+    let pending_native_reveal: PendingNativeReveal = Rc::new(RefCell::new(None));
+    let native_reveal_gen = Rc::new(Cell::new(0_u64));
 
     let poll_immediately = status_config.initial_status.is_none();
     let live_status = signal(status_config.initial_status);
@@ -1452,6 +1543,40 @@ pub(crate) fn build_settings_view_with_hooks(
         }
     });
 
+    effect(move || {
+        if let Some(center) = measured_theme_btn_center.get() {
+            reveal_origin.set(center);
+        }
+    });
+
+    let prev_dark = Cell::new(None::<bool>);
+    let effect_pending_reveal = Rc::clone(&pending_native_reveal);
+    let effect_theme_hooks = theme_hooks.clone();
+    effect(move || {
+        let now_dark = dark();
+        let previous = prev_dark.replace(Some(now_dark));
+        if let Some(prev) = previous
+            && prev != now_dark
+        {
+            if let Some((_, origin, mode)) = effect_pending_reveal.borrow_mut().take() {
+                let sync_cb = effect_theme_hooks.on_theme_change.clone();
+                let reveal_cb = effect_theme_hooks.reveal_snapshot.clone();
+                drop(run_on_main_thread(move || {
+                    if let Some(cb) = sync_cb {
+                        cb(mode);
+                    }
+                    if let Some(cb) = reveal_cb {
+                        cb(origin, motion::THEME_REVEAL_MS);
+                    }
+                }));
+            }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            if !reduce_motion() {
+                reveal_epoch.update(|epoch| *epoch = epoch.wrapping_add(1));
+            }
+        }
+    });
+
     let theme_sink = Arc::clone(&outcome_sink);
     let timing_sink = Arc::clone(&outcome_sink);
     let policies_sink = Arc::clone(&outcome_sink);
@@ -1492,9 +1617,6 @@ pub(crate) fn build_settings_view_with_hooks(
         .bg(colors::SIDEBAR_BG)
         .border_1()
         .border_color(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .p_3()
         .justify_between()
         .child(
@@ -1603,8 +1725,12 @@ pub(crate) fn build_settings_view_with_hooks(
             })
         }));
 
-    let toggle_theme_hook = on_theme_change.as_ref().map(Arc::clone);
-    let reset_theme_hook = on_theme_change;
+    let toggle_theme_hooks = theme_hooks.clone();
+    let toggle_pending_reveal = Rc::clone(&pending_native_reveal);
+    let toggle_reveal_gen = Rc::clone(&native_reveal_gen);
+    let reset_theme_hooks = theme_hooks;
+    let reset_pending_reveal = pending_native_reveal;
+    let reset_reveal_gen = native_reveal_gen;
 
     let page_header = view()
         .flex_shrink_0()
@@ -1647,27 +1773,42 @@ pub(crate) fn build_settings_view_with_hooks(
                         ))
                         .child(theme_toggle_button(
                             move || theme_mode_for_appearance(appearance.get()),
-                            move || {
+                            measured_theme_btn_center,
+                            move |origin| {
+                                let resolved_origin = origin.unwrap_or_else(|| {
+                                    let win = window();
+                                    [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
+                                });
+                                reveal_origin.set(resolved_origin);
                                 let next_mode =
                                     next_theme_mode(theme_mode_for_appearance(appearance.get()));
                                 let next_appearance = appearance_for_theme_mode(next_mode);
-                                let mut saved = false;
-                                vm.update(|m| {
-                                    m.config.theme = next_mode;
-                                    if m.autosave().is_ok() {
-                                        saved = true;
-                                    } else {
-                                        let _ = m.persist_theme();
+                                let sink = Arc::clone(&theme_sink);
+                                let apply_theme = move || {
+                                    let mut saved = false;
+                                    vm.update(|m| {
+                                        m.config.theme = next_mode;
+                                        if m.autosave().is_ok() {
+                                            saved = true;
+                                        } else {
+                                            let _ = m.persist_theme();
+                                        }
+                                    });
+                                    if saved {
+                                        crate::store_outcome(&sink, SettingsOutcome::Saved);
                                     }
-                                });
-                                if saved {
-                                    crate::store_outcome(&theme_sink, SettingsOutcome::Saved);
-                                }
-                                appearance.set(next_appearance);
-                                set_color_scheme(next_appearance);
-                                if let Some(cb) = &toggle_theme_hook {
-                                    cb(next_mode);
-                                }
+                                    appearance.set(next_appearance);
+                                    set_color_scheme(next_appearance);
+                                };
+
+                                dispatch_theme_transition(
+                                    next_mode,
+                                    resolved_origin,
+                                    &toggle_theme_hooks,
+                                    &toggle_pending_reveal,
+                                    &toggle_reveal_gen,
+                                    apply_theme,
+                                );
                             },
                         )),
                 ),
@@ -1689,16 +1830,10 @@ pub(crate) fn build_settings_view_with_hooks(
         .element_ref(&form_scroll_ref)
         .flex_1()
         .bg(colors::BACKGROUND_SURFACE)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             view()
                 .p_5()
                 .bg(colors::BACKGROUND_SURFACE)
-                .transition_colors()
-                .duration(motion::THEME_COLOR_MS)
-                .ease_bezier(bx1, by1, bx2, by2)
                 .child(when(
                     move || active_tab.get() == SettingsTab::Timing,
                     move || {
@@ -1756,9 +1891,6 @@ pub(crate) fn build_settings_view_with_hooks(
         .bg(colors::BACKGROUND_SURFACE)
         .border_t_1()
         .border_color(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .child(
             text("Changes are saved automatically")
                 .text_xs()
@@ -1768,31 +1900,47 @@ pub(crate) fn build_settings_view_with_hooks(
             "Reset to defaults",
             move || !is_modified.get(),
             move || {
-                let mut autostart_changed = None;
-                let mut saved = false;
-                vm.update(|m| {
-                    let prev = m.config.autostart;
-                    m.reset_to_defaults();
-                    if m.autosave().is_ok() {
-                        saved = true;
-                    }
-                    if m.config.autostart != prev {
-                        autostart_changed = Some(m.config.autostart);
-                    }
-                });
-                if saved {
-                    crate::store_outcome(&reset_sink, SettingsOutcome::Saved);
-                }
-                if saved && let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
-                    cb(next);
-                }
                 let default_mode = ThemeMode::default();
                 let default_appearance = appearance_for_theme_mode(default_mode);
-                appearance.set(default_appearance);
-                set_color_scheme(default_appearance);
-                if let Some(cb) = &reset_theme_hook {
-                    cb(default_mode);
-                }
+                let resolved_origin = measured_theme_btn_center.get().unwrap_or_else(|| {
+                    let win = window();
+                    [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
+                });
+                reveal_origin.set(resolved_origin);
+
+                let sink = Arc::clone(&reset_sink);
+                let autostart_cb = reset_hook.as_ref().map(Arc::clone);
+                let apply_reset = move || {
+                    let mut autostart_changed = None;
+                    let mut saved = false;
+                    vm.update(|m| {
+                        let prev = m.config.autostart;
+                        m.reset_to_defaults();
+                        if m.autosave().is_ok() {
+                            saved = true;
+                        }
+                        if m.config.autostart != prev {
+                            autostart_changed = Some(m.config.autostart);
+                        }
+                    });
+                    if saved {
+                        crate::store_outcome(&sink, SettingsOutcome::Saved);
+                    }
+                    if saved && let (Some(next), Some(cb)) = (autostart_changed, &autostart_cb) {
+                        cb(next);
+                    }
+                    appearance.set(default_appearance);
+                    set_color_scheme(default_appearance);
+                };
+
+                dispatch_theme_transition(
+                    default_mode,
+                    resolved_origin,
+                    &reset_theme_hooks,
+                    &reset_pending_reveal,
+                    &reset_reveal_gen,
+                    apply_reset,
+                );
             },
         ));
 
@@ -1802,9 +1950,6 @@ pub(crate) fn build_settings_view_with_hooks(
         .bg(colors::BACKGROUND_SURFACE)
         .border_1()
         .border_color(colors::BORDER)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .overflow_hidden()
         .child(form_scroll)
         .child(sticky_toolbar);
@@ -1824,17 +1969,33 @@ pub(crate) fn build_settings_view_with_hooks(
         .child(page_header)
         .child(form_card);
 
-    view()
+    let root = view()
         .flex_1()
         .bg(colors::BACKGROUND_BODY)
-        .transition_colors()
-        .duration(motion::THEME_COLOR_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
         .flex_row()
         .p_2()
         .gap_3()
         .child(sidebar)
-        .child(right_pane)
+        .child(right_pane);
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    let root = {
+        let mut root = root;
+        if let Some(shader) = crate::theme::theme_reveal_shader() {
+            root = root.child(
+                screen_transition()
+                    .source(shader)
+                    .duration(Duration::from_millis(motion::THEME_REVEAL_MS))
+                    .uniform("origin", move || reveal_origin.get())
+                    .value(move || {
+                        nsh_core::shader::TransitionKey::number(f64::from(reveal_epoch.get()))
+                    }),
+            );
+        }
+        root
+    };
+
+    root
 }
 
 #[component]
@@ -1846,7 +2007,7 @@ fn SettingsRoot() -> impl IntoElement {
             launch.outcome_sink,
             true,
             launch.on_autostart_change,
-            launch.on_theme_change,
+            launch.theme_hooks,
             launch.update_config,
             launch.status_config,
         )
@@ -1874,7 +2035,7 @@ pub fn run_settings_with_autostart(
         config_path,
         system_autostart,
         on_autostart_change,
-        None,
+        ThemeTransitionHooks::default(),
         SettingsUpdateConfig::default(),
         SettingsStatusConfig::default(),
     )
@@ -1884,7 +2045,7 @@ pub fn run_settings_with_hooks(
     config_path: PathBuf,
     system_autostart: Option<bool>,
     on_autostart_change: Option<AutostartChangeCallback>,
-    on_theme_change: Option<ThemeChangeCallback>,
+    theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
 ) -> Result<SettingsOutcome, UiError> {
@@ -1902,7 +2063,7 @@ pub fn run_settings_with_hooks(
         vm,
         outcome_sink: Arc::clone(&outcome_sink),
         on_autostart_change,
-        on_theme_change,
+        theme_hooks,
         update_config,
         status_config,
     });
@@ -1937,7 +2098,7 @@ pub fn run_settings_with_hooks(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
 
@@ -2286,8 +2447,8 @@ mod tests {
         if let Ok(mut guard) = TEST_PATH.lock() {
             *guard = Some(save_path.clone());
         }
-        let saw_shader_transition = Arc::new(AtomicBool::new(false));
-        let shader_flag = Arc::clone(&saw_shader_transition);
+        let shader_transitions = Arc::new(Mutex::new(Vec::<Duration>::new()));
+        let shader_log = Arc::clone(&shader_transitions);
 
         let mut app = Headless::start(EngineConfig {
             viewport: Size::new(Points(920.0), Points(680.0)),
@@ -2296,8 +2457,10 @@ mod tests {
         .map_err(|e| e.to_string())?;
         app.observe(move |_step, batch| {
             for item in &batch.items {
-                if matches!(item, MountItem::ShaderTransition { .. }) {
-                    shader_flag.store(true, Ordering::Release);
+                if let MountItem::ShaderTransition { duration, .. } = item
+                    && let Ok(mut guard) = shader_log.lock()
+                {
+                    guard.push(*duration);
                 }
             }
         });
@@ -2309,13 +2472,33 @@ mod tests {
         assert!(app.press("Reset to defaults").is_err());
         assert!(!save_path.exists());
 
+        // Headless starts in Light mode: System -> Light is a no-op and must not trigger wave.
         app.press("Theme: System")?;
         app.wait_for("Theme: Light")?;
+        assert!(
+            shader_transitions
+                .lock()
+                .map_err(|e| e.to_string())?
+                .is_empty(),
+            "No-op System -> Light transition on a Light system must not trigger reveal"
+        );
+
         app.press("Theme: Light")?;
         app.wait_for("Theme: Dark")?;
+        let transitions = shader_transitions
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        assert_eq!(
+            transitions,
+            vec![Duration::from_millis(motion::THEME_REVEAL_MS)],
+            "Light -> Dark must trigger one 480ms circular ShaderTransition on Linux/Windows"
+        );
+        #[cfg(target_os = "macos")]
         assert!(
-            !saw_shader_transition.load(Ordering::Acquire),
-            "Theme toggle must not trigger flashing ShaderTransition"
+            transitions.is_empty(),
+            "macOS uses native Core Animation circular reveal instead of nsh ShaderTransition"
         );
         assert_eq!(Config::load_from_path(&save_path)?.theme, ThemeMode::Dark);
 
@@ -2689,7 +2872,7 @@ mod tests {
                 sink,
                 false,
                 Some(hook),
-                None,
+                ThemeTransitionHooks::default(),
                 SettingsUpdateConfig::default(),
                 SettingsStatusConfig::default(),
             )
@@ -2759,7 +2942,7 @@ mod tests {
                 sink,
                 false,
                 Some(hook),
-                None,
+                ThemeTransitionHooks::default(),
                 SettingsUpdateConfig::default(),
                 SettingsStatusConfig::default(),
             )
@@ -2894,7 +3077,7 @@ mod tests {
                 sink,
                 false,
                 None,
-                None,
+                ThemeTransitionHooks::default(),
                 update_cfg,
                 SettingsStatusConfig::default(),
             )
@@ -2928,6 +3111,16 @@ mod tests {
     }
 
     #[test]
+    fn may_change_resolved_dark_detects_noop_explicit_modes() {
+        assert!(!may_change_resolved_dark(false, ThemeMode::Light));
+        assert!(may_change_resolved_dark(false, ThemeMode::Dark));
+        assert!(may_change_resolved_dark(false, ThemeMode::System));
+        assert!(may_change_resolved_dark(true, ThemeMode::Light));
+        assert!(!may_change_resolved_dark(true, ThemeMode::Dark));
+        assert!(may_change_resolved_dark(true, ThemeMode::System));
+    }
+
+    #[test]
     fn nsh_headless_theme_change_hook_fires_on_toggle_and_reset()
     -> Result<(), Box<dyn std::error::Error>> {
         use nsh_engine::{EngineConfig, Points, Root, Size};
@@ -2958,7 +3151,10 @@ mod tests {
                 sink,
                 false,
                 None,
-                Some(theme_hook),
+                ThemeTransitionHooks {
+                    on_theme_change: Some(theme_hook),
+                    ..ThemeTransitionHooks::default()
+                },
                 SettingsUpdateConfig::default(),
                 SettingsStatusConfig::default(),
             )
@@ -2990,6 +3186,103 @@ mod tests {
         assert_eq!(
             events,
             vec![ThemeMode::Light, ThemeMode::Dark, ThemeMode::System]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_native_snapshot_reveal_runs_capture_then_reveal_on_flip()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-native-reveal")?;
+        let path = dir.file("native-reveal.toml");
+
+        static REVEAL_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static REVEAL_TRACE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        #[component]
+        fn TestNativeRevealSettings() -> impl IntoElement {
+            let path = REVEAL_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            let hooks = ThemeTransitionHooks {
+                on_theme_change: Some(Arc::new(|mode| {
+                    if let Ok(mut guard) = REVEAL_TRACE.lock() {
+                        guard.push(format!("sync:{mode:?}"));
+                    }
+                })),
+                capture_snapshot: Some(Arc::new(|| {
+                    if let Ok(mut guard) = REVEAL_TRACE.lock() {
+                        guard.push("capture".to_owned());
+                    }
+                    true
+                })),
+                reveal_snapshot: Some(Arc::new(|origin, duration_ms| {
+                    if let Ok(mut guard) = REVEAL_TRACE.lock() {
+                        let valid_origin = origin[0] > 0.0 && origin[1] > 0.0;
+                        guard.push(format!("reveal:{valid_origin}:{duration_ms}"));
+                    }
+                })),
+                cancel_snapshot: Some(Arc::new(|| {
+                    if let Ok(mut guard) = REVEAL_TRACE.lock() {
+                        guard.push("cancel".to_owned());
+                    }
+                })),
+            };
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                hooks,
+                SettingsUpdateConfig::default(),
+                SettingsStatusConfig::default(),
+            )
+        }
+
+        if let Ok(mut guard) = REVEAL_PATH.lock() {
+            *guard = Some(path);
+        }
+        if let Ok(mut guard) = REVEAL_TRACE.lock() {
+            guard.clear();
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestNativeRevealSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Theme: System")?;
+
+        // System (Light) -> Light: no-op, skips capture/reveal and syncs directly.
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        // Light -> Dark: captures snapshot before switch, then syncs & reveals after dark() flips.
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        // Reset (Dark -> System Light): captures snapshot, then syncs & reveals.
+        app.press("Reset to defaults")?;
+        app.wait_for("Theme: System")?;
+        drop(app);
+
+        let trace = REVEAL_TRACE.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(
+            trace,
+            vec![
+                "sync:Light",
+                "capture",
+                "sync:Dark",
+                "reveal:true:480",
+                "capture",
+                "sync:System",
+                "reveal:true:480",
+            ]
         );
         Ok(())
     }
@@ -3123,7 +3416,7 @@ mod tests {
                 sink,
                 false,
                 None,
-                None,
+                ThemeTransitionHooks::default(),
                 SettingsUpdateConfig::default(),
                 SettingsStatusConfig {
                     initial_status: initial,

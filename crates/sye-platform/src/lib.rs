@@ -16,6 +16,7 @@ mod overlay;
 mod paths;
 #[cfg(test)]
 mod test_util;
+mod theme_reveal;
 mod tray;
 mod update;
 
@@ -38,6 +39,10 @@ pub use notify::{OsNotifier, format_pre_break_notification};
 pub use overlay::{OVERLAY_SHOWN_SIGNAL, SubprocessOverlayLauncher};
 pub use paths::{AppPaths, session_path_for_config, update_cache_path_for_config};
 pub use sye_core::traits;
+pub use theme_reveal::{
+    cancel_theme_transition_snapshot, capture_theme_transition_snapshot,
+    circular_reveal_max_radius, map_reveal_origin_y, reveal_theme_transition_snapshot,
+};
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
     format_update_menu_label, icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba,

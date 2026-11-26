@@ -137,6 +137,7 @@ pub(crate) mod motion {
 
     pub(crate) const HIGHLIGHT_SWEEP_MS: f32 = 380.0;
     pub(crate) const THEME_COLOR_MS: f32 = 200.0;
+    pub(crate) const THEME_REVEAL_MS: u64 = 480;
     pub(crate) const ROW_ENTER_MS: f32 = 260.0;
     pub(crate) const ROW_ENTER_Y: f32 = 10.0;
     pub(crate) const ROW_STAGGER_STEP_MS: f32 = 28.0;
@@ -149,9 +150,77 @@ pub(crate) mod motion {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) const THEME_REVEAL_WGSL: &str = r"
+struct Uniforms {
+    origin: vec2f,
+    _pad: vec2f,
+}
+
+fn bezier_x(t: f32) -> f32 {
+    let u = 1.0 - t;
+    return 3.0 * u * u * t * 0.4 + 3.0 * u * t * t * 0.2 + t * t * t;
+}
+
+fn bezier_dx(t: f32) -> f32 {
+    let u = 1.0 - t;
+    return 3.0 * u * u * 0.4 + 6.0 * u * t * (0.2 - 0.4) + 3.0 * t * t * (1.0 - 0.2);
+}
+
+fn bezier_y(t: f32) -> f32 {
+    let u = 1.0 - t;
+    return 3.0 * u * t * t * 1.0 + t * t * t;
+}
+
+fn ease_standard(x: f32) -> f32 {
+    var t = clamp(x, 0.0, 1.0);
+    for (var i = 0; i < 6; i = i + 1) {
+        let err = bezier_x(t) - x;
+        let d = max(bezier_dx(t), 1e-4);
+        t = clamp(t - err / d, 0.0, 1.0);
+    }
+    return bezier_y(t);
+}
+
+fn shade(uv: vec2f) -> vec4f {
+    let p = uv * nsh.size;
+    let o = uniforms.origin;
+    let max_dx = max(o.x, nsh.size.x - o.x);
+    let max_dy = max(o.y, nsh.size.y - o.y);
+    let max_r = length(vec2f(max_dx, max_dy));
+    let aa = 1.0 / max(nsh.scale, 1.0);
+    let r = (max_r + aa) * ease_standard(nsh.progress);
+    let dist = length(p - o);
+    let mask = 1.0 - smoothstep(r - aa, r + aa, dist);
+    return mix(sample_from(uv), sample_to(uv), mask);
+}
+";
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) fn theme_reveal_shader() -> Option<nsh_core::shader::Shader> {
+    use std::sync::OnceLock;
+
+    static SHADER: OnceLock<Option<nsh_core::shader::Shader>> = OnceLock::new();
+    SHADER
+        .get_or_init(|| nsh_core::shader::Shader::compile(THEME_REVEAL_WGSL).ok())
+        .clone()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn theme_reveal_wgsl_compiles_cleanly() {
+        let compiled = nsh_core::shader::Shader::compile(THEME_REVEAL_WGSL);
+        assert!(
+            compiled.is_ok(),
+            "THEME_REVEAL_WGSL failed to compile: {:?}",
+            compiled.err()
+        );
+        assert!(theme_reveal_shader().is_some());
+    }
 
     #[test]
     fn theme_mode_cycle_and_appearance_mapping_round_trip() {

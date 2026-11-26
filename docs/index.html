@@ -33,6 +33,7 @@
       --kpi-peach: #FBCBB4;
       --kpi-butter: #FAE1B5;
       --kpi-mist: #D2D7DA;
+      --pill-h: 26px;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -92,18 +93,99 @@
       margin-bottom: 18px;
     }
 
+    .badge-row a:not(.badge) {
+      display: inline-flex;
+      align-items: center;
+      height: var(--pill-h);
+    }
+
     .badge-row img {
-      height: 22px;
+      height: var(--pill-h);
+      width: auto;
       display: block;
+      border-radius: 5px;
     }
 
     .badge {
-      display: inline-block;
-      padding: 3px 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      height: var(--pill-h);
+      padding: 0 11px;
       border-radius: 9999px;
       background: var(--sidebar-bg);
       font-size: 0.78rem;
       font-weight: 600;
+      line-height: 1;
+      white-space: nowrap;
+      text-decoration: none;
+    }
+
+    .download-badge {
+      position: relative;
+      overflow: hidden;
+      background: var(--kpi-butter);
+      border: 1px solid var(--border);
+      transition: transform 0.15s ease, border-color 0.2s ease;
+    }
+
+    .download-badge[hidden] {
+      display: none;
+    }
+
+    .download-badge:hover {
+      border-color: var(--accent);
+      transform: translateY(-1px);
+    }
+
+    .download-badge-num {
+      font-variant-numeric: tabular-nums;
+      font-weight: 700;
+    }
+
+    .download-badge-label {
+      color: var(--text-secondary);
+    }
+
+    .download-badge.is-loading::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(105deg, transparent 25%, rgba(239, 143, 99, 0.22) 50%, transparent 75%);
+      transform: translateX(-110%);
+      animation: badge-shimmer 1.35s ease-in-out infinite;
+      pointer-events: none;
+    }
+
+    .download-badge.is-loading svg {
+      animation: badge-breathe 1.35s ease-in-out infinite;
+    }
+
+    .download-badge.is-settled {
+      animation: badge-settle 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @keyframes badge-shimmer {
+      to { transform: translateX(110%); }
+    }
+
+    @keyframes badge-breathe {
+      0%, 100% { opacity: 0.45; transform: translateY(0); }
+      50% { opacity: 1; transform: translateY(1px); }
+    }
+
+    @keyframes badge-settle {
+      0% { transform: scale(1); border-color: var(--accent); }
+      45% { transform: scale(1.04); border-color: var(--accent); }
+      100% { transform: scale(1); border-color: var(--border); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .download-badge.is-loading::after,
+      .download-badge.is-loading svg,
+      .download-badge.is-settled {
+        animation: none;
+      }
     }
 
     h1 {
@@ -129,7 +211,9 @@
     }
 
     .lang-switch {
-      display: flex;
+      display: inline-flex;
+      align-items: center;
+      height: var(--pill-h);
       padding: 2px;
       border-radius: 9999px;
       background: var(--bg-muted);
@@ -137,14 +221,19 @@
     }
 
     .lang-switch button {
-      padding: 2px 10px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      padding: 0 9px;
       border: 0;
       border-radius: 9999px;
       background: none;
       color: var(--text-secondary);
       font: inherit;
-      font-size: 0.8rem;
+      font-size: 0.75rem;
       font-weight: 700;
+      line-height: 1;
       cursor: pointer;
     }
 
@@ -209,6 +298,19 @@
       display: block;
       width: 100%;
       height: auto;
+    }
+
+    .media-caption {
+      margin: 10px 0 0;
+      font-size: 0.85rem;
+      color: var(--text-secondary);
+    }
+
+    .media-caption a {
+      color: var(--text-primary);
+      font-weight: 600;
+      text-decoration-color: var(--accent);
+      text-underline-offset: 3px;
     }
 
     .grid {
@@ -315,10 +417,17 @@
     <section class="hero">
       <div class="badge-row">
         <a href="https://github.com/tunglt1810/safe-your-eyes/actions/workflows/ci.yml">
-          <img src="https://github.com/tunglt1810/safe-your-eyes/actions/workflows/ci.yml/badge.svg" alt="CI Status" height="20">
+          <img src="https://github.com/tunglt1810/safe-your-eyes/actions/workflows/ci.yml/badge.svg" alt="CI Status" height="26">
         </a>
         <a href="https://github.com/tunglt1810/safe-your-eyes/releases">
-          <img src="https://img.shields.io/badge/VirusTotal-SHA256%20Scanned-394EFF?logo=virustotal&logoColor=white" alt="VirusTotal SHA256 Scanned" height="20">
+          <img src="https://img.shields.io/badge/VirusTotal-SHA256%20Scanned-394EFF?logo=virustotal&logoColor=white" alt="VirusTotal SHA256 Scanned" height="26">
+        </a>
+        <a class="badge download-badge" id="download-count" href="https://github.com/tunglt1810/safe-your-eyes/releases" hidden>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>
+          </svg>
+          <span class="download-badge-num" id="download-count-num">0</span>
+          <span class="download-badge-label" data-i18n="downloads">downloads</span>
         </a>
         <span class="badge">Windows · macOS · Linux (x86_64 &amp; ARM64)</span>
         <span class="badge">GPL-2.0-only</span>
@@ -350,6 +459,9 @@
       <figure class="media-frame">
         <video src="assets/storyline.mp4" poster="assets/og-image.jpg" width="900" height="900" muted loop playsinline controls preload="metadata" aria-label="Safe Your Eyes workday comic"></video>
       </figure>
+      <p class="media-caption" data-i18n="comicCredit">
+        Charts in this comic are drawn with <a href="https://github.com/tunglt1810/tinycharts">tinycharts</a>.
+      </p>
     </section>
 
     <section class="grid" aria-label="Highlights">
@@ -424,11 +536,13 @@
   </main>
   <script>
     const VI = {
+      downloads: 'lượt tải',
       lead: 'AI code giùm, còn bạn thì quên chớp mắt. App này thỉnh thoảng vỗ vai bắt bạn nhắm mắt một chút, rồi trả bạn về với deadline.',
       star: 'Tặng sao trên GitHub',
       latest: 'Bản mới nhất:',
       download: 'Tải về',
       downloadFor: 'Tải cho',
+      comicCredit: 'Biểu đồ trong truyện được vẽ bằng <a href="https://github.com/tunglt1810/tinycharts">tinycharts</a>.',
       c1h: 'Nghỉ xíu, không drama',
       c1p: '15 phút nghỉ 15 giây, 75 phút nghỉ hẳn một phút. Có báo trước, lại khóa phím 2 giây để ngón tay khỏi bấm bỏ qua theo quán tính.',
       c2h: 'Không nhắc sai lúc',
@@ -480,7 +594,8 @@
     }));
     setLang(detectLang());
 
-    if (matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!reducedMotion) {
       const observer = new IntersectionObserver((entries) => {
         for (const { target, isIntersecting } of entries) {
           if (isIntersecting) target.play().catch(() => {});
@@ -489,6 +604,99 @@
       });
       document.querySelectorAll('.media-frame video').forEach((v) => observer.observe(v));
     }
+
+    const RELEASE_CACHE_KEY = 'sye_release_stats_v1';
+    const RELEASE_CACHE_TTL = 4 * 60 * 60 * 1000;
+    const loadReleaseStats = async () => {
+      const dlBadge = document.getElementById('download-count');
+      const dlNum = document.getElementById('download-count-num');
+      const renderLatest = (tag, url) => {
+        if (!tag || !url) return;
+        const link = document.getElementById('version-link');
+        link.textContent = tag;
+        link.href = url;
+        document.getElementById('version').hidden = false;
+      };
+
+      let cached = null;
+      try {
+        const parsed = JSON.parse(localStorage.getItem(RELEASE_CACHE_KEY) || 'null');
+        if (parsed && typeof parsed.total === 'number' && typeof parsed.fetchedAt === 'number') {
+          cached = parsed;
+        }
+      } catch {}
+
+      let displayed = 0;
+      let rafId = null;
+      const animateTo = (target, duration, onDone) => {
+        if (rafId) cancelAnimationFrame(rafId);
+        if (reducedMotion || duration <= 0 || displayed === target) {
+          displayed = target;
+          dlNum.textContent = target.toLocaleString('en');
+          if (onDone) onDone();
+          return;
+        }
+        const from = displayed;
+        const start = performance.now();
+        const step = (now) => {
+          const p = Math.min(1, (now - start) / duration);
+          displayed = Math.round(from + (target - from) * (1 - Math.pow(1 - p, 3)));
+          dlNum.textContent = displayed.toLocaleString('en');
+          if (p < 1) rafId = requestAnimationFrame(step);
+          else if (onDone) onDone();
+        };
+        rafId = requestAnimationFrame(step);
+      };
+
+      if (cached) {
+        displayed = cached.total;
+        dlNum.textContent = cached.total.toLocaleString('en');
+        dlBadge.hidden = false;
+        renderLatest(cached.latestTag, cached.latestUrl);
+        if (Date.now() - cached.fetchedAt < RELEASE_CACHE_TTL) return;
+      }
+
+      dlBadge.hidden = false;
+      dlBadge.classList.add('is-loading');
+      try {
+        let url = 'https://api.github.com/repos/tunglt1810/safe-your-eyes/releases?per_page=100';
+        let total = 0;
+        let latestTag = null;
+        let latestUrl = null;
+        while (url) {
+          const res = await fetch(url);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const releases = await res.json();
+          for (const rel of releases) {
+            if (rel.draft || rel.prerelease) continue;
+            if (!latestTag) {
+              latestTag = rel.tag_name;
+              latestUrl = rel.html_url;
+              renderLatest(latestTag, latestUrl);
+            }
+            for (const asset of rel.assets || []) {
+              // The in-app updater fetches SHA256SUMS.txt before every binary, so skip it to avoid double-counting.
+              if (asset.name !== 'SHA256SUMS.txt') total += asset.download_count || 0;
+            }
+          }
+          const linkHeader = res.headers.get('Link') || '';
+          const match = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+          url = match ? match[1] : null;
+          if (url && (!cached || total > displayed)) animateTo(total, 450);
+        }
+        try {
+          localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ total, latestTag, latestUrl, fetchedAt: Date.now() }));
+        } catch {}
+        animateTo(total, 650, () => {
+          dlBadge.classList.remove('is-loading');
+          dlBadge.classList.add('is-settled');
+        });
+      } catch {
+        dlBadge.classList.remove('is-loading');
+        if (!cached) dlBadge.hidden = true;
+      }
+    };
+
     (async () => {
       const btn = document.getElementById('download');
       fetch('https://api.github.com/repos/tunglt1810/safe-your-eyes')
@@ -499,15 +707,7 @@
           count.hidden = false;
         })
         .catch(() => {});
-      fetch('https://api.github.com/repos/tunglt1810/safe-your-eyes/releases/latest')
-        .then((r) => r.ok ? r.json() : Promise.reject())
-        .then((release) => {
-          const link = document.getElementById('version-link');
-          link.textContent = release.tag_name;
-          link.href = release.html_url;
-          document.getElementById('version').hidden = false;
-        })
-        .catch(() => {});
+      loadReleaseStats();
       const ua = navigator.userAgent;
       const os = /Windows/.test(ua) ? 'windows'
         : /Android|iPhone|iPad/.test(ua) ? null

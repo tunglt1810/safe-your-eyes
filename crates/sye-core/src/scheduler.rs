@@ -1967,7 +1967,6 @@ mod tests {
         let mut sched = Scheduler::new(cfg, &clock, 1);
         let _ = sched.handle_event(SchedulerEvent::Start);
 
-        // Ignored while Waiting.
         assert!(
             sched
                 .handle_event(SchedulerEvent::OverlayLaunching)
@@ -1982,12 +1981,10 @@ mod tests {
                 .is_empty()
         );
 
-        // Still alive during duration (4s) + startup grace (10s).
         clock.advance_secs(13);
         assert!(sched.tick().is_empty());
         assert_eq!(sched.state(), SchedulerState::Break);
 
-        // Recovers at t=14s if OverlayShown never arrives.
         clock.advance_secs(1);
         let done = sched.tick();
         assert_eq!(sched.state(), SchedulerState::Waiting);

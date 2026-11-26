@@ -181,23 +181,24 @@ impl Drop for SubprocessOverlayLauncher {
 }
 
 fn read_overlay_stdout<R: Read>(reader: R, tx: &mpsc::Sender<OverlayPipeEvent>) {
-    let max_total = u64::try_from(MAX_IPC_LINE_BYTES)
+    let line_cap = u64::try_from(MAX_IPC_LINE_BYTES)
         .unwrap_or(u64::MAX)
-        .saturating_mul(2)
         .saturating_add(1);
-    let mut buf_reader = BufReader::new(reader.take(max_total));
+    let mut buf_reader = BufReader::new(reader);
     let mut buf = Vec::with_capacity(256);
     let mut sent_shown = false;
+    let mut discarding = false;
 
     loop {
         buf.clear();
-        let Ok(read) = buf_reader.read_until(b'\n', &mut buf) else {
+        let Ok(read) = (&mut buf_reader).take(line_cap).read_until(b'\n', &mut buf) else {
             break;
         };
         if read == 0 {
             break;
         }
-        if buf.len() > MAX_IPC_LINE_BYTES {
+        if discarding || buf.len() > MAX_IPC_LINE_BYTES {
+            discarding = buf.last() != Some(&b'\n');
             continue;
         }
         let text = String::from_utf8_lossy(&buf);
@@ -425,6 +426,25 @@ mod tests {
         assert!(matches!(
             events.get(1),
             Some(OverlayPipeEvent::Outcome(OverlayOutcome::Completed))
+        ));
+    }
+
+    #[test]
+    fn read_overlay_stdout_keeps_reading_after_many_stray_lines() {
+        let mut input = Vec::new();
+        while input.len() <= MAX_IPC_LINE_BYTES * 4 {
+            input.extend_from_slice(b"debug: frame rendered\n");
+        }
+        input.extend_from_slice(b"{\"kind\":\"completed\"}\n");
+
+        let (tx, rx) = mpsc::channel();
+        read_overlay_stdout(input.as_slice(), &tx);
+        drop(tx);
+
+        let events: Vec<OverlayPipeEvent> = rx.into_iter().collect();
+        assert!(matches!(
+            events.as_slice(),
+            [OverlayPipeEvent::Outcome(OverlayOutcome::Completed)]
         ));
     }
 

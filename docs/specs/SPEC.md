@@ -13,7 +13,7 @@ The Cargo workspace contains four crates and compiles into one binary named `saf
 
 - `sye-core`: Pure Rust library with `BreakQueue`, `Scheduler`, automatic policies, `Config`, `SessionState`, a PCM WAV chime synthesizer, and the local IPC protocol.
 - `sye-platform`: Operating system adapters for the system tray, idle time, `DoNotDisturb`, desktop notifications, audio playback, local IPC, and autostart.
-- `sye-ui`: On-demand native graphical interface built with Native Shell (`longbridge/nsh` v0.6.1) for the break overlay and the Settings window.
+- `sye-ui`: On-demand native graphical interface built with Native Shell (`longbridge/nsh` v0.7.1) for the break overlay and the Settings window.
 - `sye-cli`: Single binary entry point that runs the background daemon, CLI commands, and internal UI subprocesses.
 
 ### 2.1 Process and Memory Design

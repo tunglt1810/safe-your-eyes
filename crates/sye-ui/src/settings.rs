@@ -332,6 +332,7 @@ impl WindowList {
 }
 
 pub type AutostartChangeCallback = Box<dyn Fn(bool) + Send + Sync>;
+pub type ThemeChangeCallback = Arc<dyn Fn(ThemeMode) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyUpdateOutcome {
@@ -357,6 +358,7 @@ struct SettingsLaunch {
     vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     on_autostart_change: Option<AutostartHook>,
+    on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
 }
 
@@ -1296,6 +1298,7 @@ pub(crate) fn build_settings_view(
         outcome_sink,
         quit_on_finish,
         None,
+        None,
         SettingsUpdateConfig::default(),
     )
 }
@@ -1305,6 +1308,7 @@ pub(crate) fn build_settings_view_with_hooks(
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
     on_autostart_change: Option<AutostartHook>,
+    on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
 ) -> impl IntoElement {
     if quit_on_finish {
@@ -1509,6 +1513,9 @@ pub(crate) fn build_settings_view_with_hooks(
             })
         }));
 
+    let toggle_theme_hook = on_theme_change.as_ref().map(Arc::clone);
+    let reset_theme_hook = on_theme_change;
+
     let page_header = view()
         .flex_shrink_0()
         .gap_3()
@@ -1543,6 +1550,9 @@ pub(crate) fn build_settings_view_with_hooks(
                         }
                         appearance.set(next_appearance);
                         set_color_scheme(next_appearance);
+                        if let Some(cb) = &toggle_theme_hook {
+                            cb(next_mode);
+                        }
                     },
                 )),
         )
@@ -1660,9 +1670,13 @@ pub(crate) fn build_settings_view_with_hooks(
                 if saved && let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
                     cb(next);
                 }
-                let default_appearance = appearance_for_theme_mode(ThemeMode::default());
+                let default_mode = ThemeMode::default();
+                let default_appearance = appearance_for_theme_mode(default_mode);
                 appearance.set(default_appearance);
                 set_color_scheme(default_appearance);
+                if let Some(cb) = &reset_theme_hook {
+                    cb(default_mode);
+                }
             },
         ));
 
@@ -1716,6 +1730,7 @@ fn SettingsRoot() -> impl IntoElement {
             launch.outcome_sink,
             true,
             launch.on_autostart_change,
+            launch.on_theme_change,
             launch.update_config,
         )
         .into_element(),
@@ -1742,6 +1757,7 @@ pub fn run_settings_with_autostart(
         config_path,
         system_autostart,
         on_autostart_change,
+        None,
         SettingsUpdateConfig::default(),
     )
 }
@@ -1750,6 +1766,7 @@ pub fn run_settings_with_hooks(
     config_path: PathBuf,
     system_autostart: Option<bool>,
     on_autostart_change: Option<AutostartChangeCallback>,
+    on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
 ) -> Result<SettingsOutcome, UiError> {
     let vm = load_settings_vm(config_path, system_autostart);
@@ -1766,6 +1783,7 @@ pub fn run_settings_with_hooks(
         vm,
         outcome_sink: Arc::clone(&outcome_sink),
         on_autostart_change,
+        on_theme_change,
         update_config,
     });
     drop(guard);
@@ -1782,6 +1800,7 @@ pub fn run_settings_with_hooks(
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.settings".to_owned(),
                 size: (920, 680),
+                appearance: initial_appearance,
                 ..Default::default()
             },
         );
@@ -2550,6 +2569,7 @@ mod tests {
                 sink,
                 false,
                 Some(hook),
+                None,
                 SettingsUpdateConfig::default(),
             )
         }
@@ -2618,6 +2638,7 @@ mod tests {
                 sink,
                 false,
                 Some(hook),
+                None,
                 SettingsUpdateConfig::default(),
             )
         }
@@ -2746,7 +2767,7 @@ mod tests {
                 })),
                 on_apply_update: Some(Arc::new(|_| Ok(ApplyUpdateOutcome::UpdatedStandalone))),
             };
-            build_settings_view_with_hooks(vm, sink, false, None, update_cfg)
+            build_settings_view_with_hooks(vm, sink, false, None, None, update_cfg)
         }
 
         let mut app = Headless::start(EngineConfig {
@@ -2773,6 +2794,72 @@ mod tests {
 
         let reloaded = Config::load_from_path(&config_path)?;
         assert!(!reloaded.check_for_updates);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_theme_change_hook_fires_on_toggle_and_reset()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-theme-hook")?;
+        let path = dir.file("theme-hook.toml");
+
+        static THEME_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static THEME_EVENTS: Mutex<Vec<ThemeMode>> = Mutex::new(Vec::new());
+
+        #[component]
+        fn TestThemeHookSettings() -> impl IntoElement {
+            let path = THEME_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            let theme_hook: ThemeChangeCallback = Arc::new(|mode| {
+                if let Ok(mut guard) = THEME_EVENTS.lock() {
+                    guard.push(mode);
+                }
+            });
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                Some(theme_hook),
+                SettingsUpdateConfig::default(),
+            )
+        }
+
+        if let Ok(mut guard) = THEME_PATH.lock() {
+            *guard = Some(path);
+        }
+        if let Ok(mut guard) = THEME_EVENTS.lock() {
+            guard.clear();
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestThemeHookSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Theme: System")?;
+
+        app.press("Theme: System")?;
+        app.wait_for("Theme: Light")?;
+        app.press("Theme: Light")?;
+        app.wait_for("Theme: Dark")?;
+        app.press("Reset to defaults")?;
+        app.wait_for("Theme: System")?;
+        drop(app);
+
+        let events = THEME_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        assert_eq!(
+            events,
+            vec![ThemeMode::Light, ThemeMode::Dark, ThemeMode::System]
+        );
         Ok(())
     }
 }

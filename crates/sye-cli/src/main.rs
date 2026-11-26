@@ -217,6 +217,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         config_file.clone(),
         initial_system_autostart,
         Some(on_autostart_change),
+        Some(Arc::new(sye_platform::sync_own_windows_appearance)),
         update_config,
     ) {
         Ok(_) => ExitCode::SUCCESS,

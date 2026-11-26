@@ -15,6 +15,7 @@ use sye_core::{
 const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CHECKSUM_BYTES: u64 = 64 * 1024;
+const MAX_API_BYTES: u64 = 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 100 * 1024 * 1024;
 
 #[must_use]
@@ -162,7 +163,7 @@ fn fetch_latest_version_via_api(user_agent: &str) -> Result<String, PlatformErro
     let body = response
         .body_mut()
         .with_config()
-        .limit(MAX_CHECKSUM_BYTES)
+        .limit(MAX_API_BYTES)
         .read_to_string()
         .map_err(|err| PlatformError::Io(format!("failed reading GitHub API body: {err}")))?;
 
@@ -331,8 +332,12 @@ pub fn cleanup_current_stale_old_executable() {
 
 pub fn replace_executable(current_exe: &Path, new_bytes: &[u8]) -> Result<(), PlatformError> {
     let staging = staging_executable_path(current_exe);
-    fs::write(&staging, new_bytes)
-        .map_err(|err| PlatformError::Io(format!("failed to write staged binary: {err}")))?;
+    if let Err(err) = fs::write(&staging, new_bytes) {
+        let _ = fs::remove_file(&staging);
+        return Err(PlatformError::Io(format!(
+            "failed to write staged binary: {err}"
+        )));
+    }
 
     #[cfg(unix)]
     {

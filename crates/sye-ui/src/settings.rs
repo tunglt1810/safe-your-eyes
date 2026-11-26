@@ -864,6 +864,7 @@ enum UpdateWorkerResult {
 struct UpdateUiState {
     available: Signal<Option<UpdateInfo>>,
     busy: Signal<bool>,
+    applying: Signal<bool>,
     status_text: Signal<Option<String>>,
     is_error: Signal<bool>,
     strategy: UpdateStrategy,
@@ -883,6 +884,7 @@ fn poll_update_worker(
             state.is_error.set(false);
             state.available.set(Some(info));
             state.busy.set(false);
+            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Check(Ok(None))) => {
             state.available.set(None);
@@ -892,6 +894,7 @@ fn poll_update_worker(
             )));
             state.is_error.set(false);
             state.busy.set(false);
+            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Check(Err(err))) => {
             state
@@ -899,6 +902,7 @@ fn poll_update_worker(
                 .set(Some(format!("Update check failed: {err}")));
             state.is_error.set(true);
             state.busy.set(false);
+            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::RestartingDaemon))) => {
             state.status_text.set(Some(
@@ -907,6 +911,7 @@ fn poll_update_worker(
             state.is_error.set(false);
             state.available.set(None);
             state.busy.set(false);
+            state.applying.set(false);
             if quit_on_restart {
                 quit();
             }
@@ -919,6 +924,7 @@ fn poll_update_worker(
             state.is_error.set(false);
             state.available.set(None);
             state.busy.set(false);
+            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Err(err))) => {
             state.status_text.set(Some(format!(
@@ -926,6 +932,7 @@ fn poll_update_worker(
             )));
             state.is_error.set(true);
             state.busy.set(false);
+            state.applying.set(false);
         }
         Err(mpsc::TryRecvError::Empty) => {
             drop(set_timeout(Duration::from_millis(25), move || {
@@ -933,7 +940,12 @@ fn poll_update_worker(
             }));
         }
         Err(mpsc::TryRecvError::Disconnected) => {
+            state
+                .status_text
+                .set(Some("Update task stopped unexpectedly.".to_owned()));
+            state.is_error.set(true);
             state.busy.set(false);
+            state.applying.set(false);
         }
     }
 }
@@ -1029,7 +1041,7 @@ fn about_section(
                                 let apply = apply_cb.clone();
                                 primary_button(
                                     move || {
-                                        if update_ui.busy.get() {
+                                        if update_ui.applying.get() {
                                             "Updating..."
                                         } else {
                                             "Update & Restart"
@@ -1046,6 +1058,7 @@ fn about_section(
                                             return;
                                         };
                                         update_ui.busy.set(true);
+                                        update_ui.applying.set(true);
                                         update_ui.is_error.set(false);
                                         update_ui.status_text.set(Some(format!(
                                             "Downloading and verifying v{}...",
@@ -1079,7 +1092,7 @@ fn about_section(
                         ))
                         .child(secondary_button(
                             move || {
-                                if update_ui.busy.get() {
+                                if update_ui.busy.get() && !update_ui.applying.get() {
                                     "Checking..."
                                 } else {
                                     "Check for Updates"
@@ -1234,6 +1247,7 @@ pub(crate) fn build_settings_view_with_hooks(
     let update_ui = UpdateUiState {
         available: signal(update_config.initial_update),
         busy: signal(false),
+        applying: signal(false),
         status_text: signal(None),
         is_error: signal(false),
         strategy: update_config

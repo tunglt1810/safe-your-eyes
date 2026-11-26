@@ -22,6 +22,8 @@ use sye_platform::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+// The macOS and Windows banners have no auto-hide, so the daemon closes update notices itself.
+const UPDATE_NOTICE_DURATION: Duration = Duration::from_secs(8);
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +50,7 @@ struct DaemonHost<'a> {
     update_in_progress: bool,
     update_apply_rx: Option<mpsc::Receiver<Result<(), String>>>,
     headless_break_deadline: Option<Instant>,
+    update_notice_dismiss_at: Option<Instant>,
 }
 
 impl DaemonHost<'_> {
@@ -126,6 +129,24 @@ impl DaemonHost<'_> {
         }
     }
 
+    fn show_update_notice(&mut self, summary: &str, body: &str) {
+        if self.notifier.show_notice(summary, body).is_ok() {
+            self.update_notice_dismiss_at = Some(Instant::now() + UPDATE_NOTICE_DURATION);
+        }
+    }
+
+    fn expire_update_notice(&mut self, state: SchedulerState) {
+        let Some(deadline) = self.update_notice_dismiss_at else {
+            return;
+        };
+        if state == SchedulerState::PreBreak {
+            self.update_notice_dismiss_at = None;
+        } else if !self.update_in_progress && Instant::now() >= deadline {
+            self.update_notice_dismiss_at = None;
+            let _ = self.notifier.dismiss();
+        }
+    }
+
     fn reload_cached_update(&mut self) {
         let (cache, _) = UpdateCacheState::load_or_default(self.update_cache_file);
         self.available_update = cache.available_update(CURRENT_VERSION);
@@ -144,7 +165,7 @@ impl DaemonHost<'_> {
             UpdateStrategy::SelfUpdate { asset_name } => {
                 self.update_in_progress = true;
                 self.sync_tray_update();
-                let _ = self.notifier.show_notice(
+                self.show_update_notice(
                     "Safe Your Eyes — Updating",
                     &format!("Downloading and verifying v{}...", info.latest_version),
                 );
@@ -169,7 +190,7 @@ impl DaemonHost<'_> {
                 }
             }
             UpdateStrategy::HomebrewCask => {
-                let _ = self.notifier.show_notice(
+                self.show_update_notice(
                     &format!("Safe Your Eyes v{} available", info.latest_version),
                     &format!("Run: {HOMEBREW_UPGRADE_COMMAND}"),
                 );
@@ -200,7 +221,7 @@ impl DaemonHost<'_> {
                 self.update_in_progress = false;
                 self.sync_tray_update();
                 eprintln!("Warning: self-update failed: {err}");
-                let _ = self.notifier.show_notice(
+                self.show_update_notice(
                     "Safe Your Eyes — Update failed",
                     "Opening the download page instead.",
                 );
@@ -408,6 +429,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         update_in_progress: false,
         update_apply_rx: None,
         headless_break_deadline: None,
+        update_notice_dismiss_at: None,
     };
     host.sync_tray_update();
 
@@ -512,7 +534,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 }
             }
 
+            host.expire_update_notice(scheduler.state());
             if host.poll_update_apply() {
+                host.execute(scheduler.handle_event(SchedulerEvent::Quit));
                 restart_after_exit = true;
                 break;
             }

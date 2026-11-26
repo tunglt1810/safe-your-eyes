@@ -153,14 +153,10 @@ impl DaemonHost<'_> {
         std::mem::take(&mut self.settings_exited)
     }
 
-    fn close_settings(&mut self, saved_autostart: bool) {
+    fn close_settings(&mut self) {
         if let Some(mut child) = self.settings_child.take() {
             let _ = child.kill();
             let _ = child.wait();
-            if !self.headless {
-                let _ =
-                    sye_platform::sync_system_autostart(saved_autostart, Some(self.config_file));
-            }
         }
     }
 
@@ -354,7 +350,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     }
 
     host.close_overlay();
-    host.close_settings(scheduler.config().autostart);
+    host.close_settings();
     drop(host);
     drop(server);
     if let Some(event_loop) = app_loop {

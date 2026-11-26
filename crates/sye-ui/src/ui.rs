@@ -200,12 +200,18 @@ pub(crate) fn section_divider() -> impl IntoElement {
         .ease_bezier(bx1, by1, bx2, by2)
 }
 
-pub(crate) fn primary_button(
+pub(crate) fn primary_button_with_disabled(
     label: impl IntoReactive<SharedString>,
+    disabled: impl Fn() -> bool + Copy + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
     button()
-        .on_press(on_press)
+        .disabled(disabled)
+        .on_press(move || {
+            if !disabled() {
+                on_press();
+            }
+        })
         .h(px(36.0))
         .px_4()
         .items_center()
@@ -217,12 +223,23 @@ pub(crate) fn primary_button(
         .ease_out()
         .hover(|s| s.opacity(0.92))
         .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
-        .disabled_style(|s| s.opacity(0.45))
+        .disabled_style(|s| {
+            s.bg(colors::BACKGROUND_MUTED)
+                .border_1()
+                .border_color(colors::BORDER)
+                .opacity(0.55)
+        })
         .child(
             text(label)
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::ON_ACCENT),
+                .text_color(move || {
+                    if disabled() {
+                        colors::TEXT_SECONDARY
+                    } else {
+                        colors::ON_ACCENT
+                    }
+                }),
         )
 }
 
@@ -251,31 +268,6 @@ pub(crate) fn secondary_button(
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::TEXT_PRIMARY),
-        )
-}
-
-pub(crate) fn ghost_button(
-    label: impl IntoReactive<SharedString>,
-    on_press: impl Fn() + 'static,
-) -> impl IntoElement {
-    button()
-        .on_press(on_press)
-        .h(px(36.0))
-        .px_3()
-        .items_center()
-        .justify_center()
-        .rounded(radii::PILL)
-        .transition()
-        .duration(motion::CONTROL_MS)
-        .ease_out()
-        .hover(|s| s.bg(colors::OVERLAY_HOVER))
-        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.84))
-        .disabled_style(|s| s.opacity(0.45))
-        .child(
-            text(label)
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_SECONDARY),
         )
 }
 

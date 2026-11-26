@@ -1,12 +1,11 @@
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
-use nsh_core::element::desktop::{current_window, on_app_quit, quit, title_bar};
+use nsh_core::element::desktop::{current_window, title_bar};
 use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
 
@@ -17,10 +16,10 @@ use crate::theme::{
 };
 use crate::ui::{
     KpiTone, app_icon, cozy_input, cozy_input_with_disabled, cozy_switch,
-    cozy_switch_with_disabled, destructive_button, ghost_button, page_heading, pastel_kpi_card,
-    primary_button, secondary_button, section_divider, section_header, sidebar_nav_indicator,
-    sidebar_nav_item, stagger_item, status_banner, support_link, support_qr_card,
-    theme_toggle_button,
+    cozy_switch_with_disabled, destructive_button, page_heading, pastel_kpi_card,
+    primary_button_with_disabled, secondary_button, section_divider, section_header,
+    sidebar_nav_indicator, sidebar_nav_item, stagger_item, status_banner, support_link,
+    support_qr_card, theme_toggle_button,
 };
 
 #[cfg(target_os = "linux")]
@@ -207,6 +206,17 @@ impl SettingsViewModel {
         self.draft_long_exercise.clear();
         self.draft_skip_window.clear();
         self.draft_take_window.clear();
+    }
+
+    #[must_use]
+    pub fn is_modified_from_defaults(&self) -> bool {
+        self.config != Config::reset_to_default()
+    }
+
+    pub fn autosave(&mut self) -> Result<(), String> {
+        self.save()?;
+        self.load_warning = None;
+        Ok(())
     }
 
     pub fn save(&mut self) -> Result<SettingsOutcome, String> {
@@ -400,11 +410,41 @@ fn number_field_row_with_disabled(
         )
 }
 
+fn update_and_autosave(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
+    mutate: impl FnOnce(&mut SettingsViewModel),
+) {
+    let mut saved = false;
+    vm.update(|m| {
+        mutate(m);
+        if m.autosave().is_ok() {
+            saved = true;
+        }
+    });
+    if saved {
+        crate::store_outcome(outcome_sink, SettingsOutcome::Saved);
+    }
+}
+
 fn timing_section(
     vm: Signal<SettingsViewModel>,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     on_autostart_change: Option<AutostartHook>,
     animate: bool,
 ) -> impl IntoElement {
+    let s1 = Arc::clone(&outcome_sink);
+    let s2 = Arc::clone(&outcome_sink);
+    let s3 = Arc::clone(&outcome_sink);
+    let s4 = Arc::clone(&outcome_sink);
+    let s5 = Arc::clone(&outcome_sink);
+    let s6 = Arc::clone(&outcome_sink);
+    let s7 = Arc::clone(&outcome_sink);
+    let s8 = Arc::clone(&outcome_sink);
+    let s9 = Arc::clone(&outcome_sink);
+    let s10 = Arc::clone(&outcome_sink);
+    let s11 = outcome_sink;
+
     view()
         .gap_5()
         .child(
@@ -425,7 +465,7 @@ fn timing_section(
                         "Short break interval",
                         "secs",
                         move || vm.with(|m| m.config.short_break_interval_secs),
-                        move |v| vm.update(|m| m.config.short_break_interval_secs = v),
+                        move |v| update_and_autosave(vm, &s1, |m| m.config.short_break_interval_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -435,7 +475,7 @@ fn timing_section(
                         "Short break duration",
                         "secs",
                         move || vm.with(|m| m.config.short_break_duration_secs),
-                        move |v| vm.update(|m| m.config.short_break_duration_secs = v),
+                        move |v| update_and_autosave(vm, &s2, |m| m.config.short_break_duration_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -445,7 +485,7 @@ fn timing_section(
                         "Long break interval",
                         "secs",
                         move || vm.with(|m| m.config.long_break_interval_secs),
-                        move |v| vm.update(|m| m.config.long_break_interval_secs = v),
+                        move |v| update_and_autosave(vm, &s3, |m| m.config.long_break_interval_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -455,7 +495,7 @@ fn timing_section(
                         "Long break duration",
                         "secs",
                         move || vm.with(|m| m.config.long_break_duration_secs),
-                        move |v| vm.update(|m| m.config.long_break_duration_secs = v),
+                        move |v| update_and_autosave(vm, &s4, |m| m.config.long_break_duration_secs = v),
                     ),
                 )),
         )
@@ -478,7 +518,7 @@ fn timing_section(
                         "Pre-break warning",
                         "secs",
                         move || vm.with(|m| m.config.pre_break_warning_secs),
-                        move |v| vm.update(|m| m.config.pre_break_warning_secs = v),
+                        move |v| update_and_autosave(vm, &s5, |m| m.config.pre_break_warning_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -488,7 +528,7 @@ fn timing_section(
                         "Fade-in duration",
                         "ms",
                         move || vm.with(|m| m.config.fade_in_ms),
-                        move |v| vm.update(|m| m.config.fade_in_ms = v),
+                        move |v| update_and_autosave(vm, &s6, |m| m.config.fade_in_ms = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -498,7 +538,7 @@ fn timing_section(
                         "Shortcut unlock delay",
                         "secs",
                         move || vm.with(|m| m.config.shortcut_disable_secs),
-                        move |v| vm.update(|m| m.config.shortcut_disable_secs = v),
+                        move |v| update_and_autosave(vm, &s7, |m| m.config.shortcut_disable_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -508,7 +548,7 @@ fn timing_section(
                         "Postpone duration",
                         "secs",
                         move || vm.with(|m| m.config.postpone_duration_secs),
-                        move |v| vm.update(|m| m.config.postpone_duration_secs = v),
+                        move |v| update_and_autosave(vm, &s8, |m| m.config.postpone_duration_secs = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -517,7 +557,7 @@ fn timing_section(
                     cozy_switch(
                         "Randomize exercise order",
                         move || vm.with(|m| m.config.random_order),
-                        move |v| vm.update(|m| m.config.random_order = v),
+                        move |v| update_and_autosave(vm, &s9, |m| m.config.random_order = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -526,7 +566,7 @@ fn timing_section(
                     cozy_switch(
                         "Persist session across restarts",
                         move || vm.with(|m| m.config.persist_state),
-                        move |v| vm.update(|m| m.config.persist_state = v),
+                        move |v| update_and_autosave(vm, &s10, |m| m.config.persist_state = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -536,7 +576,7 @@ fn timing_section(
                         "Launch at login (startup)",
                         move || vm.with(|m| m.config.autostart),
                         move |v| {
-                            vm.update(|m| m.config.autostart = v);
+                            update_and_autosave(vm, &s11, |m| m.config.autostart = v);
                             if let Some(cb) = &on_autostart_change {
                                 cb(v);
                             }
@@ -546,7 +586,23 @@ fn timing_section(
         )
 }
 
-fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoElement {
+fn policies_section(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    animate: bool,
+) -> impl IntoElement {
+    let s1 = Arc::clone(&outcome_sink);
+    let s2 = Arc::clone(&outcome_sink);
+    let s3 = Arc::clone(&outcome_sink);
+    let s4 = Arc::clone(&outcome_sink);
+    let s5 = Arc::clone(&outcome_sink);
+    let s6 = Arc::clone(&outcome_sink);
+    let s7 = Arc::clone(&outcome_sink);
+    let s8 = Arc::clone(&outcome_sink);
+    let s9 = Arc::clone(&outcome_sink);
+    let s10 = Arc::clone(&outcome_sink);
+    let s11 = outcome_sink;
+
     view()
         .gap_5()
         .child(
@@ -566,7 +622,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Strict break (hide Skip)",
                         move || vm.with(|m| m.config.strict_break),
-                        move |v| vm.update(|m| m.set_strict_break(v)),
+                        move |v| update_and_autosave(vm, &s1, |m| m.set_strict_break(v)),
                     ),
                 ))
                 .child(stagger_item(
@@ -575,7 +631,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Allow postpone (Space)",
                         move || vm.with(|m| m.config.allow_postpone),
-                        move |v| vm.update(|m| m.config.allow_postpone = v),
+                        move |v| update_and_autosave(vm, &s2, |m| m.config.allow_postpone = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -589,7 +645,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                             })
                         },
                         move || vm.with(|m| m.config.strict_break),
-                        move |v| vm.update(|m| m.set_limit_consecutive_skips(v)),
+                        move |v| update_and_autosave(vm, &s3, |m| m.set_limit_consecutive_skips(v)),
                     ),
                 ))
                 .child(stagger_item(
@@ -605,7 +661,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                             })
                         },
                         move |v| {
-                            vm.update(|m| {
+                            update_and_autosave(vm, &s4, |m| {
                                 m.config.limit_consecutive_skips.max_skips =
                                     u32::try_from(v).unwrap_or(u32::MAX);
                             });
@@ -631,7 +687,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Smart Pause on idle",
                         move || vm.with(|m| m.config.smart_pause.enabled),
-                        move |v| vm.update(|m| m.config.smart_pause.enabled = v),
+                        move |v| update_and_autosave(vm, &s5, |m| m.config.smart_pause.enabled = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -641,7 +697,11 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                         "Idle threshold",
                         "secs",
                         move || vm.with(|m| m.config.smart_pause.idle_threshold_secs),
-                        move |v| vm.update(|m| m.config.smart_pause.idle_threshold_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s6, |m| {
+                                m.config.smart_pause.idle_threshold_secs = v;
+                            });
+                        },
                     ),
                 ))
                 .child(stagger_item(
@@ -650,7 +710,9 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Do Not Disturb in fullscreen",
                         move || vm.with(|m| m.config.do_not_disturb.enabled),
-                        move |v| vm.update(|m| m.config.do_not_disturb.enabled = v),
+                        move |v| {
+                            update_and_autosave(vm, &s7, |m| m.config.do_not_disturb.enabled = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
@@ -659,7 +721,11 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Pause while on battery",
                         move || vm.with(|m| m.config.do_not_disturb.while_on_battery),
-                        move |v| vm.update(|m| m.config.do_not_disturb.while_on_battery = v),
+                        move |v| {
+                            update_and_autosave(vm, &s8, |m| {
+                                m.config.do_not_disturb.while_on_battery = v;
+                            });
+                        },
                     ),
                 )),
         )
@@ -681,7 +747,9 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Pre-break chime",
                         move || vm.with(|m| m.config.audible_alert.pre_break),
-                        move |v| vm.update(|m| m.config.audible_alert.pre_break = v),
+                        move |v| {
+                            update_and_autosave(vm, &s9, |m| m.config.audible_alert.pre_break = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
@@ -690,7 +758,11 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                     cozy_switch(
                         "Post-break chime",
                         move || vm.with(|m| m.config.audible_alert.post_break),
-                        move |v| vm.update(|m| m.config.audible_alert.post_break = v),
+                        move |v| {
+                            update_and_autosave(vm, &s10, |m| {
+                                m.config.audible_alert.post_break = v;
+                            });
+                        },
                     ),
                 ))
                 .child(stagger_item(
@@ -701,7 +773,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
                         "0–100",
                         move || u64::from(vm.with(|m| m.config.audible_alert.volume)),
                         move |v| {
-                            vm.update(|m| {
+                            update_and_autosave(vm, &s11, |m| {
                                 m.config.audible_alert.volume =
                                     u8::try_from(v.min(100)).unwrap_or(100);
                             });
@@ -713,6 +785,7 @@ fn policies_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoEl
 
 fn exercise_tier_section(
     vm: Signal<SettingsViewModel>,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     kind: BreakType,
     base_index: usize,
     animate: bool,
@@ -751,6 +824,7 @@ fn exercise_tier_section(
                 .collect::<Vec<_>>()
         })
     });
+    let add_sink = Arc::clone(&outcome_sink);
 
     view()
         .gap_3()
@@ -772,12 +846,20 @@ fn exercise_tier_section(
                     move |s: &str| vm.update(|m| *m.draft_exercise_mut(kind) = s.to_owned()),
                 )))
                 .child(secondary_button("Add", move || {
+                    let mut saved = false;
                     vm.update(|m| {
                         let name = std::mem::take(m.draft_exercise_mut(kind));
-                        if m.add_exercise(kind, &name).is_err() {
+                        if m.add_exercise(kind, &name).is_ok() {
+                            if m.autosave().is_ok() {
+                                saved = true;
+                            }
+                        } else {
                             *m.draft_exercise_mut(kind) = name;
                         }
                     });
+                    if saved {
+                        crate::store_outcome(&add_sink, SettingsOutcome::Saved);
+                    }
                 })),
         ))
         .child(view().gap_2().child(each(
@@ -790,6 +872,7 @@ fn exercise_tier_section(
                     initial_remaining.set(rem - 1);
                 }
                 let mount_idx = row_idx.get_untracked();
+                let remove_sink = Arc::clone(&outcome_sink);
                 stagger_item(
                     base_index + 2 + mount_idx,
                     row_animate,
@@ -811,24 +894,41 @@ fn exercise_tier_section(
                         )
                         .child(destructive_button("Remove", move || {
                             let idx = row_idx.get_untracked();
+                            let mut saved = false;
                             vm.update(|m| {
-                                let _ = m.remove_exercise(kind, idx);
+                                if m.remove_exercise(kind, idx).is_ok() && m.autosave().is_ok() {
+                                    saved = true;
+                                }
                             });
+                            if saved {
+                                crate::store_outcome(&remove_sink, SettingsOutcome::Saved);
+                            }
                         })),
                 )
             },
         )))
 }
 
-fn exercises_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoElement {
+fn exercises_section(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    animate: bool,
+) -> impl IntoElement {
     let short_count = vm.with(|m| m.config.short_breaks.len());
     let divider_idx = 2 + short_count;
     view()
         .gap_5()
-        .child(exercise_tier_section(vm, BreakType::Short, 0, animate))
+        .child(exercise_tier_section(
+            vm,
+            Arc::clone(&outcome_sink),
+            BreakType::Short,
+            0,
+            animate,
+        ))
         .child(stagger_item(divider_idx, animate, section_divider()))
         .child(exercise_tier_section(
             vm,
+            outcome_sink,
             BreakType::Long,
             divider_idx + 1,
             animate,
@@ -899,40 +999,6 @@ pub(crate) fn build_settings_view_with_hooks(
     quit_on_finish: bool,
     on_autostart_change: Option<AutostartHook>,
 ) -> impl IntoElement {
-    let initial_autostart = initial_vm.config.autostart;
-    let (live_hook, save_autostart) = match on_autostart_change {
-        Some(hook) => {
-            let autostart_dirty = Arc::new(AtomicBool::new(false));
-            let live_dirty = Arc::clone(&autostart_dirty);
-            let live_cb = Arc::clone(&hook);
-            let live: AutostartHook = Arc::new(move |enabled| {
-                live_dirty.store(true, Ordering::Release);
-                live_cb(enabled);
-            });
-
-            let revert_sink = Arc::clone(&outcome_sink);
-            let revert_dirty = Arc::clone(&autostart_dirty);
-            let revert_if_unsaved = Arc::new(move || {
-                let is_saved = revert_sink
-                    .lock()
-                    .ok()
-                    .is_some_and(|guard| *guard == Some(SettingsOutcome::Saved));
-                if !is_saved && revert_dirty.swap(false, Ordering::AcqRel) {
-                    hook(initial_autostart);
-                }
-            });
-            let quit_revert = Arc::clone(&revert_if_unsaved);
-            on_app_quit(move || {
-                quit_revert();
-                std::future::ready(())
-            });
-            cleanup(move || revert_if_unsaved());
-
-            (Some(live), Some(autostart_dirty))
-        }
-        None => (None, None),
-    };
-
     if quit_on_finish {
         let main_win = current_window();
         main_win.focus();
@@ -951,6 +1017,7 @@ pub(crate) fn build_settings_view_with_hooks(
     let active_tab = computed(move || vm.with(|m| m.active_tab));
     let warning_msg = computed(move || vm.with(|m| m.load_warning.clone()));
     let error_msg = computed(move || vm.with(|m| m.validation_error.clone()));
+    let is_modified = computed(move || vm.with(SettingsViewModel::is_modified_from_defaults));
 
     let highlight_scale = animated_value(1.0);
     let form_scroll_ref = element_ref();
@@ -970,8 +1037,11 @@ pub(crate) fn build_settings_view_with_hooks(
         }
     });
 
-    let save_sink = Arc::clone(&outcome_sink);
-    let cancel_sink = outcome_sink;
+    let theme_sink = Arc::clone(&outcome_sink);
+    let timing_sink = Arc::clone(&outcome_sink);
+    let policies_sink = Arc::clone(&outcome_sink);
+    let exercises_sink = Arc::clone(&outcome_sink);
+    let reset_sink = outcome_sink;
 
     let tab_index = move || match active_tab.get() {
         SettingsTab::Timing => 0,
@@ -1110,10 +1180,18 @@ pub(crate) fn build_settings_view_with_hooks(
                         let next_mode =
                             next_theme_mode(theme_mode_for_appearance(appearance.get()));
                         let next_appearance = appearance_for_theme_mode(next_mode);
+                        let mut saved = false;
                         vm.update(|m| {
                             m.config.theme = next_mode;
-                            let _ = m.persist_theme();
+                            if m.autosave().is_ok() {
+                                saved = true;
+                            } else {
+                                let _ = m.persist_theme();
+                            }
                         });
+                        if saved {
+                            crate::store_outcome(&theme_sink, SettingsOutcome::Saved);
+                        }
                         appearance.set(next_appearance);
                         set_color_scheme(next_appearance);
                     },
@@ -1129,8 +1207,8 @@ pub(crate) fn build_settings_view_with_hooks(
             move || status_banner(true, move || error_msg.get().unwrap_or_default()),
         ));
 
-    let timing_hook = live_hook.as_ref().map(Arc::clone);
-    let reset_hook = live_hook;
+    let timing_hook = on_autostart_change.as_ref().map(Arc::clone);
+    let reset_hook = on_autostart_change;
 
     let form_scroll = scroll()
         .element_ref(&form_scroll_ref)
@@ -1151,6 +1229,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || {
                         timing_section(
                             vm,
+                            Arc::clone(&timing_sink),
                             timing_hook.as_ref().map(Arc::clone),
                             has_switched_tab.get_untracked(),
                         )
@@ -1158,11 +1237,23 @@ pub(crate) fn build_settings_view_with_hooks(
                 ))
                 .child(when(
                     move || active_tab.get() == SettingsTab::Policies,
-                    move || policies_section(vm, has_switched_tab.get_untracked()),
+                    move || {
+                        policies_section(
+                            vm,
+                            Arc::clone(&policies_sink),
+                            has_switched_tab.get_untracked(),
+                        )
+                    },
                 ))
                 .child(when(
                     move || active_tab.get() == SettingsTab::Exercises,
-                    move || exercises_section(vm, has_switched_tab.get_untracked()),
+                    move || {
+                        exercises_section(
+                            vm,
+                            Arc::clone(&exercises_sink),
+                            has_switched_tab.get_untracked(),
+                        )
+                    },
                 ))
                 .child(when(
                     move || active_tab.get() == SettingsTab::About,
@@ -1184,52 +1275,37 @@ pub(crate) fn build_settings_view_with_hooks(
         .duration(motion::THEME_COLOR_MS)
         .ease_bezier(bx1, by1, bx2, by2)
         .child(
-            view()
-                .flex_row()
-                .gap_2()
-                .child(primary_button("Save", move || {
-                    let mut saved = false;
-                    vm.update(|m| {
-                        if m.save().is_ok() {
-                            saved = true;
-                        }
-                    });
-                    if saved {
-                        if let Some(dirty) = &save_autostart {
-                            dirty.store(false, Ordering::Release);
-                        }
-                        crate::store_outcome(&save_sink, SettingsOutcome::Saved);
-                        if quit_on_finish {
-                            quit();
-                        }
-                    }
-                }))
-                .child(secondary_button("Reset", move || {
-                    let mut autostart_changed = None;
-                    vm.update(|m| {
-                        let prev = m.config.autostart;
-                        m.reset_to_defaults();
-                        if m.config.autostart != prev {
-                            autostart_changed = Some(m.config.autostart);
-                        }
-                    });
-                    if let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
-                        cb(next);
-                    }
-                    let default_appearance = appearance_for_theme_mode(ThemeMode::default());
-                    appearance.set(default_appearance);
-                    set_color_scheme(default_appearance);
-                })),
+            text("Changes are saved automatically")
+                .text_xs()
+                .text_color(colors::TEXT_SECONDARY),
         )
-        .child(ghost_button("Cancel", move || {
-            vm.update(|m| {
-                let _ = m.cancel();
-            });
-            crate::store_outcome(&cancel_sink, SettingsOutcome::Cancelled);
-            if quit_on_finish {
-                quit();
-            }
-        }));
+        .child(primary_button_with_disabled(
+            "Reset to defaults",
+            move || !is_modified.get(),
+            move || {
+                let mut autostart_changed = None;
+                let mut saved = false;
+                vm.update(|m| {
+                    let prev = m.config.autostart;
+                    m.reset_to_defaults();
+                    if m.autosave().is_ok() {
+                        saved = true;
+                    }
+                    if m.config.autostart != prev {
+                        autostart_changed = Some(m.config.autostart);
+                    }
+                });
+                if saved {
+                    crate::store_outcome(&reset_sink, SettingsOutcome::Saved);
+                }
+                if let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
+                    cb(next);
+                }
+                let default_appearance = appearance_for_theme_mode(ThemeMode::default());
+                appearance.set(default_appearance);
+                set_color_scheme(default_appearance);
+            },
+        ));
 
     let form_card = view()
         .flex_1()
@@ -1347,7 +1423,7 @@ pub fn run_settings_with_autostart(
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     use super::*;
 
@@ -1670,15 +1746,14 @@ mod tests {
     }
 
     #[test]
-    fn nsh_headless_theme_persists_on_toggle_without_saving_unsaved_form_edits()
+    fn nsh_headless_settings_autosave_and_reset_to_defaults()
     -> Result<(), Box<dyn std::error::Error>> {
         use nsh_core::MountItem;
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
 
-        let dir = RepoTempDir::new("headless-theme-persist")?;
-        let save_path = dir.file("saved-theme.toml");
-        let cancel_path = dir.file("cancelled-theme.toml");
+        let dir = RepoTempDir::new("headless-autosave")?;
+        let save_path = dir.file("autosaved.toml");
 
         static TEST_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
 
@@ -1713,6 +1788,13 @@ mod tests {
             }
         });
         app.wait_for("Theme: System")?;
+        assert!(!app.shows("Save"));
+        assert!(!app.shows("Cancel"));
+        assert!(app.shows("Reset to defaults"));
+
+        assert!(app.press("Reset to defaults").is_err());
+        assert!(!save_path.exists());
+
         app.press("Theme: System")?;
         app.wait_for("Theme: Light")?;
         app.press("Theme: Light")?;
@@ -1721,40 +1803,23 @@ mod tests {
             !saw_shader_transition.load(Ordering::Acquire),
             "Theme toggle must not trigger flashing ShaderTransition"
         );
-        app.press("Reset")?;
+        assert_eq!(Config::load_from_path(&save_path)?.theme, ThemeMode::Dark);
+
+        app.press("Reset to defaults")?;
         app.wait_for("Theme: System")?;
+        assert_eq!(Config::load_from_path(&save_path)?.theme, ThemeMode::System);
+        assert!(app.press("Reset to defaults").is_err());
+
         app.press("Theme: System")?;
         app.wait_for("Theme: Light")?;
         app.press("Policies")?;
         app.wait_for("Break Enforcement")?;
         app.press("Strict break (hide Skip)")?;
-        app.press("Save")?;
+        drop(app);
 
         let reloaded = Config::load_from_path(&save_path)?;
         assert_eq!(reloaded.theme, ThemeMode::Light);
         assert!(reloaded.strict_break);
-
-        if let Ok(mut guard) = TEST_PATH.lock() {
-            *guard = Some(cancel_path.clone());
-        }
-        let mut app2 = Headless::start(EngineConfig {
-            viewport: Size::new(Points(920.0), Points(680.0)),
-            ..EngineConfig::new(Root::of::<TestPersistSettings>())
-        })
-        .map_err(|e| e.to_string())?;
-        app2.wait_for("Theme: System")?;
-        app2.press("Theme: System")?;
-        app2.wait_for("Theme: Light")?;
-        app2.press("Theme: Light")?;
-        app2.wait_for("Theme: Dark")?;
-        app2.press("Policies")?;
-        app2.wait_for("Break Enforcement")?;
-        app2.press("Strict break (hide Skip)")?;
-        app2.press("Cancel")?;
-
-        let after_cancel = Config::load_from_path(&cancel_path)?;
-        assert_eq!(after_cancel.theme, ThemeMode::Dark);
-        assert!(!after_cancel.strict_break);
         Ok(())
     }
 
@@ -1768,8 +1833,10 @@ mod tests {
         let path = dir.file("strict-vs-skip.toml");
 
         let mut vm = SettingsViewModel::load(path.clone());
+        assert!(!vm.is_modified_from_defaults());
         vm.set_limit_consecutive_skips(true);
         assert!(vm.config.limit_consecutive_skips.enabled);
+        assert!(vm.is_modified_from_defaults());
         vm.set_strict_break(true);
         assert!(vm.config.strict_break);
         assert!(!vm.config.limit_consecutive_skips.enabled);
@@ -1778,6 +1845,8 @@ mod tests {
         vm.set_strict_break(false);
         vm.set_limit_consecutive_skips(true);
         assert!(vm.config.limit_consecutive_skips.enabled);
+        vm.reset_to_defaults();
+        assert!(!vm.is_modified_from_defaults());
 
         static STRICT_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
         if let Ok(mut guard) = STRICT_PATH.lock() {
@@ -1812,8 +1881,8 @@ mod tests {
         app.press("Strict break (hide Skip)")?;
         app.wait_for("Strict")?;
         assert!(!app.shows("2 max"));
+        drop(app);
 
-        app.press("Save")?;
         let saved = Config::load_from_path(&path)?;
         assert!(saved.strict_break);
         assert!(!saved.limit_consecutive_skips.enabled);
@@ -2032,7 +2101,7 @@ mod tests {
         app.settle();
         assert_eq!(IS_DARK_NOW.lock().ok().and_then(|g| *g), Some(true));
 
-        app.press("Reset")?;
+        app.press("Reset to defaults")?;
         app.wait_for("Theme: System")?;
         app.settle();
         assert_eq!(
@@ -2120,9 +2189,8 @@ mod tests {
 
         app.press("Launch at login (startup)")?;
         app.press("Launch at login (startup)")?;
-        app.press("Reset")?;
+        app.press("Reset to defaults")?;
         app.press("Launch at login (startup)")?;
-        app.press("Save")?;
         drop(app);
 
         let events = AUTOSTART_EVENTS.lock().map_err(|e| e.to_string())?.clone();
@@ -2134,98 +2202,25 @@ mod tests {
     }
 
     #[test]
-    fn nsh_headless_autostart_reverts_on_cancel_and_window_close()
+    fn nsh_headless_autostart_autosaves_without_revert_on_window_close()
     -> Result<(), Box<dyn std::error::Error>> {
         use nsh_engine::{EngineConfig, Points, Root, Size};
         use nsh_testing::Headless;
 
-        let dir = RepoTempDir::new("headless-autostart-revert")?;
-        let path = dir.file("autostart-revert.toml");
+        let dir = RepoTempDir::new("headless-autostart-autosave")?;
+        let path = dir.file("autostart-autosave.toml");
         let cfg = Config {
             autostart: false,
             ..Config::default()
         };
         cfg.save_to_path(&path)?;
 
-        static REVERT_LAUNCH: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
-        static REVERT_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+        static AUTOSAVE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static AUTOSAVE_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
 
         #[component]
-        fn TestAutostartRevert() -> impl IntoElement {
-            let (path, initial_system) = REVERT_LAUNCH
-                .lock()
-                .ok()
-                .and_then(|mut g| g.take())
-                .unwrap_or_default();
-            let vm = load_settings_vm(path, Some(initial_system));
-            let sink = Arc::new(Mutex::new(None));
-            let hook: AutostartHook = Arc::new(|enabled| {
-                if let Ok(mut guard) = REVERT_EVENTS.lock() {
-                    guard.push(enabled);
-                }
-            });
-            build_settings_view_with_hooks(vm, sink, false, Some(hook))
-        }
-
-        if let Ok(mut guard) = REVERT_LAUNCH.lock() {
-            *guard = Some((path.clone(), false));
-        }
-        if let Ok(mut guard) = REVERT_EVENTS.lock() {
-            guard.clear();
-        }
-        let mut app = Headless::start(EngineConfig {
-            viewport: Size::new(Points(920.0), Points(680.0)),
-            ..EngineConfig::new(Root::of::<TestAutostartRevert>())
-        })
-        .map_err(|e| e.to_string())?;
-        app.wait_for("Launch at login (startup)")?;
-        app.press("Launch at login (startup)")?;
-        app.press("Cancel")?;
-        drop(app);
-
-        let cancel_events = REVERT_EVENTS.lock().map_err(|e| e.to_string())?.clone();
-        assert_eq!(cancel_events, vec![true, false]);
-
-        if let Ok(mut guard) = REVERT_LAUNCH.lock() {
-            *guard = Some((path, true));
-        }
-        if let Ok(mut guard) = REVERT_EVENTS.lock() {
-            guard.clear();
-        }
-        let mut app_close = Headless::start(EngineConfig {
-            viewport: Size::new(Points(920.0), Points(680.0)),
-            ..EngineConfig::new(Root::of::<TestAutostartRevert>())
-        })
-        .map_err(|e| e.to_string())?;
-        app_close.wait_for("Launch at login (startup)")?;
-        app_close.press("Launch at login (startup)")?;
-        drop(app_close);
-
-        let close_events = REVERT_EVENTS.lock().map_err(|e| e.to_string())?.clone();
-        assert_eq!(close_events, vec![false, true]);
-        Ok(())
-    }
-
-    #[test]
-    fn nsh_headless_autostart_save_persists_without_revert_on_drop()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use nsh_engine::{EngineConfig, Points, Root, Size};
-        use nsh_testing::Headless;
-
-        let dir = RepoTempDir::new("headless-autostart-save")?;
-        let path = dir.file("autostart-save.toml");
-        let cfg = Config {
-            autostart: false,
-            ..Config::default()
-        };
-        cfg.save_to_path(&path)?;
-
-        static SAVE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
-        static SAVE_EVENTS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
-
-        #[component]
-        fn TestAutostartSave() -> impl IntoElement {
-            let path = SAVE_PATH
+        fn TestAutostartAutosave() -> impl IntoElement {
+            let path = AUTOSAVE_PATH
                 .lock()
                 .ok()
                 .and_then(|mut g| g.take())
@@ -2233,31 +2228,30 @@ mod tests {
             let vm = load_settings_vm(path, Some(false));
             let sink = Arc::new(Mutex::new(None));
             let hook: AutostartHook = Arc::new(|enabled| {
-                if let Ok(mut guard) = SAVE_EVENTS.lock() {
+                if let Ok(mut guard) = AUTOSAVE_EVENTS.lock() {
                     guard.push(enabled);
                 }
             });
             build_settings_view_with_hooks(vm, sink, false, Some(hook))
         }
 
-        if let Ok(mut guard) = SAVE_PATH.lock() {
+        if let Ok(mut guard) = AUTOSAVE_PATH.lock() {
             *guard = Some(path.clone());
         }
-        if let Ok(mut guard) = SAVE_EVENTS.lock() {
+        if let Ok(mut guard) = AUTOSAVE_EVENTS.lock() {
             guard.clear();
         }
 
         let mut app = Headless::start(EngineConfig {
             viewport: Size::new(Points(920.0), Points(680.0)),
-            ..EngineConfig::new(Root::of::<TestAutostartSave>())
+            ..EngineConfig::new(Root::of::<TestAutostartAutosave>())
         })
         .map_err(|e| e.to_string())?;
         app.wait_for("Launch at login (startup)")?;
         app.press("Launch at login (startup)")?;
-        app.press("Save")?;
         drop(app);
 
-        let events = SAVE_EVENTS.lock().map_err(|e| e.to_string())?.clone();
+        let events = AUTOSAVE_EVENTS.lock().map_err(|e| e.to_string())?.clone();
         assert_eq!(events, vec![true]);
 
         let reloaded = Config::load_from_path(&path)?;

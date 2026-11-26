@@ -186,12 +186,11 @@ When `autostart` is `true`, `sye-platform` registers a per-user operating system
 - On macOS `.app` bundles with the default configuration path, `sye-platform` registers `SMAppService.mainApp` (`ServiceManagement.framework`). In this mode, `sye-platform` also deletes any legacy `~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist` file.
 - On macOS with a custom `--config` path, `sye-platform` writes `~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist` with `--background` and `AssociatedBundleIdentifiers`.
 - On Linux, `sye-platform` writes `~/.config/autostart/safe-your-eyes.desktop` with `--background`.
-- On Windows, `sye-platform` writes `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\safe-your-eyes.cmd` with `--background`.
+- On Windows, `sye-platform` writes the `"Safe Your Eyes"` `REG_SZ` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` with `--background` (and strips any `\\?\` verbatim path prefix), clears any disabled entry in `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run`, and deletes any legacy `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\safe-your-eyes.cmd` file.
 
 When `autostart` is `false`, `sye-platform` unregisters or deletes that login item.
-On macOS `.app` bundles with the default configuration path, `query_system_autostart` reads the `System Settings` login item state.
-When the user changes `Launch at login (startup)`, the Settings window updates the login item immediately.
-When the user cancels or closes the Settings window without `Save`, or when the daemon stops while the Settings window is open, the application restores the saved login item state.
+On macOS `.app` bundles and on Windows with the default configuration path, `query_system_autostart` reads the operating system startup state (`SMAppService` on macOS, `Run` and `Explorer\StartupApproved\Run` on Windows).
+When the user changes `Launch at login (startup)`, the Settings window saves `config.toml` and updates the login item immediately.
 
 ## 9. Audio Chime, Notifications, and Local IPC
 
@@ -281,7 +280,9 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - When `strict_break` is `true`, the `Policies` screen sets `limit_consecutive_skips.enabled` to `false` and disables `Limit consecutive skips` and `Max consecutive skips`.
 - When `strict_break` is `true`, the `Skip Limit` KPI card shows `Strict`.
 - The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
-- The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar (`Save`, `Reset`, `Cancel`).
+- The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar with automatic save status and a `Reset to defaults` button.
+- Every valid change in the Settings window saves `config.toml` immediately. Invalid input shows a validation banner and keeps the last valid `config.toml` on disk.
+- The `Reset to defaults` button is disabled while the configuration matches `Config::reset_to_default()` and activates with the accent style when any setting differs from default. Pressing `Reset to defaults` restores defaults and saves immediately.
 - The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.
 
@@ -351,6 +352,7 @@ This section lists the operating system and framework limits that the code works
 7. `sye-cli/build.rs` embeds the app icon with resource ID 1 (`winresource::set_icon`). The banner loads the icon with this ID.
 8. Windows 10 does not support rounded window corners from DWM. The banner keeps square corners there.
 9. Native caption buttons occupy the top-right corner on Windows and Linux. The Settings window keeps clear space at the top for window drag.
+10. `Path::canonicalize` returns a `\\?\` verbatim prefix on Windows. `sye-platform` strips that prefix before it writes the Windows startup command.
 
 ### 12.3 Linux
 
@@ -366,5 +368,3 @@ This section lists the operating system and framework limits that the code works
 3. The engine starts the clock of an animation at its first frame. Frames before the window is shown and sized are lost. The overlay starts its animations after its window is shown.
 4. A width change does not animate per frame. The progress bar scales its fill from the center with one `ScaleX` animation for the whole break.
 5. `set_interval` skips late runs. The overlay calculates the countdown from the clock, not from the number of ticks.
-6. `Engine::drop` stops the worker thread but does not dispose the root `Owner`. The Settings window uses `on_app_quit` for window close and `cleanup` for scope disposal.
-7. The daemon stops the Settings child with `SIGKILL`, and `SIGKILL` skips `on_app_quit`. The daemon restores the saved autostart value itself.

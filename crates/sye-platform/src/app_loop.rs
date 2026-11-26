@@ -80,6 +80,8 @@ impl PlatformEventLoop {
         if let Some(ref inner) = self.inner {
             inner.prepare_child_activation();
         }
+        #[cfg(target_os = "windows")]
+        windows_impl::prepare_child_activation();
     }
 
     pub fn activate_child(&self, pid: u32) {
@@ -87,7 +89,9 @@ impl PlatformEventLoop {
         if let Some(ref inner) = self.inner {
             inner.activate_child(pid);
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        windows_impl::activate_child(pid);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = pid;
     }
 }
@@ -313,16 +317,108 @@ mod macos_impl {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChildWindowMatch {
+    Ignore,
+    Fallback,
+    Primary,
+}
+
+#[cfg(any(target_os = "windows", test))]
+const fn classify_child_window(
+    window_pid: u32,
+    target_pid: u32,
+    is_visible: bool,
+    has_owner: bool,
+    is_tool_window: bool,
+) -> ChildWindowMatch {
+    if window_pid != target_pid || !is_visible {
+        ChildWindowMatch::Ignore
+    } else if !has_owner && !is_tool_window {
+        ChildWindowMatch::Primary
+    } else {
+        ChildWindowMatch::Fallback
+    }
+}
+
 #[cfg(target_os = "windows")]
 mod windows_impl {
     use std::mem::MaybeUninit;
     use std::ptr;
 
+    use windows_sys::Win32::Foundation::{FALSE, HWND, LPARAM, TRUE};
+    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
+        ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, DispatchMessageW, EnumWindows,
+        GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
+        GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsHungAppWindow, IsIconic,
+        IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+        WS_EX_TOOLWINDOW,
     };
 
-    use super::MAX_EVENTS_PER_PUMP;
+    use super::{ChildWindowMatch, MAX_EVENTS_PER_PUMP, classify_child_window};
+
+    struct FindWindowState {
+        target_pid: u32,
+        primary: HWND,
+        fallback: HWND,
+    }
+
+    #[expect(unsafe_code, reason = "Win32 FFI callback")]
+    unsafe extern "system" fn find_child_window_proc(hwnd: HWND, lparam: LPARAM) -> i32 {
+        let mut window_pid = 0;
+        // SAFETY: `hwnd` comes from `EnumWindows`; `lparam` points to `FindWindowState` on the caller stack.
+        unsafe {
+            GetWindowThreadProcessId(hwnd, &mut window_pid);
+            let state = &mut *(lparam as *mut FindWindowState);
+            let is_visible = IsWindowVisible(hwnd) != 0;
+            let has_owner = !GetWindow(hwnd, GW_OWNER).is_null();
+            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE).cast_unsigned();
+            let is_tool = (ex_style & WS_EX_TOOLWINDOW) != 0;
+            match classify_child_window(
+                window_pid,
+                state.target_pid,
+                is_visible,
+                has_owner,
+                is_tool,
+            ) {
+                ChildWindowMatch::Ignore => TRUE,
+                ChildWindowMatch::Primary => {
+                    state.primary = hwnd;
+                    FALSE
+                }
+                ChildWindowMatch::Fallback => {
+                    if state.fallback.is_null() {
+                        state.fallback = hwnd;
+                    }
+                    TRUE
+                }
+            }
+        }
+    }
+
+    fn find_child_window(target_pid: u32) -> HWND {
+        let mut state = FindWindowState {
+            target_pid,
+            primary: ptr::null_mut(),
+            fallback: ptr::null_mut(),
+        };
+        // SAFETY: `find_child_window_proc` only runs during `EnumWindows` with `&mut state`.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let _ = unsafe {
+            EnumWindows(
+                Some(find_child_window_proc),
+                ptr::from_mut(&mut state) as LPARAM,
+            )
+        };
+        if state.primary.is_null() {
+            state.fallback
+        } else {
+            state.primary
+        }
+    }
 
     pub(super) fn drain_messages() {
         let mut msg = MaybeUninit::<MSG>::uninit();
@@ -345,6 +441,79 @@ mod windows_impl {
             }
         }
     }
+
+    pub(super) fn prepare_child_activation() {
+        // SAFETY: `AllowSetForegroundWindow` accepts `ASFW_ANY` to yield foreground activation rights.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        let _ = unsafe { AllowSetForegroundWindow(ASFW_ANY) };
+    }
+
+    pub(super) fn activate_child(pid: u32) {
+        // SAFETY: Win32 foreground/window activation APIs operate on `pid` and the HWND found in this call.
+        #[expect(unsafe_code, reason = "Win32 FFI")]
+        unsafe {
+            let hwnd = find_child_window(pid);
+            if hwnd.is_null() {
+                return;
+            }
+            if IsIconic(hwnd) != 0 {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            let _ = BringWindowToTop(hwnd);
+            if SetForegroundWindow(hwnd) != 0 {
+                return;
+            }
+
+            let fg = GetForegroundWindow();
+            // A hung foreground thread would share its stalled input queue with the daemon loop.
+            let fg_tid = if fg.is_null() || IsHungAppWindow(fg) != 0 {
+                0
+            } else {
+                GetWindowThreadProcessId(fg, ptr::null_mut())
+            };
+            let cur_tid = GetCurrentThreadId();
+            let target_tid = GetWindowThreadProcessId(hwnd, ptr::null_mut());
+
+            let attached_fg =
+                fg_tid != 0 && fg_tid != cur_tid && AttachThreadInput(cur_tid, fg_tid, TRUE) != 0;
+            let attached_target = target_tid != 0
+                && target_tid != cur_tid
+                && target_tid != fg_tid
+                && AttachThreadInput(cur_tid, target_tid, TRUE) != 0;
+
+            let _ = BringWindowToTop(hwnd);
+            let focused = SetForegroundWindow(hwnd) != 0;
+            if !focused {
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_NOTOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                );
+                let _ = BringWindowToTop(hwnd);
+                let _ = SetForegroundWindow(hwnd);
+            }
+
+            if attached_target {
+                let _ = AttachThreadInput(cur_tid, target_tid, FALSE);
+            }
+            if attached_fg {
+                let _ = AttachThreadInput(cur_tid, fg_tid, FALSE);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +529,29 @@ mod tests {
         let event_loop = PlatformEventLoop::new(tx);
         event_loop.pump_events(Duration::from_millis(5));
         event_loop.finish_termination();
+    }
+
+    #[test]
+    fn classify_child_window_prefers_visible_unowned_non_tool_window() {
+        assert_eq!(
+            classify_child_window(42, 42, true, false, false),
+            ChildWindowMatch::Primary
+        );
+        assert_eq!(
+            classify_child_window(42, 42, true, true, false),
+            ChildWindowMatch::Fallback
+        );
+        assert_eq!(
+            classify_child_window(42, 42, true, false, true),
+            ChildWindowMatch::Fallback
+        );
+        assert_eq!(
+            classify_child_window(42, 42, false, false, false),
+            ChildWindowMatch::Ignore
+        );
+        assert_eq!(
+            classify_child_window(99, 42, true, false, false),
+            ChildWindowMatch::Ignore
+        );
     }
 }

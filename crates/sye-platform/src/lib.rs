@@ -17,6 +17,7 @@ mod paths;
 #[cfg(test)]
 mod test_util;
 mod tray;
+mod update;
 
 pub use app_loop::PlatformEventLoop;
 pub use audio::OsAudioPlayer;
@@ -32,10 +33,16 @@ pub use idle::SystemIdleProvider;
 pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};
 pub use notify::{OsNotifier, format_pre_break_notification};
 pub use overlay::SubprocessOverlayLauncher;
-pub use paths::{AppPaths, session_path_for_config};
+pub use paths::{AppPaths, session_path_for_config, update_cache_path_for_config};
 pub use sye_core::traits;
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
-    icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba, render_tray_icon_rgba,
-    tray_tooltip, tray_tooltip_for_platform,
+    format_update_menu_label, icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba,
+    render_tray_icon_rgba, tray_tooltip, tray_tooltip_for_platform,
+};
+pub use update::{
+    apply_self_update, apply_self_update_to_path, check_and_cache_update, check_latest_version,
+    cleanup_current_stale_old_executable, cleanup_stale_old_executable, compute_sha256_hex,
+    detect_current_update_strategy, detect_update_strategy, now_unix_secs, open_url,
+    replace_executable, verify_sha256_hex,
 };

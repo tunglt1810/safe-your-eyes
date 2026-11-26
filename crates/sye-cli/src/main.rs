@@ -70,7 +70,7 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        CommandMode::InternalSettings => run_settings_and_sync_autostart(&paths.config_file),
+        CommandMode::InternalSettings => run_settings_and_sync_autostart(&paths),
         CommandMode::Daemon => daemon::run_daemon(&paths, args.headless, args.background),
         CommandMode::Status { json } => send_ipc_command(
             &paths,
@@ -113,7 +113,7 @@ fn main() -> ExitCode {
                     eprintln!("{message}");
                     ExitCode::FAILURE
                 }
-                Err(IpcError::NotRunning) => run_settings_and_sync_autostart(&paths.config_file),
+                Err(IpcError::NotRunning) => run_settings_and_sync_autostart(&paths),
                 Err(err) => {
                     eprintln!("{err}");
                     ExitCode::FAILURE
@@ -162,19 +162,62 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
     }
 }
 
-fn run_settings_and_sync_autostart(config_file: &std::path::Path) -> ExitCode {
+fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
+    let config_file = &paths.config_file;
     let initial_system_autostart = sye_platform::query_system_autostart(Some(config_file));
-    let hook_path = config_file.to_path_buf();
+    let hook_path = config_file.clone();
     let on_autostart_change = Box::new(move |enabled: bool| {
         if let Err(err) = sye_platform::sync_system_autostart(enabled, Some(&hook_path)) {
             eprintln!("Warning: failed to synchronize autostart entry: {err}");
         }
     });
 
-    match sye_ui::run_settings_with_autostart(
-        config_file.to_path_buf(),
+    let current_version = env!("CARGO_PKG_VERSION");
+    let (cached_update, _) = sye_core::UpdateCacheState::load_or_default(&paths.update_cache_file);
+    let initial_update = cached_update.available_update(current_version);
+    let strategy = sye_platform::detect_current_update_strategy();
+
+    let check_cache_path = paths.update_cache_file.clone();
+    let on_check_now: sye_ui::CheckUpdatesCallback = Arc::new(move || {
+        sye_platform::check_and_cache_update(
+            &check_cache_path,
+            current_version,
+            sye_platform::now_unix_secs(),
+        )
+        .map_err(|err| err.to_string())
+    });
+
+    let on_apply_update: Option<sye_ui::ApplyUpdateCallback> = match strategy {
+        sye_core::UpdateStrategy::SelfUpdate { asset_name } => {
+            let socket_path = paths.socket_path.clone();
+            Some(Arc::new(move |target_version: &str| {
+                sye_platform::apply_self_update(target_version, asset_name, current_version)
+                    .map_err(|err| err.to_string())?;
+                match IpcClient::send_command(&socket_path, &IpcCommand::Restart) {
+                    Ok(IpcResponse::Ok { .. }) => Ok(sye_ui::ApplyUpdateOutcome::RestartingDaemon),
+                    Ok(IpcResponse::Status(_)) | Err(IpcError::NotRunning) => {
+                        Ok(sye_ui::ApplyUpdateOutcome::UpdatedStandalone)
+                    }
+                    Ok(IpcResponse::Error { message, .. }) => Err(message),
+                    Err(err) => Err(err.to_string()),
+                }
+            }))
+        }
+        sye_core::UpdateStrategy::HomebrewCask | sye_core::UpdateStrategy::ManualDownload => None,
+    };
+
+    let update_config = sye_ui::SettingsUpdateConfig {
+        initial_update,
+        strategy: Some(strategy),
+        on_check_now: Some(on_check_now),
+        on_apply_update,
+    };
+
+    match sye_ui::run_settings_with_hooks(
+        config_file.clone(),
         initial_system_autostart,
         Some(on_autostart_change),
+        update_config,
     ) {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {

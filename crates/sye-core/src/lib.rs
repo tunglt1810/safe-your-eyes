@@ -7,6 +7,7 @@ mod rng;
 pub mod scheduler;
 pub mod session;
 pub mod traits;
+pub mod update;
 
 pub use chime::{
     CHIME_BITS_PER_SAMPLE, CHIME_CHANNELS, CHIME_SAMPLE_RATE, ChimeKind, synthesize_chime_wav,
@@ -33,4 +34,12 @@ pub use session::{SESSION_SCHEMA_VERSION, SessionError, SessionState};
 pub use traits::{
     AudioPlayer, Clock, DndProvider, FakeClock, IdleProvider, Notifier, OverlayLauncher,
     PlatformError,
+};
+pub use update::{
+    GITHUB_RELEASE_DOWNLOAD_BASE, GITHUB_RELEASES_API_URL, GITHUB_RELEASES_LATEST_URL,
+    HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, SemVer, UPDATE_CACHE_SCHEMA_VERSION,
+    UPDATE_CHECK_INTERVAL_SECS, UPDATE_INITIAL_DELAY_SECS, UpdateCacheError, UpdateCacheState,
+    UpdateInfo, UpdateStrategy, extract_tag_from_release_url, is_newer_version,
+    parse_latest_release_json, parse_sha256sums, release_asset_url, release_checksums_url,
+    resolve_release_asset_name,
 };

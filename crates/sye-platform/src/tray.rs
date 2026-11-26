@@ -18,7 +18,9 @@ const MENU_ID_TAKE_ANY: &str = "sye.take.any";
 const MENU_ID_TAKE_SHORT: &str = "sye.take.short";
 const MENU_ID_TAKE_LONG: &str = "sye.take.long";
 const MENU_ID_SETTINGS: &str = "sye.settings";
+const MENU_ID_UPDATE: &str = "sye.update";
 const MENU_ID_QUIT: &str = "sye.quit";
+const UPDATE_MENU_INDEX: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayIconState {
@@ -33,6 +35,7 @@ pub enum TrayEvent {
     Disable { minutes: Option<u64> },
     TakeBreak { kind: Option<BreakType> },
     OpenSettings,
+    UpdateApp,
     Reopen,
     Quit,
 }
@@ -43,6 +46,7 @@ struct ActiveTray {
     #[cfg(target_os = "macos")]
     hover_tooltip: macos_hover_tooltip::MacHoverTooltip,
     tray_icon: TrayIcon,
+    menu: Menu,
     icon_state: TrayIconState,
     last_snapshot: Option<TraySnapshot>,
     status_item: MenuItem,
@@ -51,6 +55,10 @@ struct ActiveTray {
     disable_items: [MenuItem; 5],
     take_break_submenu: Submenu,
     take_break_items: [MenuItem; 3],
+    update_item: MenuItem,
+    update_item_visible: bool,
+    available_update: Option<String>,
+    updating: bool,
     settings_item: MenuItem,
     quit_item: MenuItem,
 }
@@ -116,6 +124,7 @@ impl TrayHandle {
         )
         .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
 
+        let update_item = MenuItem::with_id(MENU_ID_UPDATE, "Update available", true, None);
         let settings_item = MenuItem::with_id(MENU_ID_SETTINGS, "Settings", true, None);
         let quit_item = MenuItem::with_id(MENU_ID_QUIT, "Quit", true, None);
 
@@ -137,7 +146,7 @@ impl TrayHandle {
         let icon_state = icon_state_for_snapshot(initial);
         let icon = build_tray_icon(icon_state)?;
 
-        let builder = TrayIconBuilder::new().with_menu(Box::new(menu));
+        let builder = TrayIconBuilder::new().with_menu(Box::new(menu.clone()));
         let builder = match tray_tooltip(initial) {
             Some(tooltip) => builder.with_tooltip(tooltip),
             None => builder,
@@ -173,6 +182,7 @@ impl TrayHandle {
                 #[cfg(target_os = "macos")]
                 hover_tooltip,
                 tray_icon,
+                menu,
                 icon_state,
                 last_snapshot: None,
                 status_item,
@@ -187,6 +197,10 @@ impl TrayHandle {
                 ],
                 take_break_submenu,
                 take_break_items: [take_any, take_short, take_long],
+                update_item,
+                update_item_visible: false,
+                available_update: None,
+                updating: false,
                 settings_item,
                 quit_item,
             }),
@@ -203,6 +217,40 @@ impl TrayHandle {
     #[must_use]
     pub const fn is_available(&self) -> bool {
         self.active.is_some()
+    }
+
+    pub fn set_available_update(&mut self, version: Option<&str>, updating: bool) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        let next_version = version.map(str::to_owned);
+        if active.available_update == next_version && active.updating == updating {
+            return;
+        }
+        active.available_update = next_version;
+        active.updating = updating;
+
+        let unlocked = active
+            .last_snapshot
+            .as_ref()
+            .is_none_or(|snap| !snap.menu_locked);
+
+        if let Some(ver) = active.available_update.as_deref() {
+            active
+                .update_item
+                .set_text(format_update_menu_label(ver, active.updating));
+            active.update_item.set_enabled(unlocked && !active.updating);
+            if !active.update_item_visible
+                && active
+                    .menu
+                    .insert(&active.update_item, UPDATE_MENU_INDEX)
+                    .is_ok()
+            {
+                active.update_item_visible = true;
+            }
+        } else if active.update_item_visible && active.menu.remove(&active.update_item).is_ok() {
+            active.update_item_visible = false;
+        }
     }
 
     pub fn update(&mut self, snapshot: &TraySnapshot) -> Result<(), PlatformError> {
@@ -235,6 +283,7 @@ impl TrayHandle {
         for item in &active.take_break_items {
             item.set_enabled(can_take_break);
         }
+        active.update_item.set_enabled(unlocked && !active.updating);
         active.settings_item.set_enabled(unlocked);
         active.quit_item.set_enabled(unlocked);
 
@@ -796,8 +845,19 @@ pub fn map_menu_id_to_event(id: &str) -> Option<TrayEvent> {
             kind: Some(BreakType::Long),
         }),
         MENU_ID_SETTINGS => Some(TrayEvent::OpenSettings),
+        MENU_ID_UPDATE => Some(TrayEvent::UpdateApp),
         MENU_ID_QUIT => Some(TrayEvent::Quit),
         _ => None,
+    }
+}
+
+#[must_use]
+pub fn format_update_menu_label(version: &str, updating: bool) -> String {
+    let clean = version.trim().trim_start_matches('v');
+    if updating {
+        format!("Updating to v{clean}...")
+    } else {
+        format!("Update available (v{clean})")
     }
 }
 
@@ -1001,9 +1061,21 @@ mod tests {
             map_menu_id_to_event(MENU_ID_SETTINGS),
             Some(TrayEvent::OpenSettings)
         );
+        assert_eq!(
+            map_menu_id_to_event(MENU_ID_UPDATE),
+            Some(TrayEvent::UpdateApp)
+        );
         assert_eq!(map_menu_id_to_event(MENU_ID_QUIT), Some(TrayEvent::Quit));
         assert_eq!(map_menu_id_to_event(MENU_ID_STATUS), None);
         assert_eq!(map_menu_id_to_event("unknown"), None);
+        assert_eq!(
+            format_update_menu_label("0.2.0", false),
+            "Update available (v0.2.0)"
+        );
+        assert_eq!(
+            format_update_menu_label("v0.2.0", true),
+            "Updating to v0.2.0..."
+        );
     }
 
     #[test]

@@ -11,6 +11,10 @@ use sye_core::scheduler::{
 };
 use sye_core::session::SessionState;
 use sye_core::traits::{DndProvider, IdleProvider, Notifier, OverlayLauncher};
+use sye_core::{
+    HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, UPDATE_CHECK_INTERVAL_SECS,
+    UPDATE_INITIAL_DELAY_SECS, UpdateCacheState, UpdateInfo, UpdateStrategy,
+};
 use sye_platform::{
     AppPaths, IpcClient, IpcError, IpcServer, OsAudioPlayer, OsNotifier, PlatformEventLoop,
     SubprocessOverlayLauncher, SystemClock, SystemDndProvider, SystemIdleProvider, TrayEvent,
@@ -18,11 +22,23 @@ use sye_platform::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+// The macOS and Windows banners have no auto-hide, so the daemon closes update notices itself.
+const UPDATE_NOTICE_DURATION: Duration = Duration::from_secs(8);
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopControl {
+    Continue,
+    Quit,
+    Restart,
+}
 
 struct DaemonHost<'a> {
     headless: bool,
     config_file: &'a Path,
     session_file: &'a Path,
+    update_cache_file: &'a Path,
+    socket_path: &'a Path,
     event_loop: Option<&'a PlatformEventLoop>,
     notifier: OsNotifier,
     audio: OsAudioPlayer,
@@ -30,7 +46,11 @@ struct DaemonHost<'a> {
     settings_child: Option<Child>,
     settings_exited: bool,
     tray: Option<TrayHandle>,
+    available_update: Option<UpdateInfo>,
+    update_in_progress: bool,
+    update_apply_rx: Option<mpsc::Receiver<Result<(), String>>>,
     headless_break_deadline: Option<Instant>,
+    update_notice_dismiss_at: Option<Instant>,
 }
 
 impl DaemonHost<'_> {
@@ -98,6 +118,130 @@ impl DaemonHost<'_> {
         }
     }
 
+    fn sync_tray_update(&mut self) {
+        if let Some(handle) = self.tray.as_mut() {
+            handle.set_available_update(
+                self.available_update
+                    .as_ref()
+                    .map(|info| info.latest_version.as_str()),
+                self.update_in_progress,
+            );
+        }
+    }
+
+    fn show_update_notice(&mut self, summary: &str, body: &str) {
+        if self.notifier.show_notice(summary, body).is_ok() {
+            self.update_notice_dismiss_at = Some(Instant::now() + UPDATE_NOTICE_DURATION);
+        }
+    }
+
+    fn expire_update_notice(&mut self, state: SchedulerState) {
+        let Some(deadline) = self.update_notice_dismiss_at else {
+            return;
+        };
+        if state == SchedulerState::PreBreak {
+            self.update_notice_dismiss_at = None;
+        } else if !self.update_in_progress && Instant::now() >= deadline {
+            self.update_notice_dismiss_at = None;
+            let _ = self.notifier.dismiss();
+        }
+    }
+
+    fn reload_cached_update(&mut self) {
+        let (cache, _) = UpdateCacheState::load_or_default(self.update_cache_file);
+        self.available_update = cache.available_update(CURRENT_VERSION);
+        self.sync_tray_update();
+    }
+
+    fn trigger_tray_update(&mut self) {
+        if self.headless || self.update_in_progress {
+            return;
+        }
+        let Some(info) = self.available_update.clone() else {
+            return;
+        };
+
+        match sye_platform::detect_current_update_strategy() {
+            UpdateStrategy::SelfUpdate { asset_name } => {
+                self.update_in_progress = true;
+                self.sync_tray_update();
+                self.show_update_notice(
+                    "Safe Your Eyes — Updating",
+                    &format!("Downloading and verifying v{}...", info.latest_version),
+                );
+                let (tx, rx) = mpsc::channel();
+                let version = info.latest_version;
+                let spawned = std::thread::Builder::new()
+                    .name("sye-self-update".to_owned())
+                    .spawn(move || {
+                        let res =
+                            sye_platform::apply_self_update(&version, asset_name, CURRENT_VERSION)
+                                .map_err(|err| err.to_string());
+                        let _ = tx.send(res);
+                    });
+                match spawned {
+                    Ok(_) => self.update_apply_rx = Some(rx),
+                    Err(err) => {
+                        self.update_in_progress = false;
+                        self.sync_tray_update();
+                        eprintln!("Warning: failed to spawn self-update thread: {err}");
+                        let _ = sye_platform::open_url(&info.download_url);
+                    }
+                }
+            }
+            UpdateStrategy::HomebrewCask => {
+                self.show_update_notice(
+                    &format!("Safe Your Eyes v{} available", info.latest_version),
+                    &format!("Run: {HOMEBREW_UPGRADE_COMMAND}"),
+                );
+                if let Err(err) = sye_platform::open_url(&info.download_url) {
+                    eprintln!("Warning: failed to open download page: {err}");
+                }
+            }
+            UpdateStrategy::ManualDownload => {
+                if let Err(err) = sye_platform::open_url(&info.download_url) {
+                    eprintln!("Warning: failed to open download page: {err}");
+                }
+            }
+        }
+    }
+
+    fn poll_update_apply(&mut self) -> bool {
+        let Some(rx) = self.update_apply_rx.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                self.update_apply_rx = None;
+                self.update_in_progress = false;
+                true
+            }
+            Ok(Err(err)) => {
+                self.update_apply_rx = None;
+                self.update_in_progress = false;
+                self.sync_tray_update();
+                eprintln!("Warning: self-update failed: {err}");
+                self.show_update_notice(
+                    "Safe Your Eyes — Update failed",
+                    "Opening the download page instead.",
+                );
+                let url = self
+                    .available_update
+                    .as_ref()
+                    .map_or(PUBLIC_DOWNLOAD_URL, |info| info.download_url.as_str());
+                let _ = sye_platform::open_url(url);
+                false
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.update_apply_rx = None;
+                self.update_in_progress = false;
+                self.sync_tray_update();
+                false
+            }
+        }
+    }
+
     fn poll_overlay_outcome(&mut self) -> Option<OverlayOutcome> {
         if self.headless {
             if let Some(deadline) = self.headless_break_deadline
@@ -133,7 +277,7 @@ impl DaemonHost<'_> {
         if let Some(el) = self.event_loop {
             el.prepare_child_activation();
         }
-        match spawn_settings_subprocess(self.config_file) {
+        match spawn_settings_subprocess(self.config_file, self.socket_path) {
             Ok(child) => self.settings_child = Some(child),
             Err(err) => eprintln!("Warning: failed to open settings window: {err}"),
         }
@@ -255,10 +399,23 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     } else {
         OsNotifier::new()
     };
+    if !headless {
+        sye_platform::cleanup_current_stale_old_executable();
+    }
+
+    let (cached_update, _) = if headless {
+        (UpdateCacheState::default(), None)
+    } else {
+        UpdateCacheState::load_or_default(&paths.update_cache_file)
+    };
+    let initial_available_update = cached_update.available_update(CURRENT_VERSION);
+
     let mut host = DaemonHost {
         headless,
         config_file: &paths.config_file,
         session_file: &paths.session_file,
+        update_cache_file: &paths.update_cache_file,
+        socket_path: &paths.socket_path,
         event_loop: app_loop.as_ref(),
         notifier,
         audio: OsAudioPlayer::new(),
@@ -268,12 +425,20 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         settings_child: None,
         settings_exited: false,
         tray,
+        available_update: initial_available_update,
+        update_in_progress: false,
+        update_apply_rx: None,
         headless_break_deadline: None,
+        update_notice_dismiss_at: None,
     };
+    host.sync_tray_update();
 
     let mut last_policy_check = Instant::now();
     let mut last_config_poll = Instant::now();
     let mut config_mtime = config_modified_at(&paths.config_file);
+    let mut update_check_rx: Option<mpsc::Receiver<Option<UpdateInfo>>> = None;
+    let mut next_update_check_at = compute_next_update_check(&cached_update);
+    let mut restart_after_exit = false;
 
     host.execute(scheduler.handle_event(SchedulerEvent::Start));
     let launched_at_login = app_loop
@@ -287,9 +452,15 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     }
 
     loop {
-        if !drain_ipc_requests(&server, &mut scheduler, &mut host)
-            || !drain_tray_events(&tray_rx, &mut scheduler, &mut host)
-        {
+        match drain_ipc_requests(&server, &mut scheduler, &mut host) {
+            LoopControl::Continue => {}
+            LoopControl::Quit => break,
+            LoopControl::Restart => {
+                restart_after_exit = true;
+                break;
+            }
+        }
+        if !drain_tray_events(&tray_rx, &mut scheduler, &mut host) {
             break;
         }
 
@@ -303,6 +474,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         }
         let settings_exited = host.take_settings_exited();
         let mut config_changed = false;
+        if settings_exited {
+            host.reload_cached_update();
+        }
         if settings_exited
             || (host.settings_child.is_some()
                 && last_config_poll.elapsed() >= Duration::from_secs(1))
@@ -329,6 +503,55 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         }
         if settings_exited && std::mem::take(&mut restart_on_settings_close) {
             host.execute(scheduler.handle_event(SchedulerEvent::RestartCountdown));
+        }
+
+        if !headless {
+            if let Some(rx) = update_check_rx.as_ref() {
+                match rx.try_recv() {
+                    Ok(found) => {
+                        update_check_rx = None;
+                        host.available_update = found;
+                        host.sync_tray_update();
+                        next_update_check_at =
+                            Instant::now() + Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        update_check_rx = None;
+                        next_update_check_at =
+                            Instant::now() + Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS);
+                    }
+                }
+            } else if scheduler.config().check_for_updates && Instant::now() >= next_update_check_at
+            {
+                let (tx, rx) = mpsc::channel();
+                let cache_path = paths.update_cache_file.clone();
+                if std::thread::Builder::new()
+                    .name("sye-update-check".to_owned())
+                    .spawn(move || {
+                        if let Ok(found) = sye_platform::check_and_cache_update(
+                            &cache_path,
+                            CURRENT_VERSION,
+                            sye_platform::now_unix_secs(),
+                        ) {
+                            let _ = tx.send(found);
+                        }
+                    })
+                    .is_ok()
+                {
+                    update_check_rx = Some(rx);
+                } else {
+                    next_update_check_at =
+                        Instant::now() + Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS);
+                }
+            }
+
+            host.expire_update_notice(scheduler.state());
+            if host.poll_update_apply() {
+                host.execute(scheduler.handle_event(SchedulerEvent::Quit));
+                restart_after_exit = true;
+                break;
+            }
         }
 
         if let Some(outcome) = host.poll_overlay_outcome() {
@@ -369,6 +592,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     host.close_settings();
     drop(host);
     drop(server);
+    if restart_after_exit && let Err(err) = spawn_restarted_daemon(paths, headless) {
+        eprintln!("Warning: failed to restart updated daemon: {err}");
+    }
     if let Some(event_loop) = app_loop {
         event_loop.finish_termination();
     }
@@ -376,13 +602,26 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     ExitCode::SUCCESS
 }
 
+fn compute_next_update_check(cached: &UpdateCacheState) -> Instant {
+    let now = sye_platform::now_unix_secs();
+    if cached.is_check_due(now) {
+        Instant::now() + Duration::from_secs(UPDATE_INITIAL_DELAY_SECS)
+    } else {
+        let elapsed = now.saturating_sub(cached.checked_at_unix_secs);
+        let remaining = UPDATE_CHECK_INTERVAL_SECS
+            .saturating_sub(elapsed)
+            .max(UPDATE_INITIAL_DELAY_SECS);
+        Instant::now() + Duration::from_secs(remaining)
+    }
+}
+
 fn drain_ipc_requests(
     server: &IpcServer,
     scheduler: &mut Scheduler<SystemClock>,
     host: &mut DaemonHost<'_>,
-) -> bool {
+) -> LoopControl {
     loop {
-        let mut should_quit = false;
+        let mut loop_control = LoopControl::Continue;
         let mut open_settings = false;
         let mut deferred_actions: Vec<SchedulerAction> = Vec::new();
 
@@ -418,8 +657,15 @@ fn drain_ipc_requests(
                     IpcResponse::Ok { message: None }
                 }
             }
+            IpcCommand::Restart => {
+                loop_control = LoopControl::Restart;
+                deferred_actions.extend(scheduler.handle_event(SchedulerEvent::Quit));
+                IpcResponse::Ok {
+                    message: Some("Restarting".to_owned()),
+                }
+            }
             IpcCommand::Quit => {
-                should_quit = true;
+                loop_control = LoopControl::Quit;
                 deferred_actions.extend(scheduler.handle_event(SchedulerEvent::Quit));
                 IpcResponse::Ok {
                     message: Some("Quitting".to_owned()),
@@ -433,16 +679,16 @@ fn drain_ipc_requests(
         if open_settings {
             host.open_settings();
         }
-        if should_quit {
-            return false;
+        if loop_control != LoopControl::Continue {
+            return loop_control;
         }
 
         match accepted {
             Ok(true) => {}
-            Ok(false) => return true,
+            Ok(false) => return LoopControl::Continue,
             Err(err) => {
                 eprintln!("Warning: IPC accept error: {err}");
-                return true;
+                return LoopControl::Continue;
             }
         }
     }
@@ -469,6 +715,12 @@ fn drain_tray_events(
                 }
                 Vec::new()
             }
+            TrayEvent::UpdateApp => {
+                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                    host.trigger_tray_update();
+                }
+                Vec::new()
+            }
             TrayEvent::Quit => {
                 keep_running = false;
                 scheduler.handle_event(SchedulerEvent::Quit)
@@ -491,16 +743,36 @@ const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
     !menu_locked && !matches!(state, SchedulerState::PreBreak | SchedulerState::Break)
 }
 
-fn spawn_settings_subprocess(config_file: &Path) -> std::io::Result<Child> {
+fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().unwrap_or(exe);
     let mut cmd = Command::new(resolved);
     cmd.arg("--internal-settings")
         .arg("--config")
         .arg(config_file)
+        .arg("--socket")
+        .arg(socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    sye_platform::hide_child_console(&mut cmd).spawn()
+}
+
+fn spawn_restarted_daemon(paths: &AppPaths, headless: bool) -> std::io::Result<Child> {
+    let exe = std::env::current_exe()?;
+    let resolved = exe.canonicalize().unwrap_or(exe);
+    let mut cmd = Command::new(resolved);
+    cmd.arg("--background")
+        .arg("--config")
+        .arg(&paths.config_file)
+        .arg("--socket")
+        .arg(&paths.socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if headless {
+        cmd.arg("--headless");
+    }
     sye_platform::hide_child_console(&mut cmd).spawn()
 }
 

@@ -540,6 +540,83 @@ pub(crate) fn support_link(label: &'static str) -> impl IntoElement {
         )
 }
 
+pub(crate) fn external_link_button(
+    label: impl IntoReactive<SharedString>,
+    href: &'static str,
+    primary: bool,
+) -> impl IntoElement {
+    if primary {
+        link()
+            .href(href)
+            .h(px(36.0))
+            .px_4()
+            .items_center()
+            .justify_center()
+            .rounded(radii::PILL)
+            .bg(colors::ACCENT)
+            .transition()
+            .duration(motion::CONTROL_MS)
+            .ease_out()
+            .hover(|s| s.opacity(0.92))
+            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+            .child(
+                text(label)
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors::ON_ACCENT),
+            )
+            .into_element()
+    } else {
+        link()
+            .href(href)
+            .h(px(36.0))
+            .px_4()
+            .items_center()
+            .justify_center()
+            .rounded(radii::PILL)
+            .bg(colors::BACKGROUND_SURFACE)
+            .border_1()
+            .border_color(colors::BORDER_EMPHASIZED)
+            .transition()
+            .duration(motion::CONTROL_MS)
+            .ease_out()
+            .hover(|s| s.bg(colors::OVERLAY_HOVER))
+            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+            .child(
+                text(label)
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors::TEXT_PRIMARY),
+            )
+            .into_element()
+    }
+}
+
+pub(crate) fn version_update_badge(
+    label: impl IntoReactive<SharedString>,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    button()
+        .on_press(on_press)
+        .h(px(22.0))
+        .px_2()
+        .items_center()
+        .justify_center()
+        .rounded(radii::PILL)
+        .bg(colors::ACCENT)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
+        .hover(|s| s.opacity(0.92))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+        .child(
+            text(label)
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::ON_ACCENT),
+        )
+}
+
 pub(crate) fn build_support_qr_matrix() -> Option<&'static (usize, Box<[bool]>)> {
     static MATRIX: OnceLock<Option<(usize, Box<[bool]>)>> = OnceLock::new();
     MATRIX

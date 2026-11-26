@@ -21,6 +21,7 @@ pub enum IpcCommand {
         kind: Option<BreakType>,
     },
     OpenSettings,
+    Restart,
     Quit,
 }
 
@@ -135,7 +136,7 @@ fn classify_command_error(trimmed: &str) -> IpcErrorCode {
         return IpcErrorCode::InvalidRequest;
     };
     match probe.cmd.as_ref() {
-        "status" | "enable" | "disable" | "take_break" | "open_settings" | "quit" => {
+        "status" | "enable" | "disable" | "take_break" | "open_settings" | "restart" | "quit" => {
             IpcErrorCode::InvalidRequest
         }
         _ => IpcErrorCode::UnknownCommand,
@@ -162,6 +163,7 @@ mod tests {
                 kind: Some(BreakType::Long),
             },
             IpcCommand::OpenSettings,
+            IpcCommand::Restart,
             IpcCommand::Quit,
         ];
 

@@ -23,7 +23,7 @@ The Cargo workspace contains four crates and compiles into one binary named `saf
 3. On macOS and Windows, `PlatformEventLoop` pumps main-thread operating system events without a window or GPU context.
 4. On macOS, `PlatformEventLoop` forwards application reopen requests as `TrayEvent::Reopen`.
 5. On macOS, `PlatformEventLoop` detects Login Item launches (`keyAELaunchedAsLogInItem`).
-6. On macOS, `PlatformEventLoop` yields foreground activation rights to the break overlay and Settings child processes.
+6. On macOS and Windows, `PlatformEventLoop` yields foreground activation rights to the break overlay and Settings child processes and brings an open Settings window to the foreground.
 7. The daemon updates `TrayHandle` on each loop iteration when the tray snapshot changes.
 8. On Linux and Windows, `TrayHandle` updates the native tray hover tooltip with the break countdown; on macOS, `TrayHandle` leaves `NSStatusBarButton.toolTip` unset and shows a lazy icon-anchored tooltip window only while the pointer hovers over the status item for at least 500ms, destroying that window as soon as hover ends or the menu opens.
 9. On macOS, `TrayHandle` runs a timer in `NSEventTrackingRunLoopMode` to update the countdown while the menu stays open.
@@ -283,8 +283,17 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar with automatic save status and a `Reset to defaults` button.
 - Every valid change in the Settings window saves `config.toml` immediately. Invalid input shows a validation banner and keeps the last valid `config.toml` on disk. While the Settings window is open, the daemon checks the `config.toml` modification time every second and applies a changed configuration.
 - The `Reset to defaults` button is disabled while the configuration matches `Config::reset_to_default()` and activates with the accent style when any setting differs from default. Pressing `Reset to defaults` restores defaults and saves immediately.
-- The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.
+- The Floating Sage Sidebar shows the installed version (`v<version>`) at the bottom. When a newer stable release is available, it shows a clickable pill badge (`↑ v<latest>`) next to the version. Clicking the badge opens `About & Support`.
+- The About & Support tab shows the **Updates** section above the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`. The **Updates** section provides the `Check for updates automatically` switch (`Config.check_for_updates`), `Check for Updates`, and either `Update & Restart` or a link to `https://tunglt1810.github.io/safe-your-eyes/`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.
+
+### 10.3 Update Detection and Hybrid Updates
+
+1. When `Config.check_for_updates` is `true` and `--headless` is not set, the daemon checks for a newer stable GitHub Release on a background thread. The first check runs 15 seconds after startup if the cached check is due, and subsequent checks run every 12 hours. The daemon saves the result in `update.toml` next to `session.toml`.
+2. Update checks query the GitHub Releases API and fall back to the `releases/latest` redirect URL if the API fails. Draft releases and pre-release tags that contain `-` are ignored.
+3. When a newer stable release exists, `TrayHandle` inserts an `Update available (v<latest>)` item into the tray menu. The item stays disabled while the menu is locked or while an update runs.
+4. On Windows and Linux with a writable executable directory, triggering an update downloads the platform binary and `SHA256SUMS.txt` and verifies the SHA-256 checksum. After verification, the app replaces the executable atomically and restarts the daemon after it releases the IPC socket. On Windows, the app keeps the previous executable as a `.old` backup. The new daemon starts before the previous process stops, so the new daemon cannot delete the backup at that start. The app deletes the backup at the subsequent start.
+5. On macOS, on read-only installations, or after a self-update error, the app opens the public GitHub Pages download URL (`https://tunglt1810.github.io/safe-your-eyes/`). When Homebrew Cask is detected on macOS, the app also shows the `brew upgrade --cask safe-your-eyes` command.
 
 ## 11. CLI Contract (`safe-your-eyes`)
 
@@ -312,7 +321,7 @@ Modes and control flags:
 - `-h`, `--help`: Print usage information and exit with code 0.
 - `--print-default-config`: Print the default TOML configuration to stdout and exit with code 0.
 - `--validate-config`: Validate `--config <PATH>` and exit with code 0 when valid or code 1 on error.
-- `--internal-overlay <JSON_PAYLOAD>` and `--internal-settings --config <PATH>`: Internal subprocess entry points started by the daemon.
+- `--internal-overlay <JSON_PAYLOAD>` and `--internal-settings --config <PATH> --socket <PATH>`: Internal subprocess entry points started by the daemon.
 
 ## 12. Platform Constraints
 
@@ -352,7 +361,8 @@ This section lists the operating system and framework limits that the code works
 7. `sye-cli/build.rs` embeds the app icon with resource ID 1 (`winresource::set_icon`). The banner loads the icon with this ID.
 8. Windows 10 does not support rounded window corners from DWM. The banner keeps square corners there.
 9. Native caption buttons occupy the top-right corner on Windows and Linux. The Settings window keeps clear space at the top for window drag.
-10. `Path::canonicalize` returns a `\\?\` verbatim prefix on Windows. `sye-platform` strips that prefix before it writes the Windows startup command.
+10. Windows blocks `SetForegroundWindow` when the daemon does not hold the foreground lock, and UIPI blocks `AttachThreadInput` against elevated windows. `PlatformEventLoop::activate_child` restores a minimized child window, attaches thread input when `SetForegroundWindow` fails, and toggles `HWND_TOPMOST` briefly if focus still fails.
+11. `Path::canonicalize` returns a `\\?\` verbatim prefix on Windows. `sye-platform` strips that prefix before it writes the Windows startup command.
 
 ### 12.3 Linux
 

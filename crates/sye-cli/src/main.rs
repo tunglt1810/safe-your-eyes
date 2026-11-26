@@ -207,11 +207,15 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         sye_core::UpdateStrategy::HomebrewCask | sye_core::UpdateStrategy::ManualDownload => None,
     };
 
+    let on_open_download: sye_ui::OpenUrlCallback =
+        Arc::new(|url: &str| sye_platform::open_url(url).map_err(|err| err.to_string()));
+
     let update_config = sye_ui::SettingsUpdateConfig {
         initial_update,
         strategy: Some(strategy),
         on_check_now: Some(on_check_now),
         on_apply_update,
+        on_open_download: Some(on_open_download),
     };
 
     let status_socket_path = paths.socket_path.clone();

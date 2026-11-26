@@ -345,6 +345,7 @@ pub enum ApplyUpdateOutcome {
 pub type CheckUpdatesCallback = Arc<dyn Fn() -> Result<Option<UpdateInfo>, String> + Send + Sync>;
 pub type ApplyUpdateCallback =
     Arc<dyn Fn(&str) -> Result<ApplyUpdateOutcome, String> + Send + Sync>;
+pub type OpenUrlCallback = Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 pub type StatusPollCallback = Arc<dyn Fn() -> Option<StatusSnapshot> + Send + Sync>;
 
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -356,6 +357,7 @@ pub struct SettingsUpdateConfig {
     pub strategy: Option<UpdateStrategy>,
     pub on_check_now: Option<CheckUpdatesCallback>,
     pub on_apply_update: Option<ApplyUpdateCallback>,
+    pub on_open_download: Option<OpenUrlCallback>,
 }
 
 #[derive(Clone, Default)]
@@ -1107,6 +1109,90 @@ fn poll_update_worker(
     }
 }
 
+fn start_apply_update(
+    update_ui: UpdateUiState,
+    apply_cb: &Option<ApplyUpdateCallback>,
+    quit_on_restart: bool,
+) -> bool {
+    if update_ui.busy.get_untracked() {
+        return false;
+    }
+    let Some(info) = update_ui.available.get_untracked() else {
+        return false;
+    };
+    let Some(cb) = apply_cb.clone() else {
+        return false;
+    };
+    update_ui.busy.set(true);
+    update_ui.applying.set(true);
+    update_ui.is_error.set(false);
+    update_ui.status_text.set(Some(format!(
+        "Downloading and verifying v{}...",
+        info.latest_version
+    )));
+    let (tx, rx) = mpsc::channel();
+    let version = info.latest_version;
+    let _ = std::thread::Builder::new()
+        .name("sye-settings-update".to_owned())
+        .spawn(move || {
+            let _ = tx.send(UpdateWorkerResult::Apply(cb(&version)));
+        });
+    let rx = Rc::new(rx);
+    drop(set_timeout(Duration::from_millis(25), move || {
+        poll_update_worker(rx, update_ui, quit_on_restart);
+    }));
+    true
+}
+
+fn trigger_update_badge_action(
+    vm: Signal<SettingsViewModel>,
+    has_switched_tab: Signal<bool>,
+    update_ui: UpdateUiState,
+    apply_cb: &Option<ApplyUpdateCallback>,
+    open_download_cb: &Option<OpenUrlCallback>,
+    quit_on_restart: bool,
+) {
+    if update_ui.busy.get_untracked() {
+        return;
+    }
+    let Some(info) = update_ui.available.get_untracked() else {
+        return;
+    };
+    vm.update(|m| {
+        if m.active_tab != SettingsTab::About {
+            has_switched_tab.set(true);
+            m.active_tab = SettingsTab::About;
+        }
+    });
+    if matches!(update_ui.strategy, UpdateStrategy::SelfUpdate { .. })
+        && start_apply_update(update_ui, apply_cb, quit_on_restart)
+    {
+        return;
+    }
+    if let Some(open_cb) = open_download_cb {
+        match open_cb(&info.download_url) {
+            Ok(()) => {
+                let message = match update_ui.strategy {
+                    UpdateStrategy::HomebrewCask => {
+                        format!("Opened download page. Or run: {HOMEBREW_UPGRADE_COMMAND}")
+                    }
+                    UpdateStrategy::SelfUpdate { .. } | UpdateStrategy::ManualDownload => {
+                        "Opened download page.".to_owned()
+                    }
+                };
+                update_ui.is_error.set(false);
+                update_ui.status_text.set(Some(message));
+            }
+            Err(err) => {
+                update_ui.is_error.set(true);
+                update_ui
+                    .status_text
+                    .set(Some(format!("Failed to open download page: {err}")));
+            }
+        }
+    }
+}
+
 fn about_section(
     vm: Signal<SettingsViewModel>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
@@ -1207,33 +1293,11 @@ fn about_section(
                                     },
                                     || false,
                                     move || {
-                                        if update_ui.busy.get_untracked() {
-                                            return;
-                                        }
-                                        let Some(info) = update_ui.available.get_untracked() else {
-                                            return;
-                                        };
-                                        let Some(cb) = apply.clone() else {
-                                            return;
-                                        };
-                                        update_ui.busy.set(true);
-                                        update_ui.applying.set(true);
-                                        update_ui.is_error.set(false);
-                                        update_ui.status_text.set(Some(format!(
-                                            "Downloading and verifying v{}...",
-                                            info.latest_version
-                                        )));
-                                        let (tx, rx) = mpsc::channel();
-                                        let version = info.latest_version;
-                                        let _ = std::thread::Builder::new()
-                                            .name("sye-settings-update".to_owned())
-                                            .spawn(move || {
-                                                let _ = tx.send(UpdateWorkerResult::Apply(cb(&version)));
-                                            });
-                                        let rx = Rc::new(rx);
-                                        drop(set_timeout(Duration::from_millis(25), move || {
-                                            poll_update_worker(rx, update_ui, quit_on_restart);
-                                        }));
+                                        let _ = start_apply_update(
+                                            update_ui,
+                                            &apply,
+                                            quit_on_restart,
+                                        );
                                     },
                                 )
                             },
@@ -1428,6 +1492,7 @@ pub(crate) fn build_settings_view_with_hooks(
     };
     let on_check_now = update_config.on_check_now;
     let on_apply_update = update_config.on_apply_update;
+    let on_open_download = update_config.on_open_download;
 
     let active_tab = computed(move || vm.with(|m| m.active_tab));
     let warning_msg = computed(move || vm.with(|m| m.load_warning.clone()));
@@ -1485,6 +1550,8 @@ pub(crate) fn build_settings_view_with_hooks(
         ));
     }
 
+    let badge_apply_cb = on_apply_update.clone();
+    let badge_open_cb = on_open_download;
     let sidebar = view()
         .w(px(210.0))
         .flex_shrink_0()
@@ -1548,19 +1615,23 @@ pub(crate) fn build_settings_view_with_hooks(
                 .child(when(
                     move || update_ui.available.get().is_some(),
                     move || {
+                        let apply_cb = badge_apply_cb.clone();
+                        let open_cb = badge_open_cb.clone();
                         version_update_badge(
                             move || {
                                 update_ui.available.get().map_or_else(String::new, |info| {
-                                    format!("↑ v{}", info.latest_version)
+                                    format!("v{}", info.latest_version)
                                 })
                             },
                             move || {
-                                vm.update(|m| {
-                                    if m.active_tab != SettingsTab::About {
-                                        has_switched_tab.set(true);
-                                        m.active_tab = SettingsTab::About;
-                                    }
-                                });
+                                trigger_update_badge_action(
+                                    vm,
+                                    has_switched_tab,
+                                    update_ui,
+                                    &apply_cb,
+                                    &open_cb,
+                                    quit_on_finish,
+                                );
                             },
                         )
                     },
@@ -2860,8 +2931,12 @@ mod tests {
         let dir = RepoTempDir::new("headless-updates")?;
         let config_path = dir.file("updates.toml");
         static UPDATE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static APPLIED_VERSIONS: Mutex<Vec<String>> = Mutex::new(Vec::new());
         if let Ok(mut guard) = UPDATE_PATH.lock() {
             *guard = Some(config_path.clone());
+        }
+        if let Ok(mut guard) = APPLIED_VERSIONS.lock() {
+            guard.clear();
         }
 
         #[component]
@@ -2887,7 +2962,13 @@ mod tests {
                         download_url: DOWNLOAD_PAGE_URL.to_owned(),
                     }))
                 })),
-                on_apply_update: Some(Arc::new(|_| Ok(ApplyUpdateOutcome::UpdatedStandalone))),
+                on_apply_update: Some(Arc::new(|ver| {
+                    if let Ok(mut guard) = APPLIED_VERSIONS.lock() {
+                        guard.push(ver.to_owned());
+                    }
+                    Ok(ApplyUpdateOutcome::UpdatedStandalone)
+                })),
+                on_open_download: None,
             };
             build_settings_view_with_hooks(
                 vm,
@@ -2905,10 +2986,10 @@ mod tests {
             ..EngineConfig::new(Root::of::<TestUpdateSettings>())
         })
         .map_err(|e| e.to_string())?;
-        app.wait_for("↑ v9.9.9")?;
+        app.wait_for("v9.9.9")?;
         assert!(app.shows(concat!("v", env!("CARGO_PKG_VERSION"))));
 
-        app.press("↑ v9.9.9")?;
+        app.press("About & Support")?;
         app.wait_for("Updates")?;
         assert!(app.shows("Update & Restart"));
         assert!(app.shows("Download Page"));
@@ -2916,14 +2997,100 @@ mod tests {
         assert!(app.shows("Check for updates automatically"));
 
         app.press("Check for Updates")?;
-        app.wait_for("↑ v9.9.10")?;
+        app.wait_for("v9.9.10")?;
         assert!(app.shows("Version v9.9.10 is available."));
+
+        app.press("v9.9.10")?;
+        app.wait_for(
+            "Update installed and verified. Restart Safe Your Eyes to use the new version.",
+        )?;
+        assert_eq!(
+            APPLIED_VERSIONS
+                .lock()
+                .map(|g| g.clone())
+                .unwrap_or_default(),
+            vec!["9.9.10".to_owned()]
+        );
 
         app.press("Check for updates automatically")?;
         drop(app);
 
         let reloaded = Config::load_from_path(&config_path)?;
         assert!(!reloaded.check_for_updates);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_update_badge_opens_download_page_for_homebrew_cask()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-homebrew-badge")?;
+        let config_path = dir.file("homebrew.toml");
+        static HOMEBREW_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static OPENED_URLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        if let Ok(mut guard) = HOMEBREW_PATH.lock() {
+            *guard = Some(config_path);
+        }
+        if let Ok(mut guard) = OPENED_URLS.lock() {
+            guard.clear();
+        }
+
+        #[component]
+        fn TestHomebrewBadgeSettings() -> impl IntoElement {
+            let path = HOMEBREW_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            let update_cfg = SettingsUpdateConfig {
+                initial_update: Some(UpdateInfo {
+                    latest_version: "9.9.9".to_owned(),
+                    download_url: DOWNLOAD_PAGE_URL.to_owned(),
+                }),
+                strategy: Some(UpdateStrategy::HomebrewCask),
+                on_check_now: None,
+                on_apply_update: None,
+                on_open_download: Some(Arc::new(|url| {
+                    if let Ok(mut guard) = OPENED_URLS.lock() {
+                        guard.push(url.to_owned());
+                    }
+                    Ok(())
+                })),
+            };
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                None,
+                update_cfg,
+                SettingsStatusConfig::default(),
+            )
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestHomebrewBadgeSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("v9.9.9")?;
+
+        app.press("v9.9.9")?;
+        app.wait_for("Updates")?;
+        app.wait_for(&format!(
+            "Opened download page. Or run: {HOMEBREW_UPGRADE_COMMAND}"
+        ))?;
+
+        // Pressing the badge again while already on About & Support must still open the download page.
+        app.press("v9.9.9")?;
+        assert_eq!(
+            OPENED_URLS.lock().map(|g| g.clone()).unwrap_or_default(),
+            vec![DOWNLOAD_PAGE_URL.to_owned(), DOWNLOAD_PAGE_URL.to_owned()]
+        );
         Ok(())
     }
 

@@ -8,16 +8,18 @@ use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
 use nsh_core::element::desktop::{current_window, quit, title_bar};
 use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
+use sye_core::scheduler::{SchedulerState, StatusSnapshot};
 use sye_core::{HOMEBREW_UPGRADE_COMMAND, UpdateInfo, UpdateStrategy};
 
 use crate::UiError;
+use crate::overlay::format_mm_ss;
 use crate::theme::{
     DOWNLOAD_PAGE_URL, SUPPORT_URL, appearance_for_theme_mode, colors, motion, next_theme_mode,
     radii, theme_mode_for_appearance,
 };
 use crate::ui::{
-    KpiTone, app_icon, cozy_input, cozy_input_with_disabled, cozy_switch,
-    cozy_switch_with_disabled, destructive_button, external_link_button, page_heading,
+    CountdownTone, KpiTone, app_icon, countdown_status_pill, cozy_input, cozy_input_with_disabled,
+    cozy_switch, cozy_switch_with_disabled, destructive_button, external_link_button, page_heading,
     pastel_kpi_card, primary_button_with_disabled, secondary_button, section_divider,
     section_header, sidebar_nav_indicator, sidebar_nav_item, stagger_item, status_banner,
     support_link, support_qr_card, theme_toggle_button, version_update_badge,
@@ -343,6 +345,9 @@ pub enum ApplyUpdateOutcome {
 pub type CheckUpdatesCallback = Arc<dyn Fn() -> Result<Option<UpdateInfo>, String> + Send + Sync>;
 pub type ApplyUpdateCallback =
     Arc<dyn Fn(&str) -> Result<ApplyUpdateOutcome, String> + Send + Sync>;
+pub type StatusPollCallback = Arc<dyn Fn() -> Option<StatusSnapshot> + Send + Sync>;
+
+const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Default)]
 pub struct SettingsUpdateConfig {
@@ -350,6 +355,48 @@ pub struct SettingsUpdateConfig {
     pub strategy: Option<UpdateStrategy>,
     pub on_check_now: Option<CheckUpdatesCallback>,
     pub on_apply_update: Option<ApplyUpdateCallback>,
+}
+
+#[derive(Clone, Default)]
+pub struct SettingsStatusConfig {
+    pub initial_status: Option<StatusSnapshot>,
+    pub on_poll_status: Option<StatusPollCallback>,
+}
+
+fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<(CountdownTone, String)> {
+    if snapshot.state == SchedulerState::Quit {
+        return None;
+    }
+    if !snapshot.enabled || snapshot.state == SchedulerState::Stopped {
+        return Some((CountdownTone::Disabled, "Disabled".to_owned()));
+    }
+    match snapshot.state {
+        SchedulerState::Waiting => {
+            let kind = match snapshot.next_break_type {
+                Some(BreakType::Short) => "Short",
+                Some(BreakType::Long) => "Long",
+                None => "Next",
+            };
+            Some((
+                CountdownTone::Active,
+                format!(
+                    "{kind} · {}",
+                    format_mm_ss(snapshot.seconds_until_next_break)
+                ),
+            ))
+        }
+        SchedulerState::PreBreak => Some((
+            CountdownTone::Warning,
+            format!(
+                "Starting · {}",
+                format_mm_ss(snapshot.seconds_until_next_break)
+            ),
+        )),
+        SchedulerState::Break => Some((CountdownTone::Break, "Break active".to_owned())),
+        SchedulerState::Resting => Some((CountdownTone::Paused, "Paused (idle)".to_owned())),
+        SchedulerState::Start => Some((CountdownTone::Disabled, "Starting...".to_owned())),
+        SchedulerState::Stopped | SchedulerState::Quit => None,
+    }
 }
 
 type AutostartHook = Arc<dyn Fn(bool) + Send + Sync>;
@@ -360,6 +407,7 @@ struct SettingsLaunch {
     on_autostart_change: Option<AutostartHook>,
     on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
+    status_config: SettingsStatusConfig,
 }
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
@@ -1300,6 +1348,7 @@ pub(crate) fn build_settings_view(
         None,
         None,
         SettingsUpdateConfig::default(),
+        SettingsStatusConfig::default(),
     )
 }
 
@@ -1310,6 +1359,7 @@ pub(crate) fn build_settings_view_with_hooks(
     on_autostart_change: Option<AutostartHook>,
     on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
+    status_config: SettingsStatusConfig,
 ) -> impl IntoElement {
     if quit_on_finish {
         let main_win = current_window();
@@ -1325,6 +1375,42 @@ pub(crate) fn build_settings_view_with_hooks(
     let vm = signal(initial_vm);
     let appearance = signal(initial_appearance);
     let has_switched_tab = signal(false);
+
+    let poll_immediately = status_config.initial_status.is_none();
+    let live_status = signal(status_config.initial_status);
+    if let Some(poll_status) = status_config.on_poll_status {
+        let (tx, rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let _ = std::thread::Builder::new()
+            .name("sye-settings-status".to_owned())
+            .spawn(move || {
+                if poll_immediately && tx.send(poll_status()).is_err() {
+                    return;
+                }
+                while matches!(
+                    stop_rx.recv_timeout(STATUS_POLL_INTERVAL),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    if tx.send(poll_status()).is_err() {
+                        break;
+                    }
+                }
+            });
+        let _status_timer = set_interval(Duration::from_millis(100), move || {
+            let _keep_alive = &stop_tx;
+            let mut latest = None;
+            while let Ok(snap) = rx.try_recv() {
+                latest = Some(snap);
+            }
+            if let Some(next) = latest
+                && live_status.get_untracked() != next
+            {
+                live_status.set(next);
+            }
+        });
+    }
+    let countdown_pill =
+        computed(move || live_status.with(|snap| snap.as_ref().and_then(format_countdown_pill)));
 
     let update_ui = UpdateUiState {
         available: signal(update_config.initial_update),
@@ -1530,31 +1616,57 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || active_tab.get().label(),
                     &highlight_scale,
                 ))
-                .child(theme_toggle_button(
-                    move || theme_mode_for_appearance(appearance.get()),
-                    move || {
-                        let next_mode =
-                            next_theme_mode(theme_mode_for_appearance(appearance.get()));
-                        let next_appearance = appearance_for_theme_mode(next_mode);
-                        let mut saved = false;
-                        vm.update(|m| {
-                            m.config.theme = next_mode;
-                            if m.autosave().is_ok() {
-                                saved = true;
-                            } else {
-                                let _ = m.persist_theme();
-                            }
-                        });
-                        if saved {
-                            crate::store_outcome(&theme_sink, SettingsOutcome::Saved);
-                        }
-                        appearance.set(next_appearance);
-                        set_color_scheme(next_appearance);
-                        if let Some(cb) = &toggle_theme_hook {
-                            cb(next_mode);
-                        }
-                    },
-                )),
+                .child(
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(when(
+                            move || countdown_pill.with(Option::is_some),
+                            move || {
+                                countdown_status_pill(
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref()
+                                                .map_or(CountdownTone::Disabled, |(tone, _)| *tone)
+                                        })
+                                    },
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref().map_or_else(String::new, |(_, label)| {
+                                                label.clone()
+                                            })
+                                        })
+                                    },
+                                )
+                            },
+                        ))
+                        .child(theme_toggle_button(
+                            move || theme_mode_for_appearance(appearance.get()),
+                            move || {
+                                let next_mode =
+                                    next_theme_mode(theme_mode_for_appearance(appearance.get()));
+                                let next_appearance = appearance_for_theme_mode(next_mode);
+                                let mut saved = false;
+                                vm.update(|m| {
+                                    m.config.theme = next_mode;
+                                    if m.autosave().is_ok() {
+                                        saved = true;
+                                    } else {
+                                        let _ = m.persist_theme();
+                                    }
+                                });
+                                if saved {
+                                    crate::store_outcome(&theme_sink, SettingsOutcome::Saved);
+                                }
+                                appearance.set(next_appearance);
+                                set_color_scheme(next_appearance);
+                                if let Some(cb) = &toggle_theme_hook {
+                                    cb(next_mode);
+                                }
+                            },
+                        )),
+                ),
         )
         .child(kpi_row)
         .child(when(
@@ -1732,6 +1844,7 @@ fn SettingsRoot() -> impl IntoElement {
             launch.on_autostart_change,
             launch.on_theme_change,
             launch.update_config,
+            launch.status_config,
         )
         .into_element(),
         None => view()
@@ -1759,6 +1872,7 @@ pub fn run_settings_with_autostart(
         on_autostart_change,
         None,
         SettingsUpdateConfig::default(),
+        SettingsStatusConfig::default(),
     )
 }
 
@@ -1768,6 +1882,7 @@ pub fn run_settings_with_hooks(
     on_autostart_change: Option<AutostartChangeCallback>,
     on_theme_change: Option<ThemeChangeCallback>,
     update_config: SettingsUpdateConfig,
+    status_config: SettingsStatusConfig,
 ) -> Result<SettingsOutcome, UiError> {
     let vm = load_settings_vm(config_path, system_autostart);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
@@ -1785,6 +1900,7 @@ pub fn run_settings_with_hooks(
         on_autostart_change,
         on_theme_change,
         update_config,
+        status_config,
     });
     drop(guard);
 
@@ -2571,6 +2687,7 @@ mod tests {
                 Some(hook),
                 None,
                 SettingsUpdateConfig::default(),
+                SettingsStatusConfig::default(),
             )
         }
 
@@ -2640,6 +2757,7 @@ mod tests {
                 Some(hook),
                 None,
                 SettingsUpdateConfig::default(),
+                SettingsStatusConfig::default(),
             )
         }
 
@@ -2767,7 +2885,15 @@ mod tests {
                 })),
                 on_apply_update: Some(Arc::new(|_| Ok(ApplyUpdateOutcome::UpdatedStandalone))),
             };
-            build_settings_view_with_hooks(vm, sink, false, None, None, update_cfg)
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                None,
+                update_cfg,
+                SettingsStatusConfig::default(),
+            )
         }
 
         let mut app = Headless::start(EngineConfig {
@@ -2830,6 +2956,7 @@ mod tests {
                 None,
                 Some(theme_hook),
                 SettingsUpdateConfig::default(),
+                SettingsStatusConfig::default(),
             )
         }
 
@@ -2859,6 +2986,219 @@ mod tests {
         assert_eq!(
             events,
             vec![ThemeMode::Light, ThemeMode::Dark, ThemeMode::System]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn format_countdown_pill_covers_all_scheduler_states() {
+        let base = StatusSnapshot {
+            state: SchedulerState::Waiting,
+            enabled: true,
+            next_break_type: Some(BreakType::Short),
+            next_break_name: Some("Blink".to_owned()),
+            seconds_until_next_break: 872,
+            consecutive_skips: 0,
+        };
+        assert_eq!(
+            format_countdown_pill(&base),
+            Some((CountdownTone::Active, "Short · 14:32".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                next_break_type: Some(BreakType::Long),
+                seconds_until_next_break: 4500,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Active, "Long · 75:00".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                next_break_type: None,
+                seconds_until_next_break: 65,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Active, "Next · 01:05".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::PreBreak,
+                seconds_until_next_break: 8,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Warning, "Starting · 00:08".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::Break,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Break, "Break active".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::Resting,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Paused, "Paused (idle)".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::Stopped,
+                enabled: false,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Disabled, "Disabled".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                enabled: false,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Disabled, "Disabled".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::Start,
+                ..base.clone()
+            }),
+            Some((CountdownTone::Disabled, "Starting...".to_owned()))
+        );
+        assert_eq!(
+            format_countdown_pill(&StatusSnapshot {
+                state: SchedulerState::Quit,
+                ..base
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn nsh_headless_header_countdown_pill_renders_left_of_theme_and_updates_live()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-countdown-pill")?;
+        let path = dir.file("countdown.toml");
+
+        let initial_snapshot = StatusSnapshot {
+            state: SchedulerState::Waiting,
+            enabled: true,
+            next_break_type: Some(BreakType::Short),
+            next_break_name: Some("Look away".to_owned()),
+            seconds_until_next_break: 872,
+            consecutive_skips: 0,
+        };
+        let polled_snapshot: Arc<Mutex<Option<StatusSnapshot>>> =
+            Arc::new(Mutex::new(Some(StatusSnapshot {
+                seconds_until_next_break: 871,
+                ..initial_snapshot.clone()
+            })));
+
+        static PILL_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        static PILL_INITIAL: Mutex<Option<StatusSnapshot>> = Mutex::new(None);
+        static PILL_SOURCE: Mutex<Option<Arc<Mutex<Option<StatusSnapshot>>>>> = Mutex::new(None);
+
+        #[component]
+        fn TestCountdownSettings() -> impl IntoElement {
+            let path = PILL_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let initial = PILL_INITIAL.lock().ok().and_then(|mut g| g.take());
+            let source = PILL_SOURCE.lock().ok().and_then(|mut g| g.take());
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            let on_poll_status = source.map(|src| -> StatusPollCallback {
+                Arc::new(move || src.lock().ok().and_then(|g| g.clone()))
+            });
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                None,
+                SettingsUpdateConfig::default(),
+                SettingsStatusConfig {
+                    initial_status: initial,
+                    on_poll_status,
+                },
+            )
+        }
+
+        if let Ok(mut guard) = PILL_PATH.lock() {
+            *guard = Some(path);
+        }
+        if let Ok(mut guard) = PILL_INITIAL.lock() {
+            *guard = Some(initial_snapshot.clone());
+        }
+        if let Ok(mut guard) = PILL_SOURCE.lock() {
+            *guard = Some(Arc::clone(&polled_snapshot));
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestCountdownSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Short · 14:32")?;
+        assert!(app.shows("Theme: System"));
+
+        let nodes = app.screen().layout_nodes();
+        let pill_node = nodes
+            .iter()
+            .find(|n| {
+                n.text
+                    .as_ref()
+                    .is_some_and(|t| t.text.visible_text() == "Short · 14:32")
+            })
+            .ok_or("expected countdown pill text node")?;
+        let theme_node = nodes
+            .iter()
+            .find(|n| {
+                n.text
+                    .as_ref()
+                    .is_some_and(|t| t.text.visible_text() == "Theme: System")
+            })
+            .ok_or("expected theme toggle text node")?;
+        assert!(
+            pill_node.bounds.origin.x.0 < theme_node.bounds.origin.x.0,
+            "Countdown pill must sit to the left of Theme toggle, got pill={:?}, theme={:?}",
+            pill_node.bounds,
+            theme_node.bounds
+        );
+        assert!(
+            (pill_node.bounds.origin.y.0 - theme_node.bounds.origin.y.0).abs() < 2.0,
+            "Countdown pill must align vertically with Theme toggle, got pill={:?}, theme={:?}",
+            pill_node.bounds,
+            theme_node.bounds
+        );
+
+        app.press("Policies")?;
+        app.wait_for("Break Enforcement")?;
+        app.wait_for("Short · 14:31")?;
+
+        if let Ok(mut guard) = polled_snapshot.lock() {
+            *guard = Some(StatusSnapshot {
+                state: SchedulerState::Resting,
+                ..initial_snapshot
+            });
+        }
+        app.wait_for("Paused (idle)")?;
+
+        if let Ok(mut guard) = polled_snapshot.lock() {
+            *guard = None;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while app.shows("Paused (idle)") && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+            app.settle();
+        }
+        assert!(
+            !app.shows("Paused (idle)"),
+            "Countdown pill must hide when daemon status becomes unavailable"
         );
         Ok(())
     }

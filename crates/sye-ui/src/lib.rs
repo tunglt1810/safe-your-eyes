@@ -18,8 +18,9 @@ pub use overlay::{
 };
 pub use settings::{
     ApplyUpdateCallback, ApplyUpdateOutcome, AutostartChangeCallback, CheckUpdatesCallback,
-    SettingsOutcome, SettingsTab, SettingsUpdateConfig, SettingsViewModel, ThemeChangeCallback,
-    run_settings, run_settings_with_autostart, run_settings_with_hooks,
+    SettingsOutcome, SettingsStatusConfig, SettingsTab, SettingsUpdateConfig, SettingsViewModel,
+    StatusPollCallback, ThemeChangeCallback, run_settings, run_settings_with_autostart,
+    run_settings_with_hooks,
 };
 pub use theme::{DOWNLOAD_PAGE_URL, SUPPORT_URL};
 

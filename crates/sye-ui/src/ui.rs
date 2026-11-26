@@ -178,6 +178,63 @@ pub(crate) fn theme_toggle_button(
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CountdownTone {
+    Active,
+    Warning,
+    Break,
+    Paused,
+    Disabled,
+}
+
+impl CountdownTone {
+    const fn dot_color(self) -> AdaptiveColor {
+        match self {
+            Self::Active => crate::theme::kpi::SAGE_ACCENT,
+            Self::Warning => colors::WARNING,
+            Self::Break => colors::ACCENT,
+            Self::Paused => crate::theme::kpi::MIST_ACCENT,
+            Self::Disabled => colors::TEXT_DISABLED,
+        }
+    }
+}
+
+pub(crate) fn countdown_status_pill(
+    tone: impl Fn() -> CountdownTone + 'static,
+    label: impl IntoReactive<SharedString>,
+) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+
+    view()
+        .h(px(36.0))
+        .px_3()
+        .flex_row()
+        .items_center()
+        .gap_2()
+        .rounded(radii::PILL)
+        .bg(colors::BACKGROUND_SURFACE)
+        .border_1()
+        .border_color(colors::BORDER_EMPHASIZED)
+        .transition_colors()
+        .duration(motion::THEME_COLOR_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
+        .child(
+            view()
+                .w(px(8.0))
+                .h(px(8.0))
+                .rounded(radii::PILL)
+                .flex_shrink_0()
+                .bg(move || tone().dot_color()),
+        )
+        .child(
+            text(label)
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::TEXT_PRIMARY)
+                .tabular_nums(),
+        )
+}
+
 pub(crate) fn section_header(title: &'static str, caption: &'static str) -> impl IntoElement {
     view()
         .gap_1()

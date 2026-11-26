@@ -214,18 +214,38 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         on_apply_update,
     };
 
+    let status_socket_path = paths.socket_path.clone();
+    let status_config = sye_ui::SettingsStatusConfig {
+        initial_status: query_daemon_status(&paths.socket_path),
+        on_poll_status: Some(Arc::new(move || query_daemon_status(&status_socket_path))),
+    };
+
     match sye_ui::run_settings_with_hooks(
         config_file.clone(),
         initial_system_autostart,
         Some(on_autostart_change),
         Some(Arc::new(sye_platform::sync_own_windows_appearance)),
         update_config,
+        status_config,
     ) {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn query_daemon_status(
+    socket_path: &std::path::Path,
+) -> Option<sye_core::scheduler::StatusSnapshot> {
+    match IpcClient::send_command_with_timeout(
+        socket_path,
+        &IpcCommand::Status,
+        std::time::Duration::from_millis(250),
+    ) {
+        Ok(IpcResponse::Status(snapshot)) => Some(snapshot),
+        _ => None,
     }
 }
 

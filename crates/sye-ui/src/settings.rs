@@ -1152,18 +1152,18 @@ fn trigger_update_badge_action(
     open_download_cb: &Option<OpenUrlCallback>,
     quit_on_restart: bool,
 ) {
-    if update_ui.busy.get_untracked() {
-        return;
-    }
-    let Some(info) = update_ui.available.get_untracked() else {
-        return;
-    };
     vm.update(|m| {
         if m.active_tab != SettingsTab::About {
             has_switched_tab.set(true);
             m.active_tab = SettingsTab::About;
         }
     });
+    if update_ui.busy.get_untracked() {
+        return;
+    }
+    let Some(info) = update_ui.available.get_untracked() else {
+        return;
+    };
     if matches!(update_ui.strategy, UpdateStrategy::SelfUpdate { .. })
         && start_apply_update(update_ui, apply_cb, quit_on_restart)
     {
@@ -3085,7 +3085,6 @@ mod tests {
             "Opened download page. Or run: {HOMEBREW_UPGRADE_COMMAND}"
         ))?;
 
-        // Pressing the badge again while already on About & Support must still open the download page.
         app.press("v9.9.9")?;
         assert_eq!(
             OPENED_URLS.lock().map(|g| g.clone()).unwrap_or_default(),

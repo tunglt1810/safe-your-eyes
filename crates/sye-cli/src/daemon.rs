@@ -510,6 +510,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         sye_platform::cleanup_current_stale_old_executable();
     }
 
+    let initial_update_cache_fingerprint = (!headless)
+        .then(|| file_fingerprint(&paths.update_cache_file))
+        .flatten();
     let (cached_update, _) = if headless {
         (UpdateCacheState::default(), None)
     } else {
@@ -547,9 +550,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let mut last_config_poll = Instant::now();
     let mut last_update_cache_poll = Instant::now();
     let mut config_mtime = config_modified_at(&paths.config_file);
-    let mut update_cache_fingerprint = (!headless)
-        .then(|| file_fingerprint(&paths.update_cache_file))
-        .flatten();
+    let mut update_cache_fingerprint = initial_update_cache_fingerprint;
     let mut last_update_cache = cached_update;
     let mut update_check_rx: Option<mpsc::Receiver<Option<UpdateInfo>>> = None;
     let mut next_update_check_at = compute_next_update_check(&last_update_cache);

@@ -348,6 +348,7 @@ pub type ApplyUpdateCallback =
 pub type StatusPollCallback = Arc<dyn Fn() -> Option<StatusSnapshot> + Send + Sync>;
 
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
+const STATUS_MISSES_BEFORE_HIDE: u32 = 2;
 
 #[derive(Clone, Default)]
 pub struct SettingsUpdateConfig {
@@ -364,13 +365,10 @@ pub struct SettingsStatusConfig {
 }
 
 fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<(CountdownTone, String)> {
-    if snapshot.state == SchedulerState::Quit {
-        return None;
-    }
-    if !snapshot.enabled || snapshot.state == SchedulerState::Stopped {
-        return Some((CountdownTone::Disabled, "Disabled".to_owned()));
-    }
     match snapshot.state {
+        SchedulerState::Quit => None,
+        _ if !snapshot.enabled => Some((CountdownTone::Disabled, "Disabled".to_owned())),
+        SchedulerState::Stopped => Some((CountdownTone::Disabled, "Disabled".to_owned())),
         SchedulerState::Waiting => {
             let kind = match snapshot.next_break_type {
                 Some(BreakType::Short) => "Short",
@@ -395,7 +393,6 @@ fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<(CountdownTone, St
         SchedulerState::Break => Some((CountdownTone::Break, "Break active".to_owned())),
         SchedulerState::Resting => Some((CountdownTone::Paused, "Paused (idle)".to_owned())),
         SchedulerState::Start => Some((CountdownTone::Disabled, "Starting...".to_owned())),
-        SchedulerState::Stopped | SchedulerState::Quit => None,
     }
 }
 
@@ -1387,11 +1384,18 @@ pub(crate) fn build_settings_view_with_hooks(
                 if poll_immediately && tx.send(poll_status()).is_err() {
                     return;
                 }
+                let mut misses = 0_u32;
                 while matches!(
                     stop_rx.recv_timeout(STATUS_POLL_INTERVAL),
                     Err(mpsc::RecvTimeoutError::Timeout)
                 ) {
-                    if tx.send(poll_status()).is_err() {
+                    let snapshot = poll_status();
+                    // One slow IPC reply must not hide the pill for a poll cycle.
+                    misses = if snapshot.is_some() { 0 } else { misses + 1 };
+                    if snapshot.is_none() && misses < STATUS_MISSES_BEFORE_HIDE {
+                        continue;
+                    }
+                    if tx.send(snapshot).is_err() {
                         break;
                     }
                 }

@@ -23,7 +23,7 @@ The Cargo workspace contains four crates and compiles into one binary named `saf
 3. On macOS and Windows, `PlatformEventLoop` pumps main-thread operating system events without a window or GPU context.
 4. On macOS, `PlatformEventLoop` forwards application reopen requests as `TrayEvent::Reopen`.
 5. On macOS, `PlatformEventLoop` detects Login Item launches (`keyAELaunchedAsLogInItem`).
-6. On macOS, `PlatformEventLoop` yields foreground activation rights to the break overlay and Settings child processes.
+6. On macOS and Windows, `PlatformEventLoop` yields foreground activation rights to the break overlay and Settings child processes and brings an open Settings window to the foreground.
 7. The daemon updates `TrayHandle` on each loop iteration when the tray snapshot changes.
 8. On Linux and Windows, `TrayHandle` updates the native tray hover tooltip with the break countdown; on macOS, `TrayHandle` leaves `NSStatusBarButton.toolTip` unset and shows a lazy icon-anchored tooltip window only while the pointer hovers over the status item for at least 500ms, destroying that window as soon as hover ends or the menu opens.
 9. On macOS, `TrayHandle` runs a timer in `NSEventTrackingRunLoopMode` to update the countdown while the menu stays open.
@@ -351,6 +351,7 @@ This section lists the operating system and framework limits that the code works
 7. `sye-cli/build.rs` embeds the app icon with resource ID 1 (`winresource::set_icon`). The banner loads the icon with this ID.
 8. Windows 10 does not support rounded window corners from DWM. The banner keeps square corners there.
 9. Native caption buttons occupy the top-right corner on Windows and Linux. The Settings window keeps clear space at the top for window drag.
+10. Windows blocks `SetForegroundWindow` when the daemon does not hold the foreground lock, and UIPI blocks `AttachThreadInput` against elevated windows. `PlatformEventLoop::activate_child` restores a minimized child window, attaches thread input when `SetForegroundWindow` fails, and toggles `HWND_TOPMOST` briefly if focus still fails.
 
 ### 12.3 Linux
 

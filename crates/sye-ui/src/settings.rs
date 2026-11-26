@@ -1349,8 +1349,24 @@ fn settings_main_window_options() -> MainWindowOptions {
 }
 
 type PendingNativeReveal = Rc<RefCell<Option<(u64, [f32; 2], ThemeMode)>>>;
+type QueuedTheme = Rc<Cell<(u64, Option<ThemeMode>)>>;
+
+// The capture round trip defers `apply_state`, so a press that lands before it ends must cycle
+// from the queued mode instead of the stale `appearance`.
+fn queue_theme(queued: &QueuedTheme, mode: ThemeMode) -> u64 {
+    let seq = queued.get().0.wrapping_add(1);
+    queued.set((seq, Some(mode)));
+    seq
+}
+
+fn settle_theme(queued: &QueuedTheme, seq: u64) {
+    if queued.get().0 == seq {
+        queued.set((seq, None));
+    }
+}
 
 fn dispatch_theme_transition(
+    current_mode: ThemeMode,
     next_mode: ThemeMode,
     resolved_origin: [f32; 2],
     hooks: &ThemeTransitionHooks,
@@ -1358,7 +1374,8 @@ fn dispatch_theme_transition(
     reveal_gen: &Rc<Cell<u64>>,
     apply_state: impl FnOnce() + 'static,
 ) {
-    if !reduce_motion()
+    if current_mode != next_mode
+        && !reduce_motion()
         && may_change_resolved_dark(dark(), next_mode)
         && let (Some(capture_cb), Some(_reveal_cb)) = (
             hooks.capture_snapshot.clone(),
@@ -1463,6 +1480,7 @@ pub(crate) fn build_settings_view_with_hooks(
     let reveal_epoch = signal(0_u32);
     let pending_native_reveal: PendingNativeReveal = Rc::new(RefCell::new(None));
     let native_reveal_gen = Rc::new(Cell::new(0_u64));
+    let queued_theme: QueuedTheme = Rc::new(Cell::new((0, None)));
 
     let poll_immediately = status_config.initial_status.is_none();
     let live_status = signal(status_config.initial_status);
@@ -1728,9 +1746,11 @@ pub(crate) fn build_settings_view_with_hooks(
     let toggle_theme_hooks = theme_hooks.clone();
     let toggle_pending_reveal = Rc::clone(&pending_native_reveal);
     let toggle_reveal_gen = Rc::clone(&native_reveal_gen);
+    let toggle_queued_theme = Rc::clone(&queued_theme);
     let reset_theme_hooks = theme_hooks;
     let reset_pending_reveal = pending_native_reveal;
     let reset_reveal_gen = native_reveal_gen;
+    let reset_queued_theme = queued_theme;
 
     let page_header = view()
         .flex_shrink_0()
@@ -1780,11 +1800,17 @@ pub(crate) fn build_settings_view_with_hooks(
                                     [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
                                 });
                                 reveal_origin.set(resolved_origin);
-                                let next_mode =
-                                    next_theme_mode(theme_mode_for_appearance(appearance.get()));
+                                let current_mode = toggle_queued_theme
+                                    .get()
+                                    .1
+                                    .unwrap_or_else(|| theme_mode_for_appearance(appearance.get()));
+                                let next_mode = next_theme_mode(current_mode);
                                 let next_appearance = appearance_for_theme_mode(next_mode);
                                 let sink = Arc::clone(&theme_sink);
+                                let queued = Rc::clone(&toggle_queued_theme);
+                                let seq = queue_theme(&queued, next_mode);
                                 let apply_theme = move || {
+                                    settle_theme(&queued, seq);
                                     let mut saved = false;
                                     vm.update(|m| {
                                         m.config.theme = next_mode;
@@ -1802,6 +1828,7 @@ pub(crate) fn build_settings_view_with_hooks(
                                 };
 
                                 dispatch_theme_transition(
+                                    current_mode,
                                     next_mode,
                                     resolved_origin,
                                     &toggle_theme_hooks,
@@ -1908,9 +1935,16 @@ pub(crate) fn build_settings_view_with_hooks(
                 });
                 reveal_origin.set(resolved_origin);
 
+                let current_mode = reset_queued_theme
+                    .get()
+                    .1
+                    .unwrap_or_else(|| theme_mode_for_appearance(appearance.get()));
                 let sink = Arc::clone(&reset_sink);
                 let autostart_cb = reset_hook.as_ref().map(Arc::clone);
+                let queued = Rc::clone(&reset_queued_theme);
+                let seq = queue_theme(&queued, default_mode);
                 let apply_reset = move || {
+                    settle_theme(&queued, seq);
                     let mut autostart_changed = None;
                     let mut saved = false;
                     vm.update(|m| {
@@ -1934,6 +1968,7 @@ pub(crate) fn build_settings_view_with_hooks(
                 };
 
                 dispatch_theme_transition(
+                    current_mode,
                     default_mode,
                     resolved_origin,
                     &reset_theme_hooks,
@@ -3269,6 +3304,11 @@ mod tests {
         // Reset (Dark -> System Light): captures snapshot, then syncs & reveals.
         app.press("Reset to defaults")?;
         app.wait_for("Theme: System")?;
+        app.press("Policies")?;
+        app.wait_for("Break Enforcement")?;
+        app.press("Strict break (hide Skip)")?;
+        app.press("Reset to defaults")?;
+        app.settle();
         drop(app);
 
         let trace = REVEAL_TRACE.lock().map_err(|e| e.to_string())?.clone();
@@ -3282,6 +3322,7 @@ mod tests {
                 "capture",
                 "sync:System",
                 "reveal:true:480",
+                "sync:System",
             ]
         );
         Ok(())

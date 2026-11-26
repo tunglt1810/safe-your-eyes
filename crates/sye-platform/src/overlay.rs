@@ -152,7 +152,12 @@ impl OverlayLauncher for SubprocessOverlayLauncher {
             .map_err(|err| PlatformError::Io(err.to_string()))?;
         if status.is_none() {
             running.drain_events();
-            return Ok(None);
+            let Some(outcome) = running.cached_outcome else {
+                return Ok(None);
+            };
+            // A Skip or Postpone must not wait for a slow overlay shutdown, or the fallback tick records the break as completed.
+            let _ = self.close();
+            return Ok(Some(outcome));
         }
 
         let Some(mut finished) = self.running.take() else {
@@ -403,6 +408,26 @@ mod tests {
         launcher.launch(&sample_request())?;
         let outcome = wait_for_outcome(&mut launcher, Duration::from_secs(3))?;
         assert_eq!(outcome, OverlayOutcome::Skipped);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subprocess_launcher_returns_outcome_before_process_exits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut launcher = SubprocessOverlayLauncher::with_command(
+            PathBuf::from("/bin/sh"),
+            vec![
+                "-c".to_owned(),
+                r#"printf '{"kind":"skipped"}\n'; sleep 30"#.to_owned(),
+                "--".to_owned(),
+            ],
+        );
+
+        launcher.launch(&sample_request())?;
+        let outcome = wait_for_outcome(&mut launcher, Duration::from_secs(3))?;
+        assert_eq!(outcome, OverlayOutcome::Skipped);
+        assert!(!launcher.is_running());
         Ok(())
     }
 

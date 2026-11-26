@@ -525,7 +525,7 @@ pub(crate) fn build_overlay_view(
     let finish_if_ready = move || {
         let terminal = vm.with(|m| m.outcome().copied());
         if let Some(outcome) = terminal {
-            let first = outcome_sink.lock().map_or(false, |guard| guard.is_none());
+            let first = outcome_sink.lock().is_ok_and(|guard| guard.is_none());
             crate::store_outcome(&outcome_sink, outcome);
             if first && let Some(hook) = on_outcome.as_ref() {
                 hook(outcome);

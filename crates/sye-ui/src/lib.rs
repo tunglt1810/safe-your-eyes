@@ -17,10 +17,11 @@ pub use overlay::{
     run_overlay, run_overlay_with_hook,
 };
 pub use settings::{
-    AutostartChangeCallback, SettingsOutcome, SettingsTab, SettingsViewModel, run_settings,
-    run_settings_with_autostart,
+    ApplyUpdateCallback, ApplyUpdateOutcome, AutostartChangeCallback, CheckUpdatesCallback,
+    SettingsOutcome, SettingsTab, SettingsUpdateConfig, SettingsViewModel, run_settings,
+    run_settings_with_autostart, run_settings_with_hooks,
 };
-pub use theme::SUPPORT_URL;
+pub use theme::{DOWNLOAD_PAGE_URL, SUPPORT_URL};
 
 #[derive(Debug)]
 pub enum UiError {

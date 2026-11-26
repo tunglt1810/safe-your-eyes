@@ -69,7 +69,7 @@ The full spec is in [docs/specs/SPEC.md](docs/specs/SPEC.md).
 Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
 
 - **Maintainers & Roles**: Committers, Reviewers, and Approvers: [@tunglt1810](https://github.com/tunglt1810).
-- **Privacy Policy**: This program will not transfer any information to other networked systems unless specifically requested by the user or the person installing or operating it.
+- **Privacy Policy**: This program does not transfer personal information or telemetry to networked systems. When automatic update checks are enabled (configurable in Settings) or when you manually check for or install an update, the program sends HTTPS requests to GitHub Releases solely to check for and download new versions.
 - **Project Website**: [https://tunglt1810.github.io/safe-your-eyes/](https://tunglt1810.github.io/safe-your-eyes/)
 
 ## Support

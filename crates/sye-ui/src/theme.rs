@@ -6,6 +6,7 @@ use nsh_core::{
 use sye_core::config::ThemeMode;
 
 pub const SUPPORT_URL: &str = "https://buymeacoffee.com/bbeeezzzzz";
+pub const DOWNLOAD_PAGE_URL: &str = sye_core::PUBLIC_DOWNLOAD_URL;
 
 pub(crate) const fn appearance_for_theme_mode(mode: ThemeMode) -> Appearance {
     match mode {

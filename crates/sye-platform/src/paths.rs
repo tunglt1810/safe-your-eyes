@@ -9,6 +9,7 @@ const APP_DIR_NAME: &str = "safe-your-eyes";
 pub struct AppPaths {
     pub config_file: PathBuf,
     pub session_file: PathBuf,
+    pub update_cache_file: PathBuf,
     pub socket_path: PathBuf,
 }
 
@@ -20,11 +21,13 @@ impl AppPaths {
 
         let config_file = proj.config_dir().join("config.toml");
         let session_file = proj.data_local_dir().join("session.toml");
+        let update_cache_file = proj.data_local_dir().join("update.toml");
         let socket_path = default_socket_path(&proj);
 
         Ok(Self {
             config_file,
             session_file,
+            update_cache_file,
             socket_path,
         })
     }
@@ -36,9 +39,11 @@ impl AppPaths {
         match (config_override, socket_override) {
             (Some(config_file), Some(socket_path)) => {
                 let session_file = session_path_for_config(&config_file);
+                let update_cache_file = update_cache_path_for_config(&config_file);
                 Ok(Self {
                     config_file,
                     session_file,
+                    update_cache_file,
                     socket_path,
                 })
             }
@@ -46,6 +51,7 @@ impl AppPaths {
                 let mut paths = Self::resolve()?;
                 if let Some(cfg) = config_override {
                     paths.session_file = session_path_for_config(&cfg);
+                    paths.update_cache_file = update_cache_path_for_config(&cfg);
                     paths.config_file = cfg;
                 }
                 if let Some(sock) = socket_override {
@@ -62,6 +68,14 @@ pub fn session_path_for_config(config_path: &Path) -> PathBuf {
     match config_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.join("session.toml"),
         _ => PathBuf::from("session.toml"),
+    }
+}
+
+#[must_use]
+pub fn update_cache_path_for_config(config_path: &Path) -> PathBuf {
+    match config_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join("update.toml"),
+        _ => PathBuf::from("update.toml"),
     }
 }
 

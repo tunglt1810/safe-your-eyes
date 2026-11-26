@@ -68,6 +68,37 @@ impl OsNotifier {
             active: Mutex::new(None),
         }
     }
+
+    pub fn show_notice(&self, summary: &str, body: &str) -> Result<(), PlatformError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            macos_impl::show_pre_break(summary, body)
+        }
+
+        #[cfg(windows)]
+        {
+            windows_impl::show_pre_break(summary, body)
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let mut notification = Notification::new();
+            notification
+                .appname(APP_NAME)
+                .icon(APP_ICON)
+                .summary(summary)
+                .body(body)
+                .timeout(Timeout::Milliseconds(5_000));
+            notification
+                .show()
+                .map(|_| ())
+                .map_err(|err| PlatformError::Unavailable(err.to_string()))
+        }
+    }
 }
 
 impl Default for OsNotifier {

@@ -2,25 +2,26 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
 use nsh_core::element::desktop::{current_window, on_app_quit, quit, title_bar};
 use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
+use sye_core::{HOMEBREW_UPGRADE_COMMAND, UpdateInfo, UpdateStrategy};
 
 use crate::UiError;
 use crate::theme::{
-    SUPPORT_URL, appearance_for_theme_mode, colors, motion, next_theme_mode, radii,
-    theme_mode_for_appearance,
+    DOWNLOAD_PAGE_URL, SUPPORT_URL, appearance_for_theme_mode, colors, motion, next_theme_mode,
+    radii, theme_mode_for_appearance,
 };
 use crate::ui::{
     KpiTone, app_icon, cozy_input, cozy_input_with_disabled, cozy_switch,
-    cozy_switch_with_disabled, destructive_button, ghost_button, page_heading, pastel_kpi_card,
-    primary_button, secondary_button, section_divider, section_header, sidebar_nav_indicator,
-    sidebar_nav_item, stagger_item, status_banner, support_link, support_qr_card,
-    theme_toggle_button,
+    cozy_switch_with_disabled, destructive_button, external_link_button, ghost_button,
+    page_heading, pastel_kpi_card, primary_button, secondary_button, section_divider,
+    section_header, sidebar_nav_indicator, sidebar_nav_item, stagger_item, status_banner,
+    support_link, support_qr_card, theme_toggle_button, version_update_badge,
 };
 
 #[cfg(target_os = "linux")]
@@ -322,12 +323,31 @@ impl WindowList {
 
 pub type AutostartChangeCallback = Box<dyn Fn(bool) + Send + Sync>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyUpdateOutcome {
+    RestartingDaemon,
+    UpdatedStandalone,
+}
+
+pub type CheckUpdatesCallback = Arc<dyn Fn() -> Result<Option<UpdateInfo>, String> + Send + Sync>;
+pub type ApplyUpdateCallback =
+    Arc<dyn Fn(&str) -> Result<ApplyUpdateOutcome, String> + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct SettingsUpdateConfig {
+    pub initial_update: Option<UpdateInfo>,
+    pub strategy: Option<UpdateStrategy>,
+    pub on_check_now: Option<CheckUpdatesCallback>,
+    pub on_apply_update: Option<ApplyUpdateCallback>,
+}
+
 type AutostartHook = Arc<dyn Fn(bool) + Send + Sync>;
 
 struct SettingsLaunch {
     vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     on_autostart_change: Option<AutostartHook>,
+    update_config: SettingsUpdateConfig,
 }
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
@@ -835,40 +855,296 @@ fn exercises_section(vm: Signal<SettingsViewModel>, animate: bool) -> impl IntoE
         ))
 }
 
-fn about_section(animate: bool) -> impl IntoElement {
-    view().gap_5().child(
-        view()
-            .flex_row()
-            .items_center()
-            .justify_between()
-            .gap_5()
-            .child(
-                view()
-                    .flex_1()
-                    .gap_3()
-                    .child(stagger_item(
-                        0,
-                        animate,
-                        section_header(
-                            "Support Safe Your Eyes",
-                            "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
-                        ),
-                    ))
-                    .child(stagger_item(
-                        1,
-                        animate,
-                        text(format!("Support link: {SUPPORT_URL}"))
+enum UpdateWorkerResult {
+    Check(Result<Option<UpdateInfo>, String>),
+    Apply(Result<ApplyUpdateOutcome, String>),
+}
+
+#[derive(Clone, Copy)]
+struct UpdateUiState {
+    available: Signal<Option<UpdateInfo>>,
+    busy: Signal<bool>,
+    status_text: Signal<Option<String>>,
+    is_error: Signal<bool>,
+    strategy: UpdateStrategy,
+}
+
+fn poll_update_worker(
+    rx: Rc<mpsc::Receiver<UpdateWorkerResult>>,
+    state: UpdateUiState,
+    quit_on_restart: bool,
+) {
+    match rx.try_recv() {
+        Ok(UpdateWorkerResult::Check(Ok(Some(info)))) => {
+            state.status_text.set(Some(format!(
+                "Version v{} is available.",
+                info.latest_version
+            )));
+            state.is_error.set(false);
+            state.available.set(Some(info));
+            state.busy.set(false);
+        }
+        Ok(UpdateWorkerResult::Check(Ok(None))) => {
+            state.available.set(None);
+            state.status_text.set(Some(format!(
+                "You are up to date (v{}).",
+                env!("CARGO_PKG_VERSION")
+            )));
+            state.is_error.set(false);
+            state.busy.set(false);
+        }
+        Ok(UpdateWorkerResult::Check(Err(err))) => {
+            state
+                .status_text
+                .set(Some(format!("Update check failed: {err}")));
+            state.is_error.set(true);
+            state.busy.set(false);
+        }
+        Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::RestartingDaemon))) => {
+            state.status_text.set(Some(
+                "Update verified. Restarting Safe Your Eyes...".to_owned(),
+            ));
+            state.is_error.set(false);
+            state.available.set(None);
+            state.busy.set(false);
+            if quit_on_restart {
+                quit();
+            }
+        }
+        Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::UpdatedStandalone))) => {
+            state.status_text.set(Some(
+                "Update installed and verified. Restart Safe Your Eyes to use the new version."
+                    .to_owned(),
+            ));
+            state.is_error.set(false);
+            state.available.set(None);
+            state.busy.set(false);
+        }
+        Ok(UpdateWorkerResult::Apply(Err(err))) => {
+            state.status_text.set(Some(format!(
+                "Self-update failed: {err}. Use Download Page instead."
+            )));
+            state.is_error.set(true);
+            state.busy.set(false);
+        }
+        Err(mpsc::TryRecvError::Empty) => {
+            drop(set_timeout(Duration::from_millis(25), move || {
+                poll_update_worker(rx, state, quit_on_restart);
+            }));
+        }
+        Err(mpsc::TryRecvError::Disconnected) => {
+            state.busy.set(false);
+        }
+    }
+}
+
+fn about_section(
+    vm: Signal<SettingsViewModel>,
+    update_ui: UpdateUiState,
+    on_check_now: Option<CheckUpdatesCallback>,
+    on_apply_update: Option<ApplyUpdateCallback>,
+    quit_on_restart: bool,
+    animate: bool,
+) -> impl IntoElement {
+    let can_self_update = matches!(update_ui.strategy, UpdateStrategy::SelfUpdate { .. });
+    let is_homebrew = matches!(update_ui.strategy, UpdateStrategy::HomebrewCask);
+
+    let check_cb = on_check_now;
+    let apply_cb = on_apply_update;
+
+    view()
+        .gap_5()
+        .child(
+            view()
+                .gap_3()
+                .child(stagger_item(
+                    0,
+                    animate,
+                    section_header(
+                        "Updates",
+                        "Checks GitHub Releases for newer versions and verifies SHA-256 before installing.",
+                    ),
+                ))
+                .child(stagger_item(
+                    1,
+                    animate,
+                    text(move || {
+                        if let Some(info) = update_ui.available.get() {
+                            format!(
+                                "Current: v{}  ->  Latest: v{}",
+                                env!("CARGO_PKG_VERSION"),
+                                info.latest_version
+                            )
+                        } else {
+                            format!("Current version: v{}", env!("CARGO_PKG_VERSION"))
+                        }
+                    })
+                    .text_sm()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(colors::TEXT_PRIMARY),
+                ))
+                .child(when(
+                    move || update_ui.status_text.get().is_some() && !update_ui.is_error.get(),
+                    move || {
+                        status_banner(false, move || {
+                            update_ui.status_text.get().unwrap_or_default()
+                        })
+                    },
+                ))
+                .child(when(
+                    move || update_ui.status_text.get().is_some() && update_ui.is_error.get(),
+                    move || {
+                        status_banner(true, move || {
+                            update_ui.status_text.get().unwrap_or_default()
+                        })
+                    },
+                ))
+                .child(when(
+                    move || is_homebrew && update_ui.available.get().is_some(),
+                    || {
+                        text(format!("Homebrew upgrade: {HOMEBREW_UPGRADE_COMMAND}"))
                             .text_xs()
-                            .text_color(colors::TEXT_SECONDARY),
-                    ))
-                    .child(stagger_item(
-                        2,
-                        animate,
-                        view().flex_row().child(support_link("Buy Me a Coffee")),
-                    )),
-            )
-            .child(stagger_item(3, animate, support_qr_card())),
-    )
+                            .text_color(colors::TEXT_SECONDARY)
+                    },
+                ))
+                .child(stagger_item(
+                    2,
+                    animate,
+                    cozy_switch(
+                        "Check for updates automatically",
+                        move || vm.with(|m| m.config.check_for_updates),
+                        move |v| vm.update(|m| m.config.check_for_updates = v),
+                    ),
+                ))
+                .child(stagger_item(
+                    3,
+                    animate,
+                    view()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(when(
+                            move || can_self_update && update_ui.available.get().is_some(),
+                            move || {
+                                let apply = apply_cb.clone();
+                                primary_button(
+                                    move || {
+                                        if update_ui.busy.get() {
+                                            "Updating..."
+                                        } else {
+                                            "Update & Restart"
+                                        }
+                                    },
+                                    move || {
+                                        if update_ui.busy.get_untracked() {
+                                            return;
+                                        }
+                                        let Some(info) = update_ui.available.get_untracked() else {
+                                            return;
+                                        };
+                                        let Some(cb) = apply.clone() else {
+                                            return;
+                                        };
+                                        update_ui.busy.set(true);
+                                        update_ui.is_error.set(false);
+                                        update_ui.status_text.set(Some(format!(
+                                            "Downloading and verifying v{}...",
+                                            info.latest_version
+                                        )));
+                                        let (tx, rx) = mpsc::channel();
+                                        let version = info.latest_version;
+                                        let _ = std::thread::Builder::new()
+                                            .name("sye-settings-update".to_owned())
+                                            .spawn(move || {
+                                                let _ = tx.send(UpdateWorkerResult::Apply(cb(&version)));
+                                            });
+                                        let rx = Rc::new(rx);
+                                        drop(set_timeout(Duration::from_millis(25), move || {
+                                            poll_update_worker(rx, update_ui, quit_on_restart);
+                                        }));
+                                    },
+                                )
+                            },
+                        ))
+                        .child(when(
+                            move || update_ui.available.get().is_some(),
+                            move || {
+                                let label = if can_self_update {
+                                    "Download Page"
+                                } else {
+                                    "Download Update"
+                                };
+                                external_link_button(label, DOWNLOAD_PAGE_URL, !can_self_update)
+                            },
+                        ))
+                        .child(secondary_button(
+                            move || {
+                                if update_ui.busy.get() {
+                                    "Checking..."
+                                } else {
+                                    "Check for Updates"
+                                }
+                            },
+                            move || {
+                                if update_ui.busy.get_untracked() {
+                                    return;
+                                }
+                                let Some(cb) = check_cb.clone() else {
+                                    return;
+                                };
+                                update_ui.busy.set(true);
+                                update_ui.is_error.set(false);
+                                update_ui
+                                    .status_text
+                                    .set(Some("Checking for updates...".to_owned()));
+                                let (tx, rx) = mpsc::channel();
+                                let _ = std::thread::Builder::new()
+                                    .name("sye-settings-check-update".to_owned())
+                                    .spawn(move || {
+                                        let _ = tx.send(UpdateWorkerResult::Check(cb()));
+                                    });
+                                let rx = Rc::new(rx);
+                                drop(set_timeout(Duration::from_millis(25), move || {
+                                    poll_update_worker(rx, update_ui, quit_on_restart);
+                                }));
+                            },
+                        )),
+                )),
+        )
+        .child(stagger_item(4, animate, section_divider()))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_5()
+                .child(
+                    view()
+                        .flex_1()
+                        .gap_3()
+                        .child(stagger_item(
+                            5,
+                            animate,
+                            section_header(
+                                "Support Safe Your Eyes",
+                                "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
+                            ),
+                        ))
+                        .child(stagger_item(
+                            6,
+                            animate,
+                            text(format!("Support link: {SUPPORT_URL}"))
+                                .text_xs()
+                                .text_color(colors::TEXT_SECONDARY),
+                        ))
+                        .child(stagger_item(
+                            7,
+                            animate,
+                            view().flex_row().child(support_link("Buy Me a Coffee")),
+                        )),
+                )
+                .child(stagger_item(8, animate, support_qr_card())),
+        )
 }
 
 fn settings_main_window_options() -> MainWindowOptions {
@@ -890,7 +1166,13 @@ pub(crate) fn build_settings_view(
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
 ) -> impl IntoElement {
-    build_settings_view_with_hooks(initial_vm, outcome_sink, quit_on_finish, None)
+    build_settings_view_with_hooks(
+        initial_vm,
+        outcome_sink,
+        quit_on_finish,
+        None,
+        SettingsUpdateConfig::default(),
+    )
 }
 
 pub(crate) fn build_settings_view_with_hooks(
@@ -898,6 +1180,7 @@ pub(crate) fn build_settings_view_with_hooks(
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     quit_on_finish: bool,
     on_autostart_change: Option<AutostartHook>,
+    update_config: SettingsUpdateConfig,
 ) -> impl IntoElement {
     let initial_autostart = initial_vm.config.autostart;
     let (live_hook, save_autostart) = match on_autostart_change {
@@ -947,6 +1230,18 @@ pub(crate) fn build_settings_view_with_hooks(
     let vm = signal(initial_vm);
     let appearance = signal(initial_appearance);
     let has_switched_tab = signal(false);
+
+    let update_ui = UpdateUiState {
+        available: signal(update_config.initial_update),
+        busy: signal(false),
+        status_text: signal(None),
+        is_error: signal(false),
+        strategy: update_config
+            .strategy
+            .unwrap_or(UpdateStrategy::ManualDownload),
+    };
+    let on_check_now = update_config.on_check_now;
+    let on_apply_update = update_config.on_apply_update;
 
     let active_tab = computed(move || vm.with(|m| m.active_tab));
     let warning_msg = computed(move || vm.with(|m| m.load_warning.clone()));
@@ -1046,12 +1341,39 @@ pub(crate) fn build_settings_view_with_hooks(
                 .child(sidebar_nav),
         )
         .child(
-            view().px_3().py_1().child(
-                text(concat!("v", env!("CARGO_PKG_VERSION")))
-                    .text_xs()
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(colors::SIDEBAR_TEXT_MUTED),
-            ),
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .px_3()
+                .py_1()
+                .child(
+                    text(concat!("v", env!("CARGO_PKG_VERSION")))
+                        .text_xs()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors::SIDEBAR_TEXT_MUTED),
+                )
+                .child(when(
+                    move || update_ui.available.get().is_some(),
+                    move || {
+                        version_update_badge(
+                            move || {
+                                update_ui.available.get().map_or_else(String::new, |info| {
+                                    format!("↑ v{}", info.latest_version)
+                                })
+                            },
+                            move || {
+                                vm.update(|m| {
+                                    if m.active_tab != SettingsTab::About {
+                                        has_switched_tab.set(true);
+                                        m.active_tab = SettingsTab::About;
+                                    }
+                                });
+                            },
+                        )
+                    },
+                )),
         );
 
     let kpi_row = view()
@@ -1166,7 +1488,16 @@ pub(crate) fn build_settings_view_with_hooks(
                 ))
                 .child(when(
                     move || active_tab.get() == SettingsTab::About,
-                    move || about_section(has_switched_tab.get_untracked()),
+                    move || {
+                        about_section(
+                            vm,
+                            update_ui,
+                            on_check_now.clone(),
+                            on_apply_update.clone(),
+                            quit_on_finish,
+                            has_switched_tab.get_untracked(),
+                        )
+                    },
                 )),
         );
 
@@ -1281,6 +1612,7 @@ fn SettingsRoot() -> impl IntoElement {
             launch.outcome_sink,
             true,
             launch.on_autostart_change,
+            launch.update_config,
         )
         .into_element(),
         None => view()
@@ -1302,6 +1634,20 @@ pub fn run_settings_with_autostart(
     system_autostart: Option<bool>,
     on_autostart_change: Option<AutostartChangeCallback>,
 ) -> Result<SettingsOutcome, UiError> {
+    run_settings_with_hooks(
+        config_path,
+        system_autostart,
+        on_autostart_change,
+        SettingsUpdateConfig::default(),
+    )
+}
+
+pub fn run_settings_with_hooks(
+    config_path: PathBuf,
+    system_autostart: Option<bool>,
+    on_autostart_change: Option<AutostartChangeCallback>,
+    update_config: SettingsUpdateConfig,
+) -> Result<SettingsOutcome, UiError> {
     let vm = load_settings_vm(config_path, system_autostart);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
     let outcome_sink = Arc::new(Mutex::new(None));
@@ -1316,6 +1662,7 @@ pub fn run_settings_with_autostart(
         vm,
         outcome_sink: Arc::clone(&outcome_sink),
         on_autostart_change,
+        update_config,
     });
     drop(guard);
 
@@ -2101,7 +2448,13 @@ mod tests {
                     guard.push(enabled);
                 }
             });
-            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                Some(hook),
+                SettingsUpdateConfig::default(),
+            )
         }
 
         if let Ok(mut guard) = AUTOSTART_PATH.lock() {
@@ -2164,7 +2517,13 @@ mod tests {
                     guard.push(enabled);
                 }
             });
-            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                Some(hook),
+                SettingsUpdateConfig::default(),
+            )
         }
 
         if let Ok(mut guard) = REVERT_LAUNCH.lock() {
@@ -2237,7 +2596,13 @@ mod tests {
                     guard.push(enabled);
                 }
             });
-            build_settings_view_with_hooks(vm, sink, false, Some(hook))
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                Some(hook),
+                SettingsUpdateConfig::default(),
+            )
         }
 
         if let Ok(mut guard) = SAVE_PATH.lock() {
@@ -2325,6 +2690,74 @@ mod tests {
             app.scroll("Break Schedule", Points(-20.0)).is_err(),
             "Scroll offset must reset to 0 after switching from Exercises to Timing"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_update_badge_and_controls_flow() -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-updates")?;
+        let config_path = dir.file("updates.toml");
+        static UPDATE_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        if let Ok(mut guard) = UPDATE_PATH.lock() {
+            *guard = Some(config_path.clone());
+        }
+
+        #[component]
+        fn TestUpdateSettings() -> impl IntoElement {
+            let path = UPDATE_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            let update_cfg = SettingsUpdateConfig {
+                initial_update: Some(UpdateInfo {
+                    latest_version: "9.9.9".to_owned(),
+                    download_url: DOWNLOAD_PAGE_URL.to_owned(),
+                }),
+                strategy: Some(UpdateStrategy::SelfUpdate {
+                    asset_name: "safe-your-eyes-linux-x86_64",
+                }),
+                on_check_now: Some(Arc::new(|| {
+                    Ok(Some(UpdateInfo {
+                        latest_version: "9.9.10".to_owned(),
+                        download_url: DOWNLOAD_PAGE_URL.to_owned(),
+                    }))
+                })),
+                on_apply_update: Some(Arc::new(|_| Ok(ApplyUpdateOutcome::UpdatedStandalone))),
+            };
+            build_settings_view_with_hooks(vm, sink, false, None, update_cfg)
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestUpdateSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("↑ v9.9.9")?;
+        assert!(app.shows(concat!("v", env!("CARGO_PKG_VERSION"))));
+
+        app.press("↑ v9.9.9")?;
+        app.wait_for("Updates")?;
+        assert!(app.shows("Update & Restart"));
+        assert!(app.shows("Download Page"));
+        assert!(app.shows("Check for Updates"));
+        assert!(app.shows("Check for updates automatically"));
+
+        app.press("Check for Updates")?;
+        app.wait_for("↑ v9.9.10")?;
+        assert!(app.shows("Version v9.9.10 is available."));
+
+        app.press("Check for updates automatically")?;
+        app.press("Save")?;
+        drop(app);
+
+        let reloaded = Config::load_from_path(&config_path)?;
+        assert!(!reloaded.check_for_updates);
         Ok(())
     }
 }

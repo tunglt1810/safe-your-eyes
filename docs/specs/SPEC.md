@@ -281,8 +281,17 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - When `strict_break` is `true`, the `Skip Limit` KPI card shows `Strict`.
 - The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
 - The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar (`Save`, `Reset`, `Cancel`).
-- The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.
+- The Floating Sage Sidebar shows the installed version (`v<version>`) at the bottom. When a newer stable release is available, it shows a clickable pill badge (`↑ v<latest>`) next to the version. Clicking the badge opens `About & Support`.
+- The About & Support tab shows the **Updates** section above the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`. The **Updates** section provides the `Check for updates automatically` switch (`Config.check_for_updates`), `Check for Updates`, and either `Update & Restart` or a link to `https://tunglt1810.github.io/safe-your-eyes/`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.
+
+### 10.3 Update Detection and Hybrid Updates
+
+1. When `Config.check_for_updates` is `true` and `--headless` is not set, the daemon checks for a newer stable GitHub Release on a background thread. The first check runs 15 seconds after startup if the cached check is due, and subsequent checks run every 12 hours. The daemon saves the result in `update.toml` next to `session.toml`.
+2. Update checks query the GitHub Releases API and fall back to the `releases/latest` redirect URL if the API fails. Draft releases and pre-release tags that contain `-` are ignored.
+3. When a newer stable release exists, `TrayHandle` inserts an `Update available (v<latest>)` item into the tray menu. The item stays disabled while the menu is locked or while an update runs.
+4. On Windows and Linux with a writable executable directory, triggering an update downloads the platform binary and `SHA256SUMS.txt` and verifies the SHA-256 checksum. After verification, the app replaces the executable atomically (using a `.old` backup on Windows cleaned up on next start) and restarts the daemon after releasing the IPC socket.
+5. On macOS, on read-only installations, or after a self-update error, the app opens the public GitHub Pages download URL (`https://tunglt1810.github.io/safe-your-eyes/`). When Homebrew Cask is detected on macOS, the app also shows the `brew upgrade --cask safe-your-eyes` command.
 
 ## 11. CLI Contract (`safe-your-eyes`)
 
@@ -310,7 +319,7 @@ Modes and control flags:
 - `-h`, `--help`: Print usage information and exit with code 0.
 - `--print-default-config`: Print the default TOML configuration to stdout and exit with code 0.
 - `--validate-config`: Validate `--config <PATH>` and exit with code 0 when valid or code 1 on error.
-- `--internal-overlay <JSON_PAYLOAD>` and `--internal-settings --config <PATH>`: Internal subprocess entry points started by the daemon.
+- `--internal-overlay <JSON_PAYLOAD>` and `--internal-settings --config <PATH> --socket <PATH>`: Internal subprocess entry points started by the daemon.
 
 ## 12. Platform Constraints
 

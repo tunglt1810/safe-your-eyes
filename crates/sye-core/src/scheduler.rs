@@ -704,10 +704,12 @@ impl<C: Clock> Scheduler<C> {
     }
 
     fn handle_reload_config(&mut self, new_cfg: Config) -> Vec<SchedulerAction> {
-        let mut current_with_new_theme = self.config.clone();
-        current_with_new_theme.theme = new_cfg.theme;
-        if new_cfg == current_with_new_theme {
+        let mut current_non_schedule = self.config.clone();
+        current_non_schedule.theme = new_cfg.theme;
+        current_non_schedule.check_for_updates = new_cfg.check_for_updates;
+        if new_cfg == current_non_schedule {
             self.config.theme = new_cfg.theme;
+            self.config.check_for_updates = new_cfg.check_for_updates;
             return Vec::new();
         }
 

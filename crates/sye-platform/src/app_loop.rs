@@ -352,9 +352,10 @@ mod windows_impl {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, DispatchMessageW, EnumWindows,
         GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
-        GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsWindowVisible, MSG,
-        PM_REMOVE, PeekMessageW, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-        SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WS_EX_TOOLWINDOW,
+        GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsHungAppWindow, IsIconic,
+        IsWindowVisible, MSG, PM_REMOVE, PeekMessageW, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage,
+        WS_EX_TOOLWINDOW,
     };
 
     use super::{ChildWindowMatch, MAX_EVENTS_PER_PUMP, classify_child_window};
@@ -451,7 +452,6 @@ mod windows_impl {
         // SAFETY: Win32 foreground/window activation APIs operate on `pid` and the HWND found in this call.
         #[expect(unsafe_code, reason = "Win32 FFI")]
         unsafe {
-            let _ = AllowSetForegroundWindow(pid);
             let hwnd = find_child_window(pid);
             if hwnd.is_null() {
                 return;
@@ -465,7 +465,8 @@ mod windows_impl {
             }
 
             let fg = GetForegroundWindow();
-            let fg_tid = if fg.is_null() {
+            // A hung foreground thread would share its stalled input queue with the daemon loop.
+            let fg_tid = if fg.is_null() || IsHungAppWindow(fg) != 0 {
                 0
             } else {
                 GetWindowThreadProcessId(fg, ptr::null_mut())

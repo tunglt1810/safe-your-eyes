@@ -156,9 +156,15 @@ impl UpdateCacheState {
                 message: err.to_string(),
             })?;
         }
-        fs::write(path, encoded).map_err(|err| UpdateCacheError::Io {
-            message: err.to_string(),
-        })
+        // The daemon polls this file while Settings writes it, so a reader must never see a partial file.
+        let mut tmp_name = path.as_os_str().to_owned();
+        tmp_name.push(".tmp");
+        let tmp_path = std::path::PathBuf::from(tmp_name);
+        fs::write(&tmp_path, encoded)
+            .and_then(|()| fs::rename(&tmp_path, path))
+            .map_err(|err| UpdateCacheError::Io {
+                message: err.to_string(),
+            })
     }
 
     #[must_use]

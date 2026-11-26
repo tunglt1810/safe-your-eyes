@@ -22,6 +22,7 @@ use sye_platform::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 // The macOS and Windows banners have no auto-hide, so the daemon closes update notices itself.
 const UPDATE_NOTICE_DURATION: Duration = Duration::from_secs(8);
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -37,7 +38,6 @@ struct DaemonHost<'a> {
     headless: bool,
     config_file: &'a Path,
     session_file: &'a Path,
-    update_cache_file: &'a Path,
     socket_path: &'a Path,
     event_loop: Option<&'a PlatformEventLoop>,
     notifier: OsNotifier,
@@ -178,8 +178,7 @@ impl DaemonHost<'_> {
         }
     }
 
-    fn reload_cached_update(&mut self) {
-        let (cache, _) = UpdateCacheState::load_or_default(self.update_cache_file);
+    fn apply_cached_update(&mut self, cache: &UpdateCacheState) {
         self.available_update = cache.available_update(CURRENT_VERSION);
         self.sync_tray_update();
     }
@@ -396,6 +395,33 @@ fn config_modified_at(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
+fn file_fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+fn poll_update_cache_change(
+    path: &Path,
+    force_read: bool,
+    last_fingerprint: &mut Option<(SystemTime, u64)>,
+    last_cache: &mut UpdateCacheState,
+) -> Option<UpdateCacheState> {
+    let fingerprint = file_fingerprint(path);
+    if !force_read && fingerprint == *last_fingerprint {
+        return None;
+    }
+    let (cache, err) = UpdateCacheState::load_or_default(path);
+    if err.is_some() {
+        return None;
+    }
+    *last_fingerprint = fingerprint;
+    if cache == *last_cache {
+        return None;
+    }
+    *last_cache = cache.clone();
+    Some(cache)
+}
+
 fn disable_minutes_to_secs(minutes: Option<u64>) -> Option<u64> {
     minutes.filter(|&m| m > 0).map(|m| m.saturating_mul(60))
 }
@@ -484,6 +510,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         sye_platform::cleanup_current_stale_old_executable();
     }
 
+    let initial_update_cache_fingerprint = (!headless)
+        .then(|| file_fingerprint(&paths.update_cache_file))
+        .flatten();
     let (cached_update, _) = if headless {
         (UpdateCacheState::default(), None)
     } else {
@@ -495,7 +524,6 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         headless,
         config_file: &paths.config_file,
         session_file: &paths.session_file,
-        update_cache_file: &paths.update_cache_file,
         socket_path: &paths.socket_path,
         event_loop: app_loop.as_ref(),
         notifier,
@@ -520,9 +548,12 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
 
     let mut last_policy_check = Instant::now();
     let mut last_config_poll = Instant::now();
+    let mut last_update_cache_poll = Instant::now();
     let mut config_mtime = config_modified_at(&paths.config_file);
+    let mut update_cache_fingerprint = initial_update_cache_fingerprint;
+    let mut last_update_cache = cached_update;
     let mut update_check_rx: Option<mpsc::Receiver<Option<UpdateInfo>>> = None;
-    let mut next_update_check_at = compute_next_update_check(&cached_update);
+    let mut next_update_check_at = compute_next_update_check(&last_update_cache);
     let mut restart_after_exit = false;
 
     host.execute(scheduler.handle_event(SchedulerEvent::Start));
@@ -559,9 +590,6 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         }
         let settings_exited = host.take_settings_exited();
         let mut config_changed = false;
-        if settings_exited {
-            host.reload_cached_update();
-        }
         if settings_exited
             || (host.settings_child.is_some()
                 && last_config_poll.elapsed() >= Duration::from_secs(1))
@@ -591,12 +619,32 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         }
 
         if !headless {
+            if settings_exited || last_update_cache_poll.elapsed() >= UPDATE_CACHE_POLL_INTERVAL {
+                last_update_cache_poll = Instant::now();
+                let force_read = settings_exited || host.settings_child.is_some();
+                if let Some(cache) = poll_update_cache_change(
+                    &paths.update_cache_file,
+                    force_read,
+                    &mut update_cache_fingerprint,
+                    &mut last_update_cache,
+                ) {
+                    host.apply_cached_update(&cache);
+                    next_update_check_at = compute_next_update_check(&cache);
+                }
+            }
+
             if let Some(rx) = update_check_rx.as_ref() {
                 match rx.try_recv() {
                     Ok(found) => {
                         update_check_rx = None;
                         host.available_update = found;
                         host.sync_tray_update();
+                        update_cache_fingerprint = file_fingerprint(&paths.update_cache_file);
+                        if let (cache, None) =
+                            UpdateCacheState::load_or_default(&paths.update_cache_file)
+                        {
+                            last_update_cache = cache;
+                        }
                         next_update_check_at =
                             Instant::now() + Duration::from_secs(UPDATE_CHECK_INTERVAL_SECS);
                     }
@@ -925,5 +973,60 @@ mod tests {
         assert!(!can_open_settings(SchedulerState::PreBreak, false));
         assert!(!can_open_settings(SchedulerState::Break, false));
         assert!(!can_open_settings(SchedulerState::Waiting, true));
+    }
+
+    #[test]
+    fn poll_update_cache_change_detects_live_updates_and_skips_partial_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".tmp")
+            .join(format!("sye-cli-update-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let cache_path = dir.join("update.toml");
+
+        let mut fingerprint = file_fingerprint(&cache_path);
+        let mut last_cache = UpdateCacheState::default();
+        assert_eq!(
+            poll_update_cache_change(&cache_path, true, &mut fingerprint, &mut last_cache),
+            None
+        );
+
+        let initial = UpdateCacheState {
+            checked_at_unix_secs: 1_700_000_000,
+            latest_version: Some("0.2.0".to_owned()),
+            ..UpdateCacheState::default()
+        };
+        initial.save_to_path(&cache_path)?;
+        assert_eq!(
+            poll_update_cache_change(&cache_path, false, &mut fingerprint, &mut last_cache),
+            Some(initial.clone())
+        );
+        assert_eq!(
+            poll_update_cache_change(&cache_path, true, &mut fingerprint, &mut last_cache),
+            None
+        );
+
+        std::fs::write(&cache_path, "schema_version = [broken")?;
+        assert_eq!(
+            poll_update_cache_change(&cache_path, true, &mut fingerprint, &mut last_cache),
+            None
+        );
+        assert_eq!(last_cache, initial);
+
+        let newer = UpdateCacheState {
+            checked_at_unix_secs: 1_700_000_001,
+            latest_version: Some("0.2.1".to_owned()),
+            ..UpdateCacheState::default()
+        };
+        newer.save_to_path(&cache_path)?;
+        assert_eq!(
+            poll_update_cache_change(&cache_path, true, &mut fingerprint, &mut last_cache),
+            Some(newer)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

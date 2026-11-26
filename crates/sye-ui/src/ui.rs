@@ -23,6 +23,9 @@ const MOON_ICON_SVG: &str = "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z";
 const MONITOR_ICON_SVG: &str = "\
 M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z \
 M8 21h8 M12 17v4";
+const DOWNLOAD_ICON_SVG: &str = "\
+M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 \
+M7 10l5 5 5-5 M12 15V3";
 
 const APP_ICON_RGBA_LEN: usize = (APP_ICON_SIZE as usize) * (APP_ICON_SIZE as usize) * 4;
 
@@ -664,12 +667,28 @@ pub(crate) fn version_update_badge(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
+    let icon = canvas(|| {
+        let stroke = color(colors::ON_ACCENT);
+        Painter::new()
+            .scale(12.0_f32 / 24.0_f32, 12.0_f32 / 24.0_f32)
+            .stroke_color(stroke)
+            .line_width(2.25_f32)
+            .line_cap(LineCap::Round)
+            .line_join(LineJoin::Round)
+            .stroke_svg(DOWNLOAD_ICON_SVG)
+    })
+    .w(px(12.0))
+    .h(px(12.0))
+    .flex_shrink_0();
+
     button()
         .on_press(on_press)
         .h(px(22.0))
         .px_2()
+        .flex_row()
         .items_center()
         .justify_center()
+        .gap_1()
         .rounded(radii::PILL)
         .bg(colors::ACCENT)
         .transition()
@@ -677,6 +696,7 @@ pub(crate) fn version_update_badge(
         .ease_out()
         .hover(|s| s.opacity(0.92))
         .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+        .child(icon)
         .child(
             text(label)
                 .text_xs()

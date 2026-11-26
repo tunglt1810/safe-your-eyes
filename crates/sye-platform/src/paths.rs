@@ -38,8 +38,18 @@ impl AppPaths {
     ) -> Result<Self, PlatformError> {
         match (config_override, socket_override) {
             (Some(config_file), Some(socket_path)) => {
-                let session_file = session_path_for_config(&config_file);
-                let update_cache_file = update_cache_path_for_config(&config_file);
+                let (session_file, update_cache_file) = Self::resolve()
+                    .ok()
+                    .filter(|defaults| defaults.config_file == config_file)
+                    .map_or_else(
+                        || {
+                            (
+                                session_path_for_config(&config_file),
+                                update_cache_path_for_config(&config_file),
+                            )
+                        },
+                        |defaults| (defaults.session_file, defaults.update_cache_file),
+                    );
                 Ok(Self {
                     config_file,
                     session_file,
@@ -50,8 +60,10 @@ impl AppPaths {
             (config_override, socket_override) => {
                 let mut paths = Self::resolve()?;
                 if let Some(cfg) = config_override {
-                    paths.session_file = session_path_for_config(&cfg);
-                    paths.update_cache_file = update_cache_path_for_config(&cfg);
+                    if cfg != paths.config_file {
+                        paths.session_file = session_path_for_config(&cfg);
+                        paths.update_cache_file = update_cache_path_for_config(&cfg);
+                    }
                     paths.config_file = cfg;
                 }
                 if let Some(sock) = socket_override {
@@ -130,7 +142,26 @@ mod tests {
             paths.session_file,
             tmp.path().join("custom").join("session.toml")
         );
+        assert_eq!(
+            paths.update_cache_file,
+            tmp.path().join("custom").join("update.toml")
+        );
         assert_eq!(paths.socket_path, sock);
+        Ok(())
+    }
+
+    #[test]
+    fn with_overrides_matching_default_config_keeps_default_data_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let defaults = AppPaths::resolve()?;
+        let round_tripped = AppPaths::with_overrides(
+            Some(defaults.config_file.clone()),
+            Some(defaults.socket_path.clone()),
+        )?;
+        assert_eq!(round_tripped, defaults);
+
+        let config_only = AppPaths::with_overrides(Some(defaults.config_file.clone()), None)?;
+        assert_eq!(config_only, defaults);
         Ok(())
     }
 

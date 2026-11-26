@@ -216,7 +216,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
 
     let status_socket_path = paths.socket_path.clone();
     let status_config = sye_ui::SettingsStatusConfig {
-        initial_status: query_daemon_status(&paths.socket_path),
+        initial_status: None,
         on_poll_status: Some(Arc::new(move || query_daemon_status(&status_socket_path))),
     };
 

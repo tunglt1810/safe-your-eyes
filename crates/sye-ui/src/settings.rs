@@ -392,7 +392,7 @@ fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<(CountdownTone, St
         )),
         SchedulerState::Break => Some((CountdownTone::Break, "Break active".to_owned())),
         SchedulerState::Resting => Some((CountdownTone::Paused, "Paused (idle)".to_owned())),
-        SchedulerState::Start => Some((CountdownTone::Disabled, "Starting...".to_owned())),
+        SchedulerState::Start => Some((CountdownTone::Disabled, "Initializing".to_owned())),
     }
 }
 
@@ -3066,7 +3066,7 @@ mod tests {
                 state: SchedulerState::Start,
                 ..base.clone()
             }),
-            Some((CountdownTone::Disabled, "Starting...".to_owned()))
+            Some((CountdownTone::Disabled, "Initializing".to_owned()))
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {

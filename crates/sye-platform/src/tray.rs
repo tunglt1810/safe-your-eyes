@@ -891,7 +891,7 @@ pub fn format_status_label(snapshot: &TraySnapshot) -> String {
         }
         SchedulerState::Break => "Break in progress".to_owned(),
         SchedulerState::Resting => "Paused (idle/resting)".to_owned(),
-        SchedulerState::Start => "Starting...".to_owned(),
+        SchedulerState::Start => "Initializing".to_owned(),
         SchedulerState::Stopped => "Disabled".to_owned(),
         SchedulerState::Quit => "Quitting...".to_owned(),
     }

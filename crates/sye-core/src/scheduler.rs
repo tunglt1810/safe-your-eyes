@@ -11,6 +11,11 @@ use crate::queue::{BreakQueue, ResolvedBreak};
 use crate::session::{SESSION_SCHEMA_VERSION, SessionState};
 use crate::traits::{Clock, duration_to_ms_u64};
 
+// Startup grace prevents short breaks from expiring while Windows cold-starts the overlay process.
+const OVERLAY_STARTUP_GRACE_MS: u64 = 10_000;
+// Completion grace lets the overlay finish its own countdown and exit cleanly before fallback kill.
+const OVERLAY_COMPLETION_GRACE_MS: u64 = 2_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulerState {
@@ -78,6 +83,8 @@ pub enum SchedulerEvent {
     ExitResting { credit_idle_secs: Option<u64> },
     IdleObserved(Duration),
     TakeBreak { kind: Option<BreakType> },
+    OverlayLaunching,
+    OverlayShown,
     OverlayFinished(OverlayOutcome),
     DeferBreak { delay_secs: u64 },
     CancelCurrentBreak,
@@ -118,6 +125,8 @@ pub struct Scheduler<C: Clock> {
     pre_break_at_ms: u64,
     next_break_at_ms: u64,
     countdown_started_ms: u64,
+    break_duration_ms: u64,
+    overlay_shown: bool,
     break_started_ms: u64,
     break_ends_ms: u64,
     resume_at_ms: Option<u64>,
@@ -145,6 +154,8 @@ impl<C: Clock> Scheduler<C> {
             pre_break_at_ms: 0,
             next_break_at_ms: 0,
             countdown_started_ms: 0,
+            break_duration_ms: 0,
+            overlay_shown: false,
             break_started_ms: 0,
             break_ends_ms: 0,
             resume_at_ms: None,
@@ -297,6 +308,8 @@ impl<C: Clock> Scheduler<C> {
             }
             SchedulerEvent::IdleObserved(idle) => self.handle_idle_observed(idle),
             SchedulerEvent::TakeBreak { kind } => self.handle_take_break(kind),
+            SchedulerEvent::OverlayLaunching => self.handle_overlay_launching(),
+            SchedulerEvent::OverlayShown => self.handle_overlay_shown(),
             SchedulerEvent::OverlayFinished(outcome) => self.handle_overlay_finished(outcome),
             SchedulerEvent::DeferBreak { delay_secs } => self.handle_defer_break(delay_secs),
             SchedulerEvent::CancelCurrentBreak => self.handle_cancel_current_break(),
@@ -772,12 +785,37 @@ impl<C: Clock> Scheduler<C> {
         }
     }
 
+    fn handle_overlay_launching(&mut self) -> Vec<SchedulerAction> {
+        if self.state == SchedulerState::Break && !self.overlay_shown {
+            let now = self.now_mono_ms();
+            self.break_ends_ms = now
+                .saturating_add(self.break_duration_ms)
+                .saturating_add(OVERLAY_STARTUP_GRACE_MS);
+        }
+        Vec::new()
+    }
+
+    fn handle_overlay_shown(&mut self) -> Vec<SchedulerAction> {
+        if self.state == SchedulerState::Break && !self.overlay_shown {
+            let now = self.now_mono_ms();
+            self.overlay_shown = true;
+            // Keep `break_started_ms` from `enter_break` so daemon poll lag never rejects a Skip/Postpone
+            // sent right after the overlay unlocks its own controls.
+            self.break_ends_ms = now
+                .saturating_add(self.break_duration_ms)
+                .saturating_add(OVERLAY_COMPLETION_GRACE_MS);
+        }
+        Vec::new()
+    }
+
     fn enter_break(&mut self, now_ms: u64, spec: ResolvedBreak) -> Vec<SchedulerAction> {
         self.state = SchedulerState::Break;
         self.pre_break_notification_active = false;
         self.last_pre_break_notified_secs = None;
+        self.break_duration_ms = spec.duration_secs.saturating_mul(1000);
+        self.overlay_shown = false;
         self.break_started_ms = now_ms;
-        self.break_ends_ms = now_ms.saturating_add(spec.duration_secs.saturating_mul(1000));
+        self.break_ends_ms = now_ms.saturating_add(self.break_duration_ms);
 
         let skip_limit_cfg = self.effective_skip_limit();
         let limit_hit = self.skip_limit.controls_disabled(&skip_limit_cfg);
@@ -877,9 +915,9 @@ impl<C: Clock> Scheduler<C> {
         let now = self.now_mono_ms();
         match self.state {
             SchedulerState::Waiting | SchedulerState::PreBreak => {
-                self.next_break_at_ms.saturating_sub(now) / 1000
+                self.next_break_at_ms.saturating_sub(now).div_ceil(1000)
             }
-            SchedulerState::Resting => self.remaining_until_break_ms / 1000,
+            SchedulerState::Resting => self.remaining_until_break_ms.div_ceil(1000),
             SchedulerState::Start
             | SchedulerState::Break
             | SchedulerState::Stopped
@@ -1824,5 +1862,158 @@ mod tests {
 
         clock.advance_secs(1);
         assert!(sched.tick().is_empty());
+    }
+
+    #[test]
+    fn seconds_until_next_break_ceils_subsecond_remaining_to_match_pre_break() {
+        let clock = FakeClock::default();
+        let mut sched = Scheduler::new(test_config(), &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(890);
+        let _ = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::PreBreak);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 10);
+
+        clock.advance(Duration::from_millis(9_001));
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 1);
+        let warn_actions = sched.tick();
+        assert!(matches!(
+            warn_actions.as_slice(),
+            [SchedulerAction::NotifyPreBreak {
+                warning_secs: 1,
+                ..
+            }]
+        ));
+        clock.advance(Duration::from_millis(998));
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 1);
+        assert!(sched.tick().is_empty());
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 0);
+        let actions = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::Break);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+    }
+
+    #[test]
+    fn overlay_launching_and_shown_sync_break_deadline() {
+        let clock = FakeClock::default();
+        let cfg = Config {
+            short_break_duration_secs: 5,
+            shortcut_disable_secs: 2,
+            ..test_config()
+        };
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+        assert_eq!(sched.state(), SchedulerState::Break);
+
+        // Subprocess startup takes 3s on Windows; OverlayLaunching prevents early expiration.
+        assert!(
+            sched
+                .handle_event(SchedulerEvent::OverlayLaunching)
+                .is_empty()
+        );
+        clock.advance_secs(3);
+        assert!(sched.tick().is_empty());
+        assert_eq!(sched.state(), SchedulerState::Break);
+
+        // Overlay becomes visible at t=3s: full 5s deadline starts now, without re-locking shortcuts.
+        assert!(sched.handle_event(SchedulerEvent::OverlayShown).is_empty());
+        assert!(!sched.is_shortcut_locked());
+
+        // Duplicate OverlayShown or late OverlayLaunching must not extend the deadline again.
+        clock.advance_secs(1);
+        assert!(sched.handle_event(SchedulerEvent::OverlayShown).is_empty());
+        assert!(
+            sched
+                .handle_event(SchedulerEvent::OverlayLaunching)
+                .is_empty()
+        );
+
+        // At t=5s (original launch + 5s), the overlay is still at 00:03 and must NOT be killed.
+        clock.advance_secs(1);
+        assert!(sched.tick().is_empty());
+        assert_eq!(sched.state(), SchedulerState::Break);
+
+        // At t=8s (shown + 5s), completion grace keeps the break alive so the overlay can exit cleanly.
+        clock.advance_secs(3);
+        assert!(sched.tick().is_empty());
+        assert_eq!(sched.state(), SchedulerState::Break);
+
+        // If the overlay hangs past completion grace (t=10s), fallback tick still recovers.
+        clock.advance_secs(2);
+        let done = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert!(
+            done.iter()
+                .any(|a| matches!(a, SchedulerAction::CloseOverlay))
+        );
+    }
+
+    #[test]
+    fn overlay_launching_timeout_recovers_without_shown_and_events_ignored_outside_break() {
+        let clock = FakeClock::default();
+        let cfg = Config {
+            short_break_duration_secs: 4,
+            shortcut_disable_secs: 2,
+            ..test_config()
+        };
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        // Ignored while Waiting.
+        assert!(
+            sched
+                .handle_event(SchedulerEvent::OverlayLaunching)
+                .is_empty()
+        );
+        assert!(sched.handle_event(SchedulerEvent::OverlayShown).is_empty());
+
+        let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+        assert!(
+            sched
+                .handle_event(SchedulerEvent::OverlayLaunching)
+                .is_empty()
+        );
+
+        // Still alive during duration (4s) + startup grace (10s).
+        clock.advance_secs(13);
+        assert!(sched.tick().is_empty());
+        assert_eq!(sched.state(), SchedulerState::Break);
+
+        // Recovers at t=14s if OverlayShown never arrives.
+        clock.advance_secs(1);
+        let done = sched.tick();
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert!(
+            done.iter()
+                .any(|a| matches!(a, SchedulerAction::CloseOverlay))
+        );
+
+        // Fast startup (< shortcut_disable_secs) still accepts Skip once shortcut lock expires.
+        let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+        assert!(
+            sched
+                .handle_event(SchedulerEvent::OverlayLaunching)
+                .is_empty()
+        );
+        clock.advance(Duration::from_millis(500));
+        assert!(sched.handle_event(SchedulerEvent::OverlayShown).is_empty());
+        assert!(sched.is_shortcut_locked());
+        clock.advance(Duration::from_millis(1500));
+        assert!(!sched.is_shortcut_locked());
+        let skipped = sched.handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Skipped));
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert!(
+            skipped
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::CloseOverlay))
+        );
     }
 }

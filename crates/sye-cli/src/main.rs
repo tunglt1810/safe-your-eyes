@@ -143,11 +143,11 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
             hook_written.store(true, Ordering::SeqCst);
         }
     });
-    match sye_ui::run_overlay_with_hook(
-        request,
-        Some(Box::new(sye_platform::mark_own_windows_fullscreen)),
-        Some(on_outcome),
-    ) {
+    let on_shown: sye_ui::OverlayShownCallback = Box::new(|| {
+        write_overlay_shown();
+        sye_platform::mark_own_windows_fullscreen();
+    });
+    match sye_ui::run_overlay_with_hook(request, Some(on_shown), Some(on_outcome)) {
         Ok(outcome) => {
             if written.load(Ordering::SeqCst) || write_overlay_outcome(outcome) {
                 ExitCode::SUCCESS
@@ -227,12 +227,20 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     }
 }
 
+fn write_overlay_line(line: &str) -> bool {
+    use std::io::Write as _;
+
+    let mut stdout = std::io::stdout().lock();
+    writeln!(stdout, "{line}").is_ok() && stdout.flush().is_ok()
+}
+
+fn write_overlay_shown() {
+    let _ = write_overlay_line(sye_platform::OVERLAY_SHOWN_SIGNAL);
+}
+
 fn write_overlay_outcome(outcome: OverlayOutcome) -> bool {
     match serde_json::to_string(&outcome) {
-        Ok(line) => {
-            println!("{line}");
-            true
-        }
+        Ok(line) => write_overlay_line(&line),
         Err(err) => {
             eprintln!("Failed to serialize overlay outcome: {err}");
             false

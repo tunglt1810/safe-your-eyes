@@ -43,6 +43,10 @@ struct DaemonHost<'a> {
     notifier: OsNotifier,
     audio: OsAudioPlayer,
     overlay_launcher: Option<SubprocessOverlayLauncher>,
+    overlay_launched: bool,
+    overlay_launch_failed: bool,
+    overlay_awaiting_shown: bool,
+    pending_notification_dismiss: bool,
     settings_child: Option<Child>,
     settings_exited: bool,
     tray: Option<TrayHandle>,
@@ -62,6 +66,7 @@ impl DaemonHost<'_> {
                     warning_secs,
                 } => {
                     if !self.headless {
+                        self.pending_notification_dismiss = false;
                         let _ = self.notifier.show_pre_break(
                             break_spec.break_type,
                             &break_spec.name,
@@ -71,7 +76,12 @@ impl DaemonHost<'_> {
                 }
                 SchedulerAction::DismissNotification => {
                     if !self.headless {
-                        let _ = self.notifier.dismiss();
+                        if self.overlay_awaiting_shown {
+                            self.pending_notification_dismiss = true;
+                        } else {
+                            self.pending_notification_dismiss = false;
+                            let _ = self.notifier.dismiss();
+                        }
                     }
                 }
                 SchedulerAction::PlayChime { kind, volume } => {
@@ -87,13 +97,34 @@ impl DaemonHost<'_> {
                         if let Some(el) = self.event_loop {
                             el.prepare_child_activation();
                         }
-                        if let Err(err) = launcher.launch(&req) {
-                            eprintln!("Warning: failed to launch break overlay: {err}");
+                        match launcher.launch(&req) {
+                            Ok(()) => {
+                                self.overlay_launched = true;
+                                self.overlay_launch_failed = false;
+                                self.overlay_awaiting_shown = true;
+                            }
+                            Err(err) => {
+                                self.overlay_launched = false;
+                                self.overlay_launch_failed = true;
+                                self.overlay_awaiting_shown = false;
+                                self.dismiss_pending_notification();
+                                eprintln!("Warning: failed to launch break overlay: {err}");
+                            }
                         }
+                    } else {
+                        self.overlay_launched = false;
+                        self.overlay_launch_failed = true;
+                        self.overlay_awaiting_shown = false;
+                        self.dismiss_pending_notification();
+                        eprintln!("Warning: break overlay launcher is unavailable");
                     }
                 }
                 SchedulerAction::CloseOverlay => {
                     self.headless_break_deadline = None;
+                    self.overlay_launched = false;
+                    self.overlay_launch_failed = false;
+                    self.overlay_awaiting_shown = false;
+                    self.dismiss_pending_notification();
                     if let Some(launcher) = self.overlay_launcher.as_mut()
                         && let Err(err) = launcher.close()
                     {
@@ -242,6 +273,35 @@ impl DaemonHost<'_> {
         }
     }
 
+    fn dismiss_pending_notification(&mut self) {
+        if std::mem::take(&mut self.pending_notification_dismiss) && !self.headless {
+            let _ = self.notifier.dismiss();
+        }
+    }
+
+    fn take_overlay_launched(&mut self) -> bool {
+        std::mem::take(&mut self.overlay_launched)
+    }
+
+    fn take_overlay_launch_failed(&mut self) -> bool {
+        std::mem::take(&mut self.overlay_launch_failed)
+    }
+
+    fn poll_overlay_shown(&mut self) -> bool {
+        if self.headless {
+            return false;
+        }
+        let shown = self
+            .overlay_launcher
+            .as_mut()
+            .is_some_and(SubprocessOverlayLauncher::poll_shown);
+        if shown {
+            self.overlay_awaiting_shown = false;
+            self.dismiss_pending_notification();
+        }
+        shown
+    }
+
     fn poll_overlay_outcome(&mut self) -> Option<OverlayOutcome> {
         if self.headless {
             if let Some(deadline) = self.headless_break_deadline
@@ -254,7 +314,13 @@ impl DaemonHost<'_> {
         } else {
             let launcher = self.overlay_launcher.as_mut()?;
             match launcher.poll_outcome() {
-                Ok(outcome) => outcome,
+                Ok(outcome) => {
+                    if outcome.is_some() {
+                        self.overlay_awaiting_shown = false;
+                        self.dismiss_pending_notification();
+                    }
+                    outcome
+                }
                 Err(err) => {
                     eprintln!("Warning: failed to poll overlay subprocess: {err}");
                     None
@@ -305,9 +371,24 @@ impl DaemonHost<'_> {
     }
 
     fn close_overlay(&mut self) {
+        self.overlay_launched = false;
+        self.overlay_launch_failed = false;
+        self.overlay_awaiting_shown = false;
+        self.dismiss_pending_notification();
         if let Some(launcher) = self.overlay_launcher.as_mut() {
             let _ = launcher.close();
         }
+    }
+}
+
+fn sync_overlay_launch_status(host: &mut DaemonHost<'_>, scheduler: &mut Scheduler<SystemClock>) {
+    if host.take_overlay_launched() {
+        host.execute(scheduler.handle_event(SchedulerEvent::OverlayLaunching));
+    }
+    if host.take_overlay_launch_failed() {
+        host.execute(
+            scheduler.handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Closed)),
+        );
     }
 }
 
@@ -422,6 +503,10 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         overlay_launcher: (!headless)
             .then(|| SubprocessOverlayLauncher::current_exe().ok())
             .flatten(),
+        overlay_launched: false,
+        overlay_launch_failed: false,
+        overlay_awaiting_shown: false,
+        pending_notification_dismiss: false,
         settings_child: None,
         settings_exited: false,
         tray,
@@ -554,6 +639,10 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             }
         }
 
+        sync_overlay_launch_status(&mut host, &mut scheduler);
+        if host.poll_overlay_shown() {
+            host.execute(scheduler.handle_event(SchedulerEvent::OverlayShown));
+        }
         if let Some(outcome) = host.poll_overlay_outcome() {
             host.execute(scheduler.handle_event(SchedulerEvent::OverlayFinished(outcome)));
         }
@@ -578,6 +667,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         };
         if !tick_actions.is_empty() {
             host.execute(tick_actions);
+            sync_overlay_launch_status(&mut host, &mut scheduler);
         }
         host.refresh_tray(&scheduler.tray_snapshot());
 

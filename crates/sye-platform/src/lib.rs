@@ -32,7 +32,7 @@ pub use dnd::SystemDndProvider;
 pub use idle::SystemIdleProvider;
 pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};
 pub use notify::{OsNotifier, format_pre_break_notification};
-pub use overlay::SubprocessOverlayLauncher;
+pub use overlay::{OVERLAY_SHOWN_SIGNAL, SubprocessOverlayLauncher};
 pub use paths::{AppPaths, session_path_for_config, update_cache_path_for_config};
 pub use sye_core::traits;
 pub use tray::{

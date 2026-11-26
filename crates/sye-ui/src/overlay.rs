@@ -597,8 +597,13 @@ pub(crate) fn build_overlay_view(
     };
 
     let finish_tick = finish_if_ready.clone();
-    let started = nsh_core::time::now();
+    let started_at: Arc<Mutex<Option<nsh_core::time::Instant>>> = Arc::new(Mutex::new(None));
+    let shown = signal(false);
+    let tick_started = Arc::clone(&started_at);
     let _timer = set_interval(Duration::from_millis(100), move || {
+        let Some(started) = tick_started.lock().ok().and_then(|g| *g) else {
+            return;
+        };
         let elapsed = nsh_core::time::now().saturating_duration_since(started);
         vm.update(|m| {
             let _ = m.update_elapsed(elapsed);
@@ -653,6 +658,7 @@ pub(crate) fn build_overlay_view(
         });
         main_win.focus();
         let focus_win = main_win;
+        let show_started = Arc::clone(&started_at);
         drop(set_timeout(Duration::from_millis(50), move || {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
@@ -666,6 +672,10 @@ pub(crate) fn build_overlay_view(
                 }
             }
             focus_win.focus();
+            if let Ok(mut guard) = show_started.lock() {
+                *guard = Some(nsh_core::time::now());
+            }
+            shown.set(true);
             entrance.play(vm);
             if let Some(hook) = on_shown {
                 hook();
@@ -702,8 +712,16 @@ pub(crate) fn build_overlay_view(
                 let sec_win_el = sec_win_el.default_mode(nsh_core::desktop::WindowMode::FullScreen);
                 sec_win_el.content(move || {
                     let entrance = Entrance::new(vm);
-                    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-                    entrance.play(vm);
+                    let ready = signal(cfg!(not(any(target_os = "macos", target_os = "windows"))));
+                    let played = std::sync::atomic::AtomicBool::new(false);
+                    effect(move || {
+                        if ready.get()
+                            && shown.get()
+                            && !played.swap(true, std::sync::atomic::Ordering::AcqRel)
+                        {
+                            entrance.play(vm);
+                        }
+                    });
                     #[cfg(any(target_os = "macos", target_os = "windows"))]
                     {
                         let sec_win = current_window();
@@ -715,7 +733,7 @@ pub(crate) fn build_overlay_view(
                         });
                         drop(set_timeout(Duration::from_millis(16), move || {
                             apply_bounds(d.with(|disp| disp.bounds));
-                            entrance.play(vm);
+                            ready.set(true);
                         }));
                     }
                     view()
@@ -730,6 +748,10 @@ pub(crate) fn build_overlay_view(
             },
         ));
     } else {
+        if let Ok(mut guard) = started_at.lock() {
+            *guard = Some(nsh_core::time::now());
+        }
+        shown.set(true);
         entrance.play(vm);
     }
 

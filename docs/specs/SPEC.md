@@ -95,9 +95,9 @@ When both `short_breaks` and `long_breaks` are empty, `BreakQueue::from_config` 
 `Scheduler` operates across seven states:
 
 - `Start`: Initial state before the first timer starts.
-- `Waiting`: Daemon counts down to the pre-break warning time.
+- `Waiting`: Daemon counts down to the pre-break warning time. `Scheduler` rounds remaining countdown seconds up so the tray matches the pre-break banner.
 - `PreBreak`: Daemon shows a pre-break notification that counts down each second for `pre_break_warning_secs` (default 10 seconds), then launches the break overlay and dismisses the notification.
-- `Break`: Daemon shows the break overlay for the exercise duration.
+- `Break`: Daemon shows the break overlay for the exercise duration. The overlay subprocess reports when its window becomes visible and starts its countdown and animations together. `Scheduler` extends the fallback deadline during overlay startup and aligns it when the overlay becomes visible. This grace period prevents the daemon from closing the overlay before its countdown ends.
 - `Stopped`: Daemon pauses by user request or because no valid exercises exist.
 - `Resting`: Daemon pauses because the user is idle or the computer suspended.
 - `Quit`: Terminal state that ignores all subsequent events.
@@ -262,8 +262,8 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - All animations stop when the operating system enables Reduce Motion (`reduce_motion()`).
 - The break overlay opens a borderless `WindowFrameStyle::None` window at `WindowLevel::AboveDock` across `Workspaces::All`.
 - On macOS, the break overlay uses `ActivationPolicy::Accessory`.
-- On macOS, the break overlay covers the full bounds of the primary display.
-- On Linux and Windows, the break overlay uses `WindowMode::FullScreen` on the primary display.
+- On macOS and Windows, the break overlay covers the full bounds of the primary display.
+- On Linux, the break overlay uses `WindowMode::FullScreen` on the primary display.
 - On additional displays, the break overlay opens secondary `WindowKind::Popup` windows that display the same Cozy break card and `Postpone (Space)` / `Skip (Esc)` controls.
 - The break overlay focuses the primary window on launch.
 - The break overlay uses dark-roast colors (`#18140E` canvas and `#231D16` card).

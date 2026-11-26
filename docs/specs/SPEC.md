@@ -281,7 +281,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - When `strict_break` is `true`, the `Skip Limit` KPI card shows `Strict`.
 - The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, the top-right Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
 - The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar with automatic save status and a `Reset to defaults` button.
-- Every valid change in the Settings window saves `config.toml` immediately. Invalid input shows a validation banner and keeps the last valid `config.toml` on disk.
+- Every valid change in the Settings window saves `config.toml` immediately. Invalid input shows a validation banner and keeps the last valid `config.toml` on disk. While the Settings window is open, the daemon checks the `config.toml` modification time every second and applies a changed configuration.
 - The `Reset to defaults` button is disabled while the configuration matches `Config::reset_to_default()` and activates with the accent style when any setting differs from default. Pressing `Reset to defaults` restores defaults and saves immediately.
 - The About & Support tab shows the **Buy Me a Coffee** link and QR code for `https://buymeacoffee.com/bbeeezzzzz`.
 - Headless UI tests validate both screens in CI using `nsh_testing::Headless`.

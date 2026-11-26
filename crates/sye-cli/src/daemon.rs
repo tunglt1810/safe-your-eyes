@@ -167,6 +167,10 @@ impl DaemonHost<'_> {
     }
 }
 
+fn config_modified_at(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 fn disable_minutes_to_secs(minutes: Option<u64>) -> Option<u64> {
     minutes.filter(|&m| m > 0).map(|m| m.saturating_mul(60))
 }
@@ -268,6 +272,8 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     };
 
     let mut last_policy_check = Instant::now();
+    let mut last_config_poll = Instant::now();
+    let mut config_mtime = config_modified_at(&paths.config_file);
 
     host.execute(scheduler.handle_event(SchedulerEvent::Start));
     let launched_at_login = app_loop
@@ -296,7 +302,17 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             restart_on_settings_close = false;
         }
         let settings_exited = host.take_settings_exited();
+        let mut config_changed = false;
         if settings_exited
+            || (host.settings_child.is_some()
+                && last_config_poll.elapsed() >= Duration::from_secs(1))
+        {
+            last_config_poll = Instant::now();
+            let mtime = config_modified_at(&paths.config_file);
+            config_changed = mtime != config_mtime;
+            config_mtime = mtime;
+        }
+        if (settings_exited || config_changed)
             && let Ok(updated_cfg) = Config::load_from_path(&paths.config_file)
             && updated_cfg != *scheduler.config()
         {

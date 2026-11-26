@@ -415,6 +415,14 @@ fn update_and_autosave(
     outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
     mutate: impl FnOnce(&mut SettingsViewModel),
 ) {
+    let _ = try_update_and_autosave(vm, outcome_sink, mutate);
+}
+
+fn try_update_and_autosave(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
+    mutate: impl FnOnce(&mut SettingsViewModel),
+) -> bool {
     let mut saved = false;
     vm.update(|m| {
         mutate(m);
@@ -425,6 +433,7 @@ fn update_and_autosave(
     if saved {
         crate::store_outcome(outcome_sink, SettingsOutcome::Saved);
     }
+    saved
 }
 
 fn timing_section(
@@ -576,8 +585,9 @@ fn timing_section(
                         "Launch at login (startup)",
                         move || vm.with(|m| m.config.autostart),
                         move |v| {
-                            update_and_autosave(vm, &s11, |m| m.config.autostart = v);
-                            if let Some(cb) = &on_autostart_change {
+                            if try_update_and_autosave(vm, &s11, |m| m.config.autostart = v)
+                                && let Some(cb) = &on_autostart_change
+                            {
                                 cb(v);
                             }
                         },
@@ -1298,7 +1308,7 @@ pub(crate) fn build_settings_view_with_hooks(
                 if saved {
                     crate::store_outcome(&reset_sink, SettingsOutcome::Saved);
                 }
-                if let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
+                if saved && let (Some(next), Some(cb)) = (autostart_changed, &reset_hook) {
                     cb(next);
                 }
                 let default_appearance = appearance_for_theme_mode(ThemeMode::default());

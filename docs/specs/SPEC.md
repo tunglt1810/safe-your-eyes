@@ -269,7 +269,8 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - The break overlay focuses the primary window on launch.
 - The break overlay uses dark-roast colors (`#18140E` canvas and `#231D16` card).
 - The break overlay fades in over `fade_in_ms` with a `0.98 -> 1.0` scale-in.
-- The break overlay shows the embedded app icon, exercise title, `MM:SS` countdown, animated progress bar, shortcut lock notice, `Postpone (Space)`, and `Skip (Esc)`.
+- The break overlay shows the embedded app icon, exercise title, tabular-numeral `MM:SS` countdown, remaining-time progress bar, shortcut lock notice, and secondary `Postpone (Space)` and `Skip (Esc)` pills.
+- The break overlay progress bar shrinks symmetrically toward the center from `100%` to `0%`, exposes `AccessibilityRole::Progressbar`, and steps once per second when the operating system enables Reduce Motion.
 - The Settings window uses `TitleBarStyle::Hidden` (`36pt` height) so the titlebar matches the active Cozy theme.
 - On macOS, the Floating Sage Sidebar places the window traffic lights inside its top-left area.
 - On Windows and Linux, the Settings window reserves reactive top-right clearance for native window controls.
@@ -363,7 +364,7 @@ This section lists the operating system and framework limits that the code works
 1. An opaque window fades from its clear color (white, or near black in dark mode), not from the desktop. The overlay windows are transparent.
 2. The engine animates per surface. Each overlay window has its own animated values.
 3. The engine starts the clock of an animation at its first frame. Frames before the window is shown and sized are lost. The overlay starts its animations after its window is shown.
-4. A width change does not animate per frame. The progress bar moves its fill with one `translate_x` animation for the whole break.
+4. A width change does not animate per frame. The progress bar scales its fill from the center with one `ScaleX` animation for the whole break.
 5. `set_interval` skips late runs. The overlay calculates the countdown from the clock, not from the number of ticks.
 6. `Engine::drop` stops the worker thread but does not dispose the root `Owner`. The Settings window uses `on_app_quit` for window close and `cleanup` for scope disposal.
 7. The daemon stops the Settings child with `SIGKILL`, and `SIGKILL` skips `on_app_quit`. The daemon restores the saved autostart value itself.

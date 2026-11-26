@@ -105,6 +105,20 @@ impl OverlayViewModel {
     }
 
     #[must_use]
+    pub fn remaining_ratio(&self) -> f32 {
+        (1.0 - self.progress()).clamp(0.0, 1.0)
+    }
+
+    #[must_use]
+    pub fn remaining_ratio_discrete(&self) -> f32 {
+        if self.request.duration_secs == 0 {
+            return 0.0;
+        }
+        (self.remaining_secs_ceil() as f64 / self.request.duration_secs as f64).clamp(0.0, 1.0)
+            as f32
+    }
+
+    #[must_use]
     pub fn is_shortcut_locked(&self) -> bool {
         self.elapsed < Duration::from_secs(self.request.shortcut_disable_secs)
     }
@@ -299,31 +313,55 @@ fn secondary_window_attributes() -> WindowAttributes {
     attrs
 }
 
-const PROGRESS_TRACK_W: f32 = 360.0;
+const PROGRESS_TRACK_W: f32 = 280.0;
+const PROGRESS_TRACK_H: f32 = 5.0;
 
 #[derive(Clone, Copy)]
 struct Entrance {
     fade: AnimatedValue,
     card_scale: AnimatedValue,
-    progress_x: AnimatedValue,
+    remaining_scale: AnimatedValue,
 }
 
 impl Entrance {
     fn new(vm: Signal<OverlayViewModel>) -> Self {
-        let (alpha, progress) = vm.with(|m| (m.fade_in_alpha(), m.progress()));
-        Self {
+        let reduced = reduce_motion();
+        let (alpha, remaining_scale) = vm.with(|m| {
+            let scale = if reduced {
+                m.remaining_ratio_discrete()
+            } else {
+                m.remaining_ratio()
+            };
+            (m.fade_in_alpha(), scale)
+        });
+        let entrance = Self {
             fade: animated_value(alpha),
-            card_scale: animated_value(if reduce_motion() { 1.0 } else { 0.98 }),
-            progress_x: animated_value(progress_offset(progress)),
+            card_scale: animated_value(if reduced { 1.0 } else { 0.98 }),
+            remaining_scale: animated_value(remaining_scale),
+        };
+        if reduced {
+            let scale = entrance.remaining_scale;
+            let remaining_secs = computed(move || vm.with(OverlayViewModel::remaining_secs_ceil));
+            effect(move || {
+                let _ = remaining_secs.get();
+                scale.set(vm.with(OverlayViewModel::remaining_ratio_discrete));
+            });
         }
+        entrance
     }
 
     fn play(&self, vm: Signal<OverlayViewModel>) {
-        let (alpha, fade_ms, progress, remaining) = vm.with(|m| {
+        let reduced = reduce_motion();
+        let (alpha, fade_ms, remaining_scale, remaining) = vm.with(|m| {
+            let scale = if reduced {
+                m.remaining_ratio_discrete()
+            } else {
+                m.remaining_ratio()
+            };
             (
                 m.fade_in_alpha(),
                 m.request.fade_in_ms,
-                m.progress(),
+                scale,
                 m.remaining(),
             )
         });
@@ -332,24 +370,20 @@ impl Entrance {
                 .fade
                 .timing(1.0, fade_ms as f32 * (1.0 - alpha), Easing::Linear);
         }
-        if !reduce_motion() {
+        if !reduced {
             let _ = self.card_scale.timing(
                 1.0,
                 crate::theme::motion::THEME_COLOR_MS,
                 crate::theme::motion::COZY_EASE,
             );
         }
-        self.progress_x.set(progress_offset(progress));
-        if progress < 1.0 {
-            let _ = self
-                .progress_x
-                .timing(0.0, remaining.as_secs_f32() * 1000.0, Easing::Linear);
+        self.remaining_scale.set(remaining_scale);
+        if !reduced && remaining_scale > 0.0 {
+            let _ =
+                self.remaining_scale
+                    .timing(0.0, remaining.as_secs_f32() * 1000.0, Easing::Linear);
         }
     }
-}
-
-fn progress_offset(progress: f32) -> f32 {
-    -(1.0 - progress) * PROGRESS_TRACK_W
 }
 
 fn build_overlay_card(
@@ -417,18 +451,20 @@ fn build_overlay_card(
                 .items_center()
                 .justify_center()
                 .rounded(radii::PILL)
-                .bg(colors::ACCENT)
+                .bg(colors::OVERLAY_TRACK)
+                .border_1()
+                .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
                 .transition()
                 .duration(crate::theme::motion::CONTROL_MS)
                 .ease_out()
-                .hover(|s| s.opacity(0.92))
-                .active(|s| s.opacity(0.84))
+                .hover(|s| s.opacity(0.9))
+                .active(|s| s.opacity(0.8))
                 .disabled_style(|s| s.opacity(0.4))
                 .child(
                     text("Skip (Esc)")
                         .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors::ON_ACCENT),
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(colors::OVERLAY_TEXT),
                 ),
         );
     }
@@ -465,25 +501,48 @@ fn build_overlay_card(
                 .text_color(colors::OVERLAY_TEXT),
         )
         .child(
-            text(move || vm.with(OverlayViewModel::formatted_remaining))
-                .text_4xl()
-                .font_weight(FontWeight::BOLD)
-                .text_color(colors::ACCENT),
-        )
-        .child(
             view()
-                .w(px(PROGRESS_TRACK_W))
-                .h(px(8.0))
-                .rounded(radii::PILL)
-                .bg(colors::OVERLAY_TRACK)
-                .overflow_hidden()
+                .items_center()
+                .gap_3()
+                .child(
+                    text(move || vm.with(OverlayViewModel::formatted_remaining))
+                        .text_4xl()
+                        .font_weight(FontWeight::BOLD)
+                        .tabular_nums()
+                        .text_color(colors::ACCENT),
+                )
                 .child(
                     view()
                         .w(px(PROGRESS_TRACK_W))
-                        .h(px(8.0))
+                        .h(px(PROGRESS_TRACK_H))
                         .rounded(radii::PILL)
-                        .bg(colors::ACCENT)
-                        .bind_translate_x(&entrance.progress_x),
+                        .bg(colors::OVERLAY_TRACK)
+                        .overflow_hidden()
+                        .accessible(true)
+                        .role(AccessibilityRole::Progressbar)
+                        .label("Break time remaining")
+                        .accessibility_value(move || {
+                            vm.with(|m| {
+                                Some(nsh_core::AccessibilityValue {
+                                    min: Some(0.0),
+                                    max: Some(m.request().duration_secs as f32),
+                                    now: Some(m.remaining_secs_ceil() as f32),
+                                    text: Some(Arc::from(m.formatted_remaining())),
+                                })
+                            })
+                        })
+                        .child(
+                            view()
+                                .w(px(PROGRESS_TRACK_W))
+                                .h(px(PROGRESS_TRACK_H))
+                                .rounded(radii::PILL)
+                                .bg(colors::ACCENT)
+                                .origin_center()
+                                .bind_transform(
+                                    nsh_core::TransformKind::ScaleX,
+                                    &entrance.remaining_scale,
+                                ),
+                        ),
                 ),
         );
 
@@ -940,10 +999,31 @@ mod tests {
     }
 
     #[test]
-    fn progress_offset_slides_the_fill_from_hidden_to_full() {
-        assert_eq!(progress_offset(0.0), -PROGRESS_TRACK_W);
-        assert_eq!(progress_offset(0.25), -0.75 * PROGRESS_TRACK_W);
-        assert_eq!(progress_offset(1.0), 0.0);
+    fn remaining_ratios_drain_from_full_to_empty() {
+        let mut req = sample_request();
+        req.duration_secs = 10;
+        let mut vm = OverlayViewModel::new(req);
+
+        assert_eq!(vm.remaining_ratio(), 1.0);
+        assert_eq!(vm.remaining_ratio_discrete(), 1.0);
+
+        let _ = vm.tick(Duration::from_millis(500));
+        assert!((vm.remaining_ratio() - 0.95).abs() < 1e-4);
+        assert_eq!(vm.remaining_ratio_discrete(), 1.0);
+
+        let _ = vm.tick(Duration::from_millis(2000));
+        assert!((vm.remaining_ratio() - 0.75).abs() < 1e-4);
+        assert!((vm.remaining_ratio_discrete() - 0.8).abs() < 1e-4);
+
+        let _ = vm.tick(Duration::from_millis(7500));
+        assert_eq!(vm.remaining_ratio(), 0.0);
+        assert_eq!(vm.remaining_ratio_discrete(), 0.0);
+
+        let mut zero_req = sample_request();
+        zero_req.duration_secs = 0;
+        let zero_vm = OverlayViewModel::new(zero_req);
+        assert_eq!(zero_vm.remaining_ratio(), 0.0);
+        assert_eq!(zero_vm.remaining_ratio_discrete(), 0.0);
     }
 
     #[test]

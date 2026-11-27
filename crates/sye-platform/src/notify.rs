@@ -472,7 +472,7 @@ pub(crate) fn compute_macos_banner_origin(
     visible_frame: crate::tray::ScreenRect,
     banner_size: (f64, f64),
 ) -> (f64, f64) {
-        const SCREEN_MARGIN: f64 = 16.0;
+    const SCREEN_MARGIN: f64 = 16.0;
 
     let min_x = visible_frame.x + SCREEN_MARGIN;
     let max_x = (visible_frame.x + visible_frame.width - banner_size.0 - SCREEN_MARGIN).max(min_x);

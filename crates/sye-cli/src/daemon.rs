@@ -24,13 +24,18 @@ use sye_platform::{
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+const CONFIG_POLL_INTERVAL_ACTIVE: Duration = Duration::from_millis(500);
+const CONFIG_POLL_INTERVAL_IDLE: Duration = Duration::from_secs(1);
+const DAEMON_HANDOFF_TIMEOUT: Duration = Duration::from_millis(2500);
+const DAEMON_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DAEMON_HANDOFF_IPC_TIMEOUT: Duration = Duration::from_millis(250);
+pub(crate) const HANDOFF_ENV_VAR: &str = "SYE_HANDOFF_IN_PROGRESS";
+pub(crate) const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(not(feature = "msstore"))]
 const UPDATE_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(500);
 // The macOS and Windows banners have no auto-hide, so the daemon closes update notices itself.
 #[cfg(not(feature = "msstore"))]
 const UPDATE_NOTICE_DURATION: Duration = Duration::from_secs(8);
-#[cfg(not(feature = "msstore"))]
-const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoopControl {
@@ -441,14 +446,35 @@ fn sync_overlay_launch_status(host: &mut DaemonHost<'_>, scheduler: &mut Schedul
     }
 }
 
-fn config_modified_at(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-#[cfg(not(feature = "msstore"))]
 fn file_fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     Some((meta.modified().ok()?, meta.len()))
+}
+
+fn poll_config_change(
+    path: &Path,
+    force_read: bool,
+    last_fingerprint: &mut Option<(SystemTime, u64)>,
+    current_config: &Config,
+) -> Option<Config> {
+    let fingerprint = file_fingerprint(path);
+    if !force_read && fingerprint == *last_fingerprint {
+        return None;
+    }
+    let changed = fingerprint != *last_fingerprint;
+    *last_fingerprint = fingerprint;
+    match Config::load_from_path(path) {
+        Ok(updated) => (updated != *current_config).then_some(updated),
+        Err(err) => {
+            if changed {
+                eprintln!(
+                    "Warning: ignoring invalid config file {}: {err}",
+                    path.display()
+                );
+            }
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "msstore"))]
@@ -474,6 +500,70 @@ fn poll_update_cache_change(
     Some(cache)
 }
 
+pub(crate) fn should_replace_running_daemon(
+    snapshot: &sye_core::scheduler::StatusSnapshot,
+    current_version: &str,
+) -> bool {
+    snapshot.daemon_version.as_deref() != Some(current_version)
+        && !matches!(
+            snapshot.state,
+            SchedulerState::PreBreak | SchedulerState::Break
+        )
+}
+
+fn query_running_daemon_status(socket_path: &Path) -> Option<sye_core::scheduler::StatusSnapshot> {
+    match IpcClient::send_command_with_timeout(
+        socket_path,
+        &IpcCommand::Status,
+        DAEMON_HANDOFF_IPC_TIMEOUT,
+    ) {
+        Ok(IpcResponse::Status(snapshot)) => Some(snapshot),
+        _ => None,
+    }
+}
+
+fn bind_or_replace_daemon(
+    socket_path: &Path,
+    headless: bool,
+    current_version: &str,
+) -> Result<IpcServer, IpcError> {
+    match IpcServer::bind(socket_path) {
+        Ok(srv) => Ok(srv),
+        Err(IpcError::AlreadyRunning) if !headless => {
+            let Some(snapshot) = query_running_daemon_status(socket_path) else {
+                return Err(IpcError::AlreadyRunning);
+            };
+            if !should_replace_running_daemon(&snapshot, current_version) {
+                return Err(IpcError::AlreadyRunning);
+            }
+            if !matches!(
+                IpcClient::send_command_with_timeout(
+                    socket_path,
+                    &IpcCommand::Quit,
+                    DAEMON_HANDOFF_IPC_TIMEOUT,
+                ),
+                Ok(IpcResponse::Ok { .. })
+            ) {
+                return Err(IpcError::AlreadyRunning);
+            }
+            let deadline = Instant::now() + DAEMON_HANDOFF_TIMEOUT;
+            loop {
+                match IpcServer::bind(socket_path) {
+                    Ok(srv) => return Ok(srv),
+                    Err(IpcError::AlreadyRunning) => {
+                        if Instant::now() >= deadline {
+                            return Err(IpcError::AlreadyRunning);
+                        }
+                        std::thread::sleep(DAEMON_HANDOFF_POLL_INTERVAL);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn disable_minutes_to_secs(minutes: Option<u64>) -> Option<u64> {
     minutes.filter(|&m| m > 0).map(|m| m.saturating_mul(60))
 }
@@ -490,9 +580,12 @@ fn rng_seed_from_clock() -> u64 {
 }
 
 pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> ExitCode {
-    let server = match IpcServer::bind(&paths.socket_path) {
+    let server = match bind_or_replace_daemon(&paths.socket_path, headless, CURRENT_VERSION) {
         Ok(srv) => srv,
         Err(IpcError::AlreadyRunning) => {
+            if std::env::var_os(HANDOFF_ENV_VAR).is_some() {
+                return ExitCode::FAILURE;
+            }
             if !headless && !background {
                 let _ = IpcClient::send_command(&paths.socket_path, &IpcCommand::OpenSettings);
             }
@@ -637,7 +730,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let mut last_config_poll = Instant::now();
     #[cfg(not(feature = "msstore"))]
     let mut last_update_cache_poll = Instant::now();
-    let mut config_mtime = config_modified_at(&paths.config_file);
+    let mut config_fingerprint = file_fingerprint(&paths.config_file);
     #[cfg(not(feature = "msstore"))]
     let mut update_cache_fingerprint = initial_update_cache_fingerprint;
     #[cfg(not(feature = "msstore"))]
@@ -670,32 +763,43 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         }
 
         let settings_exited = host.take_settings_exited();
-        let mut config_changed = false;
+        let config_poll_interval = if host.settings_child.is_some() {
+            CONFIG_POLL_INTERVAL_ACTIVE
+        } else {
+            CONFIG_POLL_INTERVAL_IDLE
+        };
+        // An outside edit must not close an active break overlay. The fingerprint stays
+        // unchanged, so the edit is applied after the break.
+        let defer_idle_reload = host.settings_child.is_none()
+            && matches!(
+                scheduler.state(),
+                SchedulerState::PreBreak | SchedulerState::Break
+            );
         if settings_exited
-            || (host.settings_child.is_some()
-                && last_config_poll.elapsed() >= Duration::from_secs(1))
+            || (!defer_idle_reload && last_config_poll.elapsed() >= config_poll_interval)
         {
             last_config_poll = Instant::now();
-            let mtime = config_modified_at(&paths.config_file);
-            config_changed = mtime != config_mtime;
-            config_mtime = mtime;
-        }
-        if (settings_exited || config_changed)
-            && let Ok(updated_cfg) = Config::load_from_path(&paths.config_file)
-            && updated_cfg != *scheduler.config()
-        {
-            if !headless
-                && updated_cfg.autostart != scheduler.config().autostart
-                && let Err(err) = sye_platform::sync_system_autostart(
-                    updated_cfg.autostart,
-                    Some(&paths.config_file),
-                )
-            {
-                eprintln!("Warning: failed to synchronize autostart entry: {err}");
+            let force_read = settings_exited || host.settings_child.is_some();
+            if let Some(updated_cfg) = poll_config_change(
+                &paths.config_file,
+                force_read,
+                &mut config_fingerprint,
+                scheduler.config(),
+            ) {
+                if !headless
+                    && updated_cfg.autostart != scheduler.config().autostart
+                    && let Err(err) = sye_platform::sync_system_autostart(
+                        updated_cfg.autostart,
+                        Some(&paths.config_file),
+                    )
+                {
+                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
+                }
+                let actions = scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg));
+                host.set_locale(scheduler.active_locale());
+                host.notifier.set_theme_mode(scheduler.config().theme);
+                host.execute(actions);
             }
-            host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
-            host.set_locale(scheduler.active_locale());
-            host.notifier.set_theme_mode(scheduler.config().theme);
         }
 
         #[cfg(not(feature = "msstore"))]
@@ -852,7 +956,11 @@ fn drain_ipc_requests(
         let mut deferred_actions: Vec<SchedulerAction> = Vec::new();
 
         let accepted = server.accept_once(Duration::from_millis(10), |cmd| match cmd {
-            IpcCommand::Status => IpcResponse::Status(scheduler.status_snapshot()),
+            IpcCommand::Status => {
+                let mut snapshot = scheduler.status_snapshot();
+                snapshot.daemon_version = Some(CURRENT_VERSION.to_owned());
+                IpcResponse::Status(snapshot)
+            }
             IpcCommand::Enable => {
                 deferred_actions.extend(scheduler.handle_event(SchedulerEvent::Enable));
                 IpcResponse::Ok {
@@ -1005,6 +1113,43 @@ fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io:
         .arg(config_file)
         .arg("--socket")
         .arg(socket_path)
+        .env_remove(HANDOFF_ENV_VAR)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    sye_platform::hide_child_console(&mut cmd).spawn()
+}
+
+pub(crate) fn hand_off_to_new_daemon(paths: &AppPaths) -> bool {
+    let Ok(mut child) = spawn_daemon_for_handoff(paths) else {
+        return false;
+    };
+    // The new daemon exits when the old daemon does not quit. The caller then opens Settings
+    // itself, so that the user's request is not lost.
+    let deadline = Instant::now() + DAEMON_HANDOFF_TIMEOUT + 2 * DAEMON_HANDOFF_IPC_TIMEOUT;
+    while Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return false;
+        }
+        if query_running_daemon_status(&paths.socket_path)
+            .is_some_and(|s| s.daemon_version.as_deref() == Some(CURRENT_VERSION))
+        {
+            return true;
+        }
+        std::thread::sleep(DAEMON_HANDOFF_POLL_INTERVAL);
+    }
+    true
+}
+
+fn spawn_daemon_for_handoff(paths: &AppPaths) -> std::io::Result<Child> {
+    let exe = std::env::current_exe()?;
+    let resolved = exe.canonicalize().unwrap_or(exe);
+    let mut cmd = Command::new(resolved);
+    cmd.arg("--config")
+        .arg(&paths.config_file)
+        .arg("--socket")
+        .arg(&paths.socket_path)
+        .env(HANDOFF_ENV_VAR, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1041,6 +1186,7 @@ fn spawn_restarted_daemon(paths: &AppPaths, headless: bool) -> std::io::Result<C
         .arg(&paths.config_file)
         .arg("--socket")
         .arg(&paths.socket_path)
+        .env_remove(HANDOFF_ENV_VAR)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -1213,5 +1359,177 @@ mod tests {
             )),
             std::path::PathBuf::from("/usr/local/bin/safe-your-eyes")
         );
+    }
+
+    #[test]
+    fn should_replace_running_daemon_checks_version_and_break_state() {
+        let base = sye_core::scheduler::StatusSnapshot {
+            state: SchedulerState::Waiting,
+            enabled: true,
+            next_break_type: Some(BreakType::Short),
+            next_break_name: Some("Blink".to_owned()),
+            seconds_until_next_break: 60,
+            consecutive_skips: 0,
+            daemon_version: None,
+        };
+        assert!(should_replace_running_daemon(&base, "0.5.0"));
+        assert!(should_replace_running_daemon(
+            &sye_core::scheduler::StatusSnapshot {
+                daemon_version: Some("0.4.0".to_owned()),
+                ..base.clone()
+            },
+            "0.5.0"
+        ));
+        assert!(!should_replace_running_daemon(
+            &sye_core::scheduler::StatusSnapshot {
+                daemon_version: Some("0.5.0".to_owned()),
+                ..base.clone()
+            },
+            "0.5.0"
+        ));
+        assert!(!should_replace_running_daemon(
+            &sye_core::scheduler::StatusSnapshot {
+                state: SchedulerState::PreBreak,
+                ..base.clone()
+            },
+            "0.5.0"
+        ));
+        assert!(!should_replace_running_daemon(
+            &sye_core::scheduler::StatusSnapshot {
+                state: SchedulerState::Break,
+                ..base
+            },
+            "0.5.0"
+        ));
+    }
+
+    #[test]
+    fn poll_config_change_detects_same_length_language_toggle_and_skips_partial_writes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".tmp")
+            .join(format!("sye-cli-cfg-poll-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let cfg_path = dir.join("config.toml");
+
+        let mut current = Config {
+            language: sye_core::LanguageMode::En,
+            ..Config::default()
+        };
+        current.save_to_path(&cfg_path)?;
+        let mut fingerprint = file_fingerprint(&cfg_path);
+        assert_eq!(
+            poll_config_change(&cfg_path, false, &mut fingerprint, &current),
+            None
+        );
+
+        std::fs::write(&cfg_path, "schema_version = [broken")?;
+        assert_eq!(
+            poll_config_change(&cfg_path, true, &mut fingerprint, &current),
+            None
+        );
+        assert_eq!(fingerprint, file_fingerprint(&cfg_path));
+
+        let next = Config {
+            language: sye_core::LanguageMode::Vi,
+            ..current.clone()
+        };
+        next.save_to_path(&cfg_path)?;
+        let reloaded = poll_config_change(&cfg_path, true, &mut fingerprint, &current);
+        assert_eq!(reloaded, Some(next.clone()));
+        current = next;
+        assert_eq!(
+            poll_config_change(&cfg_path, true, &mut fingerprint, &current),
+            None
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn bind_or_replace_daemon_hands_off_from_older_daemon_and_keeps_same_version()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".tmp")
+            .join(format!("sye-ho-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+
+        let old_sock = dir.join("old.sock");
+        let old_server = IpcServer::bind(&old_sock)?;
+        let old_thread = std::thread::spawn(move || -> bool {
+            let mut saw_quit = false;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !saw_quit && Instant::now() < deadline {
+                let _ = old_server.accept_once(Duration::from_millis(200), |cmd| match cmd {
+                    IpcCommand::Status => {
+                        IpcResponse::Status(sye_core::scheduler::StatusSnapshot {
+                            state: SchedulerState::Waiting,
+                            enabled: true,
+                            next_break_type: Some(BreakType::Short),
+                            next_break_name: Some("Blink".to_owned()),
+                            seconds_until_next_break: 60,
+                            consecutive_skips: 0,
+                            daemon_version: None,
+                        })
+                    }
+                    IpcCommand::Quit => {
+                        saw_quit = true;
+                        IpcResponse::Ok {
+                            message: Some("Quitting".to_owned()),
+                        }
+                    }
+                    _ => IpcResponse::Ok { message: None },
+                });
+            }
+            drop(old_server);
+            saw_quit
+        });
+
+        let replaced = bind_or_replace_daemon(&old_sock, false, "0.5.0")?;
+        drop(replaced);
+        let Ok(saw_quit) = old_thread.join() else {
+            return Err("old daemon thread panicked".into());
+        };
+        assert!(saw_quit);
+
+        let same_sock = dir.join("same.sock");
+        let same_server = IpcServer::bind(&same_sock)?;
+        let same_thread = std::thread::spawn(move || -> bool {
+            let mut saw_status = false;
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !saw_status && Instant::now() < deadline {
+                let _ = same_server.accept_once(Duration::from_millis(200), |cmd| match cmd {
+                    IpcCommand::Status => {
+                        saw_status = true;
+                        IpcResponse::Status(sye_core::scheduler::StatusSnapshot {
+                            state: SchedulerState::Waiting,
+                            enabled: true,
+                            next_break_type: Some(BreakType::Short),
+                            next_break_name: Some("Blink".to_owned()),
+                            seconds_until_next_break: 60,
+                            consecutive_skips: 0,
+                            daemon_version: Some("0.5.0".to_owned()),
+                        })
+                    }
+                    _ => IpcResponse::Ok { message: None },
+                });
+            }
+            saw_status
+        });
+
+        let err = bind_or_replace_daemon(&same_sock, false, "0.5.0").err();
+        assert_eq!(err, Some(IpcError::AlreadyRunning));
+        let Ok(saw_status) = same_thread.join() else {
+            return Err("same daemon thread panicked".into());
+        };
+        assert!(saw_status);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

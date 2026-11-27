@@ -4510,6 +4510,7 @@ mod tests {
             next_break_name: Some("Blink".to_owned()),
             seconds_until_next_break: 872,
             consecutive_skips: 0,
+            daemon_version: None,
         };
         assert_eq!(
             format_countdown_pill(&base, Locale::En),
@@ -4681,6 +4682,7 @@ mod tests {
             next_break_name: Some("Look away".to_owned()),
             seconds_until_next_break: 872,
             consecutive_skips: 0,
+            daemon_version: None,
         };
         let polled_snapshot: Arc<Mutex<Option<StatusSnapshot>>> =
             Arc::new(Mutex::new(Some(StatusSnapshot {

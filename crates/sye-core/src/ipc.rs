@@ -189,6 +189,7 @@ mod tests {
             next_break_name: Some("Blink your eyes".to_owned()),
             seconds_until_next_break: 420,
             consecutive_skips: 1,
+            daemon_version: None,
         };
         let value = serde_json::to_value(&snapshot)?;
         assert_eq!(value["state"], "waiting");
@@ -197,10 +198,21 @@ mod tests {
         assert_eq!(value["next_break_name"], "Blink your eyes");
         assert_eq!(value["seconds_until_next_break"], 420);
         assert_eq!(value["consecutive_skips"], 1);
+        assert!(value.get("daemon_version").is_none());
 
         let line = encode_line(&IpcResponse::Status(snapshot.clone()))?;
         let decoded = decode_response(&line)?;
-        assert_eq!(decoded, IpcResponse::Status(snapshot));
+        assert_eq!(decoded, IpcResponse::Status(snapshot.clone()));
+
+        let versioned = StatusSnapshot {
+            daemon_version: Some("0.5.0".to_owned()),
+            ..snapshot
+        };
+        let versioned_line = encode_line(&IpcResponse::Status(versioned.clone()))?;
+        assert_eq!(
+            decode_response(&versioned_line)?,
+            IpcResponse::Status(versioned)
+        );
         Ok(())
     }
 

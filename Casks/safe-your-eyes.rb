@@ -17,6 +17,8 @@ cask "safe-your-eyes" do
     run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Safe Your Eyes.app"]
   end
 
+  uninstall quit: "io.github.safeyoureyes.SafeYourEyes"
+
   zap trash: [
     "~/Library/Application Support/safe-your-eyes",
     "~/Library/Caches/safe-your-eyes",

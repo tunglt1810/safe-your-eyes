@@ -164,6 +164,16 @@ fn run_internal_overlay(payload_json: &str) -> ExitCode {
 }
 
 fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
+    // An older daemon left running across an in-place upgrade spawns the newly installed binary
+    // for Settings; hand off to a fresh daemon so tray and break overlay match this version.
+    if std::env::var_os(daemon::HANDOFF_ENV_VAR).is_none()
+        && let Some(snapshot) = query_daemon_status(&paths.socket_path)
+        && daemon::should_replace_running_daemon(&snapshot, daemon::CURRENT_VERSION)
+        && daemon::hand_off_to_new_daemon(paths)
+    {
+        return ExitCode::SUCCESS;
+    }
+
     let config_file = &paths.config_file;
     let initial_system_autostart = sye_platform::query_system_autostart(Some(config_file));
     let hook_path = config_file.clone();

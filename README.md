@@ -66,7 +66,7 @@ The full spec is in [docs/specs/SPEC.md](docs/specs/SPEC.md).
 
 ## Code Signing Policy
 
-Free code signing provided by [SignPath.io](https://signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+Windows packages distributed through the Microsoft Store (MSIX) are signed by Microsoft. Standalone binaries published on GitHub Releases are built from source by GitHub Actions, verified with SHA-256 checksums, and scanned on VirusTotal.
 
 - **Maintainers & Roles**: Committers, Reviewers, and Approvers: [@tunglt1810](https://github.com/tunglt1810).
 - **Privacy Policy**: This program does not transfer personal information or telemetry to networked systems. When automatic update checks are enabled (configurable in Settings) or when you manually check for or install an update, the program sends HTTPS requests to GitHub Releases solely to check for and download new versions.

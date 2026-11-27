@@ -7,6 +7,7 @@ on:
     paths: &code
       - "crates/**"
       - "assets/**"
+      - "packaging/**"
       - "e2e/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -63,6 +64,20 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --bin safe-your-eyes
+
+      - name: Verify MSIX packaging (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & packaging/msix/package-msix.ps1 `
+            -Version $version `
+            -PackageName "SafeYourEyes.CIVerify" `
+            -Publisher "CN=CI-Verify" `
+            -PublisherDisplayName "Safe Your Eyes CI" `
+            -X64Exe "target/release/safe-your-eyes.exe" `
+            -OutputDir "dist-msix-ci" `
+            -SkipBundle
 
       - name: Run real-OS GUI window smoke E2E (macOS / Windows)
         if: runner.os != 'Linux'

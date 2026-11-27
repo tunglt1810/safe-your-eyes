@@ -148,12 +148,12 @@ jobs:
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          SIGNPATH_ORG_ID: ${{ vars.SIGNPATH_ORG_ID || 'df8415de-63eb-40e3-9c26-ac30ed6b70d2' }}
+          SIGNPATH_ORG_ID: ${{ vars.SIGNPATH_ORG_ID }}
           SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG || 'safe-your-eyes' }}
-          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG || 'Safe_your_eyes_Test_Signing' }}
+          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
         run: |
-          if ([string]::IsNullOrEmpty($env:SIGNPATH_API_TOKEN)) {
-            Write-Host "SIGNPATH_API_TOKEN not configured; skipping Windows code signing"
+          if ([string]::IsNullOrEmpty($env:SIGNPATH_API_TOKEN) -or [string]::IsNullOrEmpty($env:SIGNPATH_ORG_ID) -or [string]::IsNullOrEmpty($env:SIGNPATH_POLICY_SLUG)) {
+            Write-Host "SignPath production signing variables not configured; skipping Windows .exe signing"
             exit 0
           }
           Install-Module -Name SignPath -Scope CurrentUser -Force
@@ -170,6 +170,10 @@ jobs:
           Move-Item -Force $signed $unsigned
           $sig = Get-AuthenticodeSignature $unsigned
           Write-Host "Authenticode status: $($sig.Status) | Subject: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') {
+            Write-Error "Expected a trusted production Authenticode signature, got '$($sig.Status)'"
+            exit 1
+          }
 
       - name: Calculate SHA-256 and scan with VirusTotal
         shell: bash
@@ -203,6 +207,57 @@ jobs:
           name: release-${{ matrix.asset_name }}
           path: dist/*
 
+  package-msix:
+    name: Package Microsoft Store MSIX Bundle
+    needs: build
+    runs-on: windows-latest
+    environment: CI
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download Windows release binaries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-safe-your-eyes-windows-*
+          merge-multiple: true
+          path: win-assets
+
+      - name: Build .msixbundle for Microsoft Store
+        id: msix
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          MS_STORE_PACKAGE_NAME: ${{ vars.MS_STORE_PACKAGE_NAME }}
+          MS_STORE_PUBLISHER: ${{ vars.MS_STORE_PUBLISHER }}
+          MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.MS_STORE_PUBLISHER_DISPLAY_NAME }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MS_STORE_PACKAGE_NAME) -or [string]::IsNullOrWhiteSpace($env:MS_STORE_PUBLISHER) -or [string]::IsNullOrWhiteSpace($env:MS_STORE_PUBLISHER_DISPLAY_NAME)) {
+            @'
+          ### Microsoft Store MSIX Bundle
+          Skipped: configure `MS_STORE_PACKAGE_NAME`, `MS_STORE_PUBLISHER`, and `MS_STORE_PUBLISHER_DISPLAY_NAME` in Actions variables (Environment `CI` or Repository) from Partner Center -> Product Identity.
+          '@ | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            "built=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          & packaging/msix/package-msix.ps1 `
+            -Version $env:RELEASE_TAG `
+            -PackageName $env:MS_STORE_PACKAGE_NAME `
+            -Publisher $env:MS_STORE_PUBLISHER `
+            -PublisherDisplayName $env:MS_STORE_PUBLISHER_DISPLAY_NAME `
+            -X64Exe "win-assets/safe-your-eyes-windows-x86_64.exe" `
+            -Arm64Exe "win-assets/safe-your-eyes-windows-arm64.exe" `
+            -OutputDir "dist-msix"
+          $bundle = Get-ChildItem -Path "dist-msix" -Filter "*.msixbundle" | Select-Object -First 1
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Microsoft Store MSIX Bundle`n- **Artifact**: ``msix-store-bundle`` (``$($bundle.Name)``)`n- Unsigned by design; upload directly to Microsoft Partner Center where Microsoft signs it."
+          "built=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload MSIX Store bundle artifact
+        if: steps.msix.outputs.built == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: msix-store-bundle
+          path: dist-msix/*.msixbundle
+
   publish-release:
     name: Publish GitHub Release
     needs: build
@@ -219,6 +274,8 @@ jobs:
           path: release-assets
 
       - name: Prepare checksums and release notes
+        env:
+          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
         run: |
           cd release-assets
           cat *.sha256 | sort -k2 > SHA256SUMS.txt
@@ -239,10 +296,12 @@ jobs:
             while read -r hash file; do
               echo "| \`$file\` | \`$hash\` | [View Report](https://www.virustotal.com/gui/file/$hash) |"
             done < SHA256SUMS.txt
-            echo ""
-            echo "### Code Signing"
-            echo ""
-            echo "Windows binaries (x86_64 & ARM64) are signed via [SignPath.io](https://signpath.io/). See [Code Signing Policy](https://tunglt1810.github.io/safe-your-eyes/#code-signing-policy)."
+            if [ -n "$SIGNPATH_POLICY_SLUG" ]; then
+              echo ""
+              echo "### Code Signing"
+              echo ""
+              echo "Windows binaries (x86_64 & ARM64) are signed via [SignPath.io](https://signpath.io/). See [Code Signing Policy](https://tunglt1810.github.io/safe-your-eyes/#code-signing-policy)."
+            fi
           } > ../release-notes.md
 
       - name: Create or update GitHub Release

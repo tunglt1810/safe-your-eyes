@@ -114,6 +114,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_System_Power",
@@ -125,6 +126,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 windows = { version = "0.62", features = [
+    "ApplicationModel",
     "Win32_Foundation",
     "Win32_System_Com",
     "Win32_UI_Shell",

@@ -140,12 +140,7 @@ mod macos {
         {
             return Some(window);
         }
-        for window in app.windows() {
-            if window.isVisible() {
-                return Some(window);
-            }
-        }
-        None
+        app.windows().into_iter().find(|window| window.isVisible())
     }
 
     fn capture_on_main(mtm: MainThreadMarker) -> bool {

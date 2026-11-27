@@ -323,6 +323,7 @@ mod tests {
                         next_break_name: Some("Blink".to_owned()),
                         seconds_until_next_break: 120,
                         consecutive_skips: 0,
+                        daemon_version: None,
                     }),
                     IpcCommand::Disable { minutes } => IpcResponse::Ok {
                         message: Some(format!("disabled:{minutes:?}")),

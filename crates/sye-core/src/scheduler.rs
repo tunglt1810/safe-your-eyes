@@ -61,6 +61,8 @@ pub struct StatusSnapshot {
     pub next_break_name: Option<String>,
     pub seconds_until_next_break: u64,
     pub consecutive_skips: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_version: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -350,6 +352,7 @@ impl<C: Clock> Scheduler<C> {
             next_break_name,
             seconds_until_next_break: self.seconds_until_next_break(),
             consecutive_skips: self.skip_limit.count(),
+            daemon_version: None,
         }
     }
 

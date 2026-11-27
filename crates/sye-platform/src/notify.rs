@@ -629,6 +629,7 @@ mod macos_impl {
         NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
     };
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+    use objc2_core_graphics::{CGMutablePath, CGPath};
     use objc2_foundation::{
         NSData, NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
     };
@@ -768,6 +769,28 @@ mod macos_impl {
         }
     }
 
+    // An explicit path stops Core Animation from re-rendering the shadow off-screen on every
+    // frame of the progress drain animation.
+    fn set_shadow_path(view: &NSView, size: NSSize) {
+        let Some(layer) = view.layer() else {
+            return;
+        };
+        let path = CGMutablePath::new();
+        let rect = CGRect::new(CGPoint::new(0.0, 0.0), size);
+        // SAFETY: a null transform means the identity transform.
+        unsafe {
+            CGMutablePath::add_rounded_rect(
+                Some(&path),
+                ptr::null(),
+                rect,
+                CORNER_RADIUS,
+                CORNER_RADIUS,
+            );
+        }
+        let shadow_path: &CGPath = &path;
+        layer.setShadowPath(Some(shadow_path));
+    }
+
     define_class!(
         #[unsafe(super(NSView, NSResponder, NSObject))]
         #[thread_kind = MainThreadOnly]
@@ -873,6 +896,7 @@ mod macos_impl {
                 layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
                 layer.setMasksToBounds(false);
             }
+            set_shadow_path(&shadow_view, initial_card_size);
             root_view.addSubview(&shadow_view);
 
             let card_view = NSView::initWithFrame(NSView::alloc(mtm), initial_card_rect);
@@ -1001,7 +1025,7 @@ mod macos_impl {
             let surface = srgb_color(palette.surface);
             let border = srgb_color(palette.border);
             let shadow = if dark {
-                srgb_color_alpha(0x000000, 0.48)
+                srgb_color_alpha(0x18140E, 0.48)
             } else {
                 srgb_color_alpha(0x6E4A2A, 0.22)
             };
@@ -1284,6 +1308,7 @@ mod macos_impl {
                     NSPoint::new(SHADOW_PAD_X, SHADOW_PAD_BOTTOM),
                     card_size,
                 ));
+                quiet_ca(|| set_shadow_path(&self.shadow_view, card_size));
                 self.card_view
                     .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), card_size));
                 self.click_shield
@@ -1468,8 +1493,9 @@ mod windows_impl {
         DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC,
         DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetStockObject,
         GetTextMetricsW, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-        MonitorFromPoint, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, RoundRect,
-        SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, TEXTMETRICW, TRANSPARENT,
+        MonitorFromPoint, NULL_BRUSH, PAINTSTRUCT, PS_INSIDEFRAME, PS_SOLID, Rectangle, ReleaseDC,
+        RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, TEXTMETRICW,
+        TRANSPARENT,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -1478,7 +1504,7 @@ mod windows_impl {
         MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CS_DROPSHADOW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
+        CS_DROPSHADOW, CreateWindowExW, GCL_STYLE, SetClassLongPtrW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
         DrawIconEx, GetClientRect, GetCursorPos, HICON, HWND_TOPMOST, IDC_ARROW, IMAGE_ICON,
         IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MA_NOACTIVATE,
         NONCLIENTMETRICSW, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SPI_GETNONCLIENTMETRICS,
@@ -1684,7 +1710,6 @@ mod windows_impl {
             // SAFETY: all-zero bytes are a valid `WNDCLASSEXW` (null handles, no window procedure).
             let mut class: WNDCLASSEXW = unsafe { zeroed() };
             class.cbSize = size_u32::<WNDCLASSEXW>();
-            class.style = CS_DROPSHADOW;
             class.lpfnWndProc = Some(wnd_proc);
             class.hInstance = hinstance;
             // SAFETY: `IDC_ARROW` is a predefined system cursor.
@@ -1732,6 +1757,14 @@ mod windows_impl {
                     size_u32::<i32>(),
                 ) == S_OK
             };
+            // DWM already draws a rounded shadow. `CS_DROPSHADOW` adds a square one behind the
+            // rounded corners, so the class gets it only when DWM rounding is not available.
+            if !dwm_rounded {
+                // SAFETY: `hwnd` is the live banner window created above.
+                unsafe {
+                    SetClassLongPtrW(hwnd, GCL_STYLE, CS_DROPSHADOW as isize);
+                }
+            }
 
             Ok(Self {
                 hwnd,
@@ -2208,7 +2241,7 @@ mod windows_impl {
 
                 if !self.dwm_rounded {
                     let border_w = scale(1, self.dpi).max(1);
-                    let border_pen = CreatePen(PS_SOLID, border_w, colors.border);
+                    let border_pen = CreatePen(PS_INSIDEFRAME, border_w, colors.border);
                     let prev_pen = SelectObject(hdc, border_pen);
                     let prev_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
                     Rectangle(hdc, client.left, client.top, client.right, client.bottom);

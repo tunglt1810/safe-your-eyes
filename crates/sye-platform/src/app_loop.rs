@@ -349,9 +349,9 @@ mod windows_impl {
         ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, DispatchMessageW, EnumWindows,
         GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongW,
         GetWindowThreadProcessId, HWND_NOTOPMOST, HWND_TOPMOST, IsHungAppWindow, IsIconic,
-        IsWindowVisible, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
-        SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos,
-        ShowWindow, TranslateMessage, WS_EX_TOOLWINDOW,
+        IsWindowVisible, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, PM_REMOVE,
+        PeekMessageW, QS_ALLINPUT, SW_RESTORE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
+        SetForegroundWindow, SetWindowPos, ShowWindow, TranslateMessage, WS_EX_TOOLWINDOW,
     };
 
     use super::{ChildWindowMatch, MAX_EVENTS_PER_PUMP, classify_child_window};
@@ -449,10 +449,18 @@ mod windows_impl {
             let wait_ms = u32::try_from(remaining.as_millis())
                 .unwrap_or(u32::MAX)
                 .max(1);
+            // `MWMO_INPUTAVAILABLE` wakes for messages that `drain_messages` left queued at its cap.
             // SAFETY: waiting on zero kernel handles with `QS_ALLINPUT` blocks only on thread messages.
             #[expect(unsafe_code, reason = "Win32 FFI")]
-            let status =
-                unsafe { MsgWaitForMultipleObjects(0, ptr::null(), FALSE, wait_ms, QS_ALLINPUT) };
+            let status = unsafe {
+                MsgWaitForMultipleObjectsEx(
+                    0,
+                    ptr::null(),
+                    wait_ms,
+                    QS_ALLINPUT,
+                    MWMO_INPUTAVAILABLE,
+                )
+            };
             if status != WAIT_OBJECT_0 {
                 // Keeps the daemon loop from spinning when the wait itself fails.
                 if status == WAIT_FAILED {

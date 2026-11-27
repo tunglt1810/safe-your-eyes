@@ -252,6 +252,8 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     #[cfg(not(target_os = "macos"))]
     let on_window_ready: Option<sye_ui::WindowReadyCallback> = None;
 
+    let system_locale = sye_platform::detect_system_locale();
+
     match sye_ui::run_settings_with_hooks(
         config_file.clone(),
         initial_system_autostart,
@@ -260,6 +262,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         update_config,
         status_config,
         on_window_ready,
+        system_locale,
     ) {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {

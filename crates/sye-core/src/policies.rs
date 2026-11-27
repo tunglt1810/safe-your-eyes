@@ -373,17 +373,28 @@ impl SkipLimitPolicy {
     }
 
     #[must_use]
-    pub fn status_label(&self, cfg: &SkipLimitConfig) -> Option<String> {
+    pub fn status_label_localized(
+        &self,
+        cfg: &SkipLimitConfig,
+        locale: crate::i18n::Locale,
+    ) -> Option<String> {
         if !cfg.enabled {
             return None;
         }
         if self.consecutive_skips == 0 && cfg.max_skips > 0 {
             return None;
         }
-        Some(format!(
-            "Skipped or postponed {}/{} breaks in a row",
-            self.consecutive_skips, cfg.max_skips
-        ))
+        let text = match locale {
+            crate::i18n::Locale::En => format!(
+                "Skipped or postponed {}/{} breaks in a row",
+                self.consecutive_skips, cfg.max_skips
+            ),
+            crate::i18n::Locale::Vi => format!(
+                "Đã bỏ qua hoặc hoãn {}/{} lần nghỉ liên tiếp",
+                self.consecutive_skips, cfg.max_skips
+            ),
+        };
+        Some(text)
     }
 }
 
@@ -769,7 +780,10 @@ mod tests {
             policy.record_skip();
         }
         assert!(!policy.controls_disabled(&disabled));
-        assert_eq!(policy.status_label(&disabled), None);
+        assert_eq!(
+            policy.status_label_localized(&disabled, crate::i18n::Locale::En),
+            None
+        );
 
         let enabled = SkipLimitConfig {
             enabled: true,
@@ -777,26 +791,36 @@ mod tests {
         };
         let mut policy = SkipLimitPolicy::new(0);
         assert!(!policy.controls_disabled(&enabled));
-        assert_eq!(policy.status_label(&enabled), None);
+        assert_eq!(
+            policy.status_label_localized(&enabled, crate::i18n::Locale::En),
+            None
+        );
 
         policy.record_skip();
         assert!(!policy.controls_disabled(&enabled));
         assert_eq!(
-            policy.status_label(&enabled).as_deref(),
+            policy
+                .status_label_localized(&enabled, crate::i18n::Locale::En)
+                .as_deref(),
             Some("Skipped or postponed 1/2 breaks in a row")
         );
 
         policy.record_postpone();
         assert!(policy.controls_disabled(&enabled));
         assert_eq!(
-            policy.status_label(&enabled).as_deref(),
+            policy
+                .status_label_localized(&enabled, crate::i18n::Locale::En)
+                .as_deref(),
             Some("Skipped or postponed 2/2 breaks in a row")
         );
 
         policy.record_completed_break();
         assert_eq!(policy.count(), 0);
         assert!(!policy.controls_disabled(&enabled));
-        assert_eq!(policy.status_label(&enabled), None);
+        assert_eq!(
+            policy.status_label_localized(&enabled, crate::i18n::Locale::En),
+            None
+        );
 
         let mut max_policy = SkipLimitPolicy::new(u32::MAX);
         max_policy.record_skip();

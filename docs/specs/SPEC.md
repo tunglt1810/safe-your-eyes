@@ -65,6 +65,8 @@ Each concept uses one name across this specification and the source code.
 | Do Not Disturb | `DoNotDisturbPolicy` | Policy that blocks breaks on battery, fullscreen windows, or excluded window titles. |
 | Skip limit | `SkipLimitPolicy` | Policy that counts consecutive skips or postpones and locks both actions at `max_skips`. |
 | Theme mode | `ThemeMode` | Persisted Settings window theme: `System`, `Light`, or `Dark`. |
+| Language mode | `LanguageMode` | Persisted interface language preference: `System`, `En`, or `Vi`. |
+| Locale | `Locale` | Resolved active display language: `En` or `Vi`. |
 | Configuration | `Config` | TOML configuration structure with `schema_version` and validation. |
 | Session state | `SessionState` | Saved queue progress stored in `session.toml`. |
 | Chime kind | `ChimeKind` | Synthesized WAV chime type: `PreBreak` or `PostBreak`. |
@@ -189,6 +191,12 @@ The application stores configuration in `config.toml` with `schema_version = 1`.
 When `config.toml` is missing or invalid, `Config::load_or_default` returns `Config::default()` so the daemon still starts.
 `Config` stores `theme` (`system`, `light`, or `dark`) with default `system`.
 When `config.toml` omits `theme`, `Config` defaults `theme` to `system` without increasing `schema_version`.
+`Config` stores `language` (`system`, `en`, or `vi`, with `auto` accepted as an alias for `system`) with default `system`.
+When `config.toml` omits `language`, `Config` defaults `language` to `system` without increasing `schema_version`.
+When `language` is `system`, `sye-platform` detects the operating system locale (`AppleLanguages` on macOS, `GetUserPreferredUILanguages` and `GetUserDefaultLocaleName` on Windows, and `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, and `LANG` on Linux with gettext precedence, where a `C` or `POSIX` message locale ignores `LANGUAGE`) and falls back to `En` for unsupported locales.
+`sye-core` translates the 13 default short exercise names and 6 default long exercise names dynamically according to the active `Locale` while keeping custom or edited exercise names unchanged.
+CLI output remains in English to preserve script and E2E compatibility.
+The Settings window shows `ConfigError` messages in the active `Locale`.
 When `persist_state` is `true`, the daemon writes `SessionState` to `session.toml` using `BreakQueue::persisted_short_index()` and `BreakQueue::persisted_long_index()` so restarts resume at the staged break.
 `Config.autostart` defaults to `true`.
 On the first non-headless launch (when `config.toml` does not exist yet), the daemon registers the login item with `sync_system_autostart` and saves the initial `config.toml` so later launches keep respecting operating system startup changes.
@@ -274,7 +282,8 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - On macOS, the reveal pins a snapshot `CALayer` of the previous theme above the live view tree and animates an even-odd `CAShapeLayer` mask so the window switches with zero blank-frame flash.
 - On Linux and Windows, the reveal wraps the Settings content root in `nsh`'s `shader_transition()` WGSL shader (`THEME_REVEAL_WGSL`).
 - Toggling the theme writes `Config.theme` to `config.toml` immediately without saving unsaved form edits.
-- A theme-only configuration reload keeps the daemon's active break countdown unchanged.
+- Toggling the language writes `Config.language` to `config.toml` immediately and updates the Settings window, system tray, desktop notifications, and subsequent break overlays in place.
+- A theme-only or language-only configuration reload keeps the daemon's active break countdown unchanged.
 - Pressable pills scale to `0.97` on press.
 - All animations stop when the operating system enables Reduce Motion (`reduce_motion()`).
 - The break overlay opens a borderless `WindowFrameStyle::None` window at `WindowLevel::AboveDock` across `Workspaces::All`.
@@ -296,7 +305,7 @@ Status banners and destructive buttons pair `warning-muted` / `error-muted` fill
 - Switching Settings tabs resets the Form Card scroll offset to the top.
 - When `strict_break` is `true`, the `Policies` screen sets `limit_consecutive_skips.enabled` to `false` and disables `Limit consecutive skips` and `Max consecutive skips`.
 - When `strict_break` is `true`, the `Skip Limit` KPI card shows `Strict`.
-- The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, a live daemon countdown badge next to the Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right when the daemon runs, and four Pastel KPI summary cards below.
+- The fixed page header shows the active screen title (`Timing`, `Policies`, `Exercises`, or `About & Support`) with the animated highlighter bar on the left, a live daemon countdown badge, a Cozy language toggle pill (`Auto`/`Tự động`, `EN`, `VI` with globe SVG icon), and the Cozy theme toggle pill (`Theme: System`, `Theme: Light`, `Theme: Dark` with vector SVG icon) on the right, and four Pastel KPI summary cards below.
 - The live daemon countdown badge uses Cozy v0.2.0 category badge tokens (`green`, `yellow`, `orange`, `blue`, and `gray`), pairs each scheduler state with a vector SVG icon, separates the status label from the bold tabular-numeral `MM:SS` countdown chip, and exposes `AccessibilityRole::Timer` with a spoken label in whole minutes ("less than a minute" under 1 minute, "Break starting soon" during the pre-break warning), so the label changes at most once per minute.
 - The unified rounded Form Card contains the scrollable form and the clipped sticky toolbar with automatic save status and a `Reset to defaults` button.
 - Every valid change in the Settings window saves `config.toml` immediately. Invalid input shows a validation banner and keeps the last valid `config.toml` on disk. While the Settings window is open, the daemon checks the `config.toml` modification time every second and applies a changed configuration.

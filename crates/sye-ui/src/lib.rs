@@ -1,3 +1,4 @@
+mod i18n;
 mod monitors;
 mod overlay;
 mod settings;

@@ -607,16 +607,9 @@
 
     const RELEASE_CACHE_KEY = 'sye_release_stats_v1';
     const RELEASE_CACHE_TTL = 4 * 60 * 60 * 1000;
-    const loadReleaseStats = async () => {
+    const loadReleaseStats = async (latestTag = null) => {
       const dlBadge = document.getElementById('download-count');
       const dlNum = document.getElementById('download-count-num');
-      const renderLatest = (tag, url) => {
-        if (!tag || !url) return;
-        const link = document.getElementById('version-link');
-        link.textContent = tag;
-        link.href = url;
-        document.getElementById('version').hidden = false;
-      };
 
       let cached = null;
       try {
@@ -648,12 +641,12 @@
         rafId = requestAnimationFrame(step);
       };
 
+      const cacheMatchesLatest = !latestTag || cached?.latestTag === latestTag;
       if (cached) {
         displayed = cached.total;
         dlNum.textContent = cached.total.toLocaleString('en');
         dlBadge.hidden = false;
-        renderLatest(cached.latestTag, cached.latestUrl);
-        if (Date.now() - cached.fetchedAt < RELEASE_CACHE_TTL) return;
+        if (cacheMatchesLatest && Date.now() - cached.fetchedAt < RELEASE_CACHE_TTL) return;
       }
 
       dlBadge.hidden = false;
@@ -661,19 +654,14 @@
       try {
         let url = 'https://api.github.com/repos/tunglt1810/safe-your-eyes/releases?per_page=100';
         let total = 0;
-        let latestTag = null;
-        let latestUrl = null;
+        let seenLatestTag = latestTag;
         while (url) {
           const res = await fetch(url);
           if (!res.ok) throw new Error('HTTP ' + res.status);
           const releases = await res.json();
           for (const rel of releases) {
             if (rel.draft || rel.prerelease) continue;
-            if (!latestTag) {
-              latestTag = rel.tag_name;
-              latestUrl = rel.html_url;
-              renderLatest(latestTag, latestUrl);
-            }
+            if (!seenLatestTag) seenLatestTag = rel.tag_name;
             for (const asset of rel.assets || []) {
               // The in-app updater fetches SHA256SUMS.txt before every binary, so skip it to avoid double-counting.
               if (asset.name !== 'SHA256SUMS.txt') total += asset.download_count || 0;
@@ -685,7 +673,7 @@
           if (url && (!cached || total > displayed)) animateTo(total, 450);
         }
         try {
-          localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ total, latestTag, latestUrl, fetchedAt: Date.now() }));
+          localStorage.setItem(RELEASE_CACHE_KEY, JSON.stringify({ total, latestTag: seenLatestTag, fetchedAt: Date.now() }));
         } catch {}
         animateTo(total, 650, () => {
           dlBadge.classList.remove('is-loading');
@@ -707,7 +695,19 @@
           count.hidden = false;
         })
         .catch(() => {});
-      loadReleaseStats();
+      fetch('https://api.github.com/repos/tunglt1810/safe-your-eyes/releases/latest')
+        .then((r) => r.ok ? r.json() : Promise.reject())
+        .then((release) => {
+          if (release.tag_name && release.html_url) {
+            const link = document.getElementById('version-link');
+            link.textContent = release.tag_name;
+            link.href = release.html_url;
+            document.getElementById('version').hidden = false;
+          }
+          return release.tag_name || null;
+        })
+        .catch(() => null)
+        .then((latestTag) => loadReleaseStats(latestTag));
       const ua = navigator.userAgent;
       const os = /Windows/.test(ua) ? 'windows'
         : /Android|iPhone|iPad/.test(ua) ? null

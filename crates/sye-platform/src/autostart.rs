@@ -204,10 +204,11 @@ pub fn query_system_autostart(custom_config: Option<&Path>) -> Option<bool> {
         }
     }
     #[cfg(target_os = "windows")]
+    if windows_startup_task::is_packaged_msix() {
+        return windows_startup_task::query_status();
+    }
+    #[cfg(target_os = "windows")]
     if !has_custom_config_override(custom_config) {
-        if windows_startup_task::is_packaged_msix() {
-            return windows_startup_task::query_status();
-        }
         if AutostartManager::system_default().is_ok_and(|m| m.is_enabled()) {
             return None;
         }
@@ -224,8 +225,10 @@ pub fn sync_system_autostart(
 ) -> Result<(), PlatformError> {
     let custom_cfg = has_custom_config_override(custom_config);
 
+    // StartupTask arguments are fixed in the MSIX manifest, and MSIX virtualizes HKCU writes, so a
+    // Run key could not carry `--config` either: a custom config starts at login with defaults.
     #[cfg(target_os = "windows")]
-    if !custom_cfg && windows_startup_task::is_packaged_msix() {
+    if windows_startup_task::is_packaged_msix() {
         return windows_startup_task::sync(enabled);
     }
 

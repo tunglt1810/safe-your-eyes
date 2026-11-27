@@ -130,16 +130,26 @@ impl DndDecision {
 const EXCLUDED_GAME_PROCESSES: &[&str] = &[
     "steam",
     "steam_osx",
+    "steam helper",
     "steamwebhelper",
     "epicgameslauncher",
     "epicgameslauncher-mac-shipping",
+    "epicwebhelper",
     "riotclientservices",
     "riotclientux",
+    "riotclientcrashhandler",
     "battle.net",
     "goggalaxy",
     "gog galaxy",
+    "galaxyclient",
     "upc",
+    "ubisoftconnect",
     "eadesktop",
+    "eaapp",
+    "eabackgroundservice",
+    "heroic",
+    "lutris",
+    "crashreportclient",
     "unity",
     "unity hub",
     "unrealeditor",
@@ -148,11 +158,16 @@ const EXCLUDED_GAME_PROCESSES: &[&str] = &[
     "godot",
 ];
 
+const EXCLUDED_GAME_PATH_SEGMENTS: &[&str] = &[
+    "/epic games/launcher/",
+    "/riot games/riot client/",
+    "/battle.net/agent/",
+];
+
 const GAME_PATH_SEGMENTS: &[&str] = &[
     "/steamapps/common/",
     "/epic games/",
     "/riot games/",
-    "/battle.net/",
     "/xboxgames/",
     "/gog galaxy/games/",
     "/gog games/",
@@ -217,6 +232,12 @@ pub fn is_gaming_candidate(
 
     if let Some(path) = executable_path {
         let normalized_path = path.trim().replace('\\', "/").to_lowercase();
+        if EXCLUDED_GAME_PATH_SEGMENTS
+            .iter()
+            .any(|seg| normalized_path.contains(seg))
+        {
+            return false;
+        }
         if GAME_PATH_SEGMENTS
             .iter()
             .any(|seg| normalized_path.contains(seg))
@@ -665,8 +686,33 @@ mod tests {
 
         assert!(is_excluded_game_process(Some("steam_osx")));
         assert!(is_excluded_game_process(Some("EpicGamesLauncher.exe")));
+        assert!(is_excluded_game_process(Some("GalaxyClient")));
+        assert!(is_excluded_game_process(Some("Heroic")));
         assert!(!is_excluded_game_process(Some("Hades2.exe")));
         assert!(!is_excluded_game_process(None));
+
+        assert!(!is_gaming_candidate(
+            None,
+            Some("SomeHelper.exe"),
+            Some(
+                r"C:\Program Files (x86)\Epic Games\Launcher\Engine\Binaries\Win64\SomeHelper.exe"
+            ),
+        ));
+        assert!(!is_gaming_candidate(
+            None,
+            Some("RiotHelper.exe"),
+            Some(r"C:\Riot Games\Riot Client\RiotHelper.exe"),
+        ));
+        assert!(!is_gaming_candidate(
+            None,
+            Some("Agent.exe"),
+            Some(r"C:\ProgramData\Battle.net\Agent\Agent.exe"),
+        ));
+        assert!(is_gaming_candidate(
+            None,
+            Some("FortniteClient.exe"),
+            Some(r"C:\Program Files\Epic Games\Fortnite\FortniteGame\Binaries\FortniteClient.exe"),
+        ));
 
         let linux_steam_class = DndContext {
             active_window_class: Some("steam_app_1091500".to_owned()),

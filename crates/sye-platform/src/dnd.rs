@@ -153,6 +153,9 @@ fn has_linux_background_game_in(proc_root: &Path, self_pid: u32) -> bool {
             .as_deref()
             .and_then(extract_executable_file_name)
             .or(comm);
+        if sye_core::is_excluded_game_process(process_name.as_deref()) {
+            continue;
+        }
         if sye_core::is_gaming_candidate(None, process_name.as_deref(), exe_path.as_deref()) {
             return true;
         }
@@ -169,6 +172,7 @@ fn has_linux_background_game_in(proc_root: &Path, self_pid: u32) -> bool {
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", test))]
 fn extract_executable_file_name(path: &str) -> Option<String> {
     let trimmed = path.trim();
+    let trimmed = trimmed.strip_suffix(" (deleted)").unwrap_or(trimmed).trim();
     if trimmed.is_empty() {
         return None;
     }
@@ -429,9 +433,10 @@ mod linux_impl {
             .as_deref()
             .and_then(extract_executable_file_name)
             .or(comm);
-        let has_game_env = fs::read(proc_dir.join("environ"))
-            .ok()
-            .is_some_and(|raw| has_linux_game_environ(&raw));
+        let has_game_env = !sye_core::is_excluded_game_process(process_name.as_deref())
+            && fs::read(proc_dir.join("environ"))
+                .ok()
+                .is_some_and(|raw| has_linux_game_environ(&raw));
         (process_name, exe_path, has_game_env)
     }
 
@@ -485,8 +490,8 @@ mod macos_impl {
     use std::process::Command;
 
     use objc2::rc::autoreleasepool;
-    use objc2_app_kit::{NSRunningApplication, NSWorkspace};
-    use objc2_core_graphics::{CGDisplayIsCaptured, CGMainDisplayID};
+    use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
+    use objc2_core_graphics::CGMainDisplayID;
     use objc2_foundation::{NSBundle, NSString, ns_string};
     use sye_core::{DndContext, DndQueryOptions, is_excluded_game_process, is_gaming_candidate};
 
@@ -531,7 +536,9 @@ end tell
             .as_deref()
             .and_then(extract_executable_file_name)
             .or_else(|| localized_name.clone());
-        let is_game_category = !is_excluded_game_process(process_name.as_deref())
+        let excluded = is_excluded_game_process(process_name.as_deref())
+            || is_excluded_game_process(localized_name.as_deref());
+        let is_game_category = !excluded
             && app
                 .bundleURL()
                 .and_then(|url| NSBundle::bundleWithURL(&url))
@@ -564,10 +571,16 @@ end tell
             let workspace = NSWorkspace::sharedWorkspace();
             let apps = workspace.runningApplications();
             for app in apps {
-                if app.isTerminated() || app.processIdentifier() == self_pid {
+                if app.isTerminated()
+                    || app.processIdentifier() == self_pid
+                    || app.activationPolicy() != NSApplicationActivationPolicy::Regular
+                {
                     continue;
                 }
                 let meta = inspect_running_app(&app);
+                if is_excluded_game_process(meta.localized_name.as_deref()) {
+                    continue;
+                }
                 if meta.is_game_category
                     || is_gaming_candidate(
                         None,
@@ -601,7 +614,7 @@ end tell
             reason = "detects exclusive-display fullscreen games on macOS without Accessibility permission"
         )]
         let display_captured = if options.check_fullscreen || options.check_gaming {
-            CGDisplayIsCaptured(CGMainDisplayID())
+            objc2_core_graphics::CGDisplayIsCaptured(CGMainDisplayID())
         } else {
             false
         };
@@ -1030,6 +1043,11 @@ mod tests {
         ));
         assert!(!is_macos_game_category("public.app-category.productivity"));
 
+        assert_eq!(
+            extract_executable_file_name("/home/u/.steam/cs2 (deleted)"),
+            Some("cs2".to_owned())
+        );
+
         assert_eq!(classify_windows_notification_state(2), (true, false, false));
         assert_eq!(classify_windows_notification_state(3), (true, false, true));
         assert_eq!(classify_windows_notification_state(4), (false, true, false));
@@ -1046,7 +1064,7 @@ mod tests {
         let proc_root = tmp.path();
         assert!(!has_linux_background_game_in(proc_root, 100));
 
-        // Self PID and normal apps are ignored.
+        // Self PID, normal apps, and excluded launchers (even with game env vars) are ignored.
         fs::create_dir_all(proc_root.join("100"))?;
         fs::write(proc_root.join("100/comm"), "cs2\n")?;
         fs::create_dir_all(proc_root.join("200"))?;
@@ -1054,7 +1072,7 @@ mod tests {
         fs::write(proc_root.join("200/environ"), b"HOME=/home/user\0")?;
         fs::create_dir_all(proc_root.join("201"))?;
         fs::write(proc_root.join("201/comm"), "steamwebhelper\n")?;
-        fs::write(proc_root.join("201/environ"), b"SteamAppId=0\0")?;
+        fs::write(proc_root.join("201/environ"), b"SteamAppId=730\0")?;
         assert!(!has_linux_background_game_in(proc_root, 100));
 
         // Background process with SteamAppId environment variable matches.

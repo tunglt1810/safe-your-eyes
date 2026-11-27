@@ -268,9 +268,7 @@ mod windows_startup_task {
     use windows::ApplicationModel::{StartupTask, StartupTaskState};
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
     use windows::core::HSTRING;
-    use windows_sys::Win32::Foundation::{
-        APPMODEL_ERROR_NO_PACKAGE, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS,
-    };
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS};
     use windows_sys::Win32::Storage::Packaging::Appx::GetCurrentPackageFullName;
 
     use super::interpret_windows_startup_task_state;
@@ -311,8 +309,7 @@ mod windows_startup_task {
         // MSIX package identity without writing to memory.
         #[expect(unsafe_code, reason = "Win32 Appx package identity query")]
         let status = unsafe { GetCurrentPackageFullName(&mut len, ptr::null_mut()) };
-        status != APPMODEL_ERROR_NO_PACKAGE
-            && (status == ERROR_INSUFFICIENT_BUFFER || status == ERROR_SUCCESS)
+        status == ERROR_INSUFFICIENT_BUFFER || status == ERROR_SUCCESS
     }
 
     pub(super) fn query_status() -> Option<bool> {

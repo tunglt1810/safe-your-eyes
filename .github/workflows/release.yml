@@ -210,6 +210,8 @@ jobs:
   package-msix:
     name: Package Microsoft Store MSIX Bundle
     needs: build
+    # MSIX versions drop the pre-release suffix, so an rc tag would reuse the final version.
+    if: ${{ !contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
     runs-on: windows-latest
     environment: CI
     steps:
@@ -275,7 +277,7 @@ jobs:
 
       - name: Prepare checksums and release notes
         env:
-          SIGNPATH_POLICY_SLUG: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          SIGNPATH_CONFIGURED: ${{ secrets.SIGNPATH_API_TOKEN != '' && vars.SIGNPATH_ORG_ID != '' && vars.SIGNPATH_POLICY_SLUG != '' }}
         run: |
           cd release-assets
           cat *.sha256 | sort -k2 > SHA256SUMS.txt
@@ -296,7 +298,7 @@ jobs:
             while read -r hash file; do
               echo "| \`$file\` | \`$hash\` | [View Report](https://www.virustotal.com/gui/file/$hash) |"
             done < SHA256SUMS.txt
-            if [ -n "$SIGNPATH_POLICY_SLUG" ]; then
+            if [ "$SIGNPATH_CONFIGURED" = "true" ]; then
               echo ""
               echo "### Code Signing"
               echo ""

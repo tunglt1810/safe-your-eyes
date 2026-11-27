@@ -4,8 +4,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
-use nsh_core::desktop::{MainWindowOptions, TitleBarOptions, TitleBarStyle};
-use nsh_core::element::desktop::{current_window, quit, title_bar};
+use nsh_core::desktop::{
+    MainWindowOptions, QuitMode, TitleBarOptions, TitleBarStyle, WindowKind, WindowPosition,
+};
+use nsh_core::element::desktop::{current_window, quit, set_quit_mode, title_bar, window_state};
 use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
 use sye_core::scheduler::{SchedulerState, StatusSnapshot};
@@ -1903,7 +1905,7 @@ pub(crate) fn build_settings_view_with_hooks(
                             measured_theme_btn_center,
                             move |origin| {
                                 let resolved_origin = origin.unwrap_or_else(|| {
-                                    let win = window();
+                                    let win = window_state().map_or_else(window, |s| s.bounds.size);
                                     [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
                                 });
                                 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -2040,7 +2042,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     measured_theme_btn_center
                         .get_untracked()
                         .unwrap_or_else(|| {
-                            let win = window();
+                            let win = window_state().map_or_else(window, |s| s.bounds.size);
                             [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
                         });
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -2124,20 +2126,23 @@ pub(crate) fn build_settings_view_with_hooks(
         .child(right_pane);
 
     #[cfg(any(target_os = "linux", target_os = "windows"))]
-    let root = {
-        let mut root = root;
-        if let Some(shader) = crate::theme::theme_reveal_shader() {
-            root = root.child(
-                screen_transition()
+    let root = if let Some(shader) = crate::theme::theme_reveal_shader() {
+        view()
+            .flex_1()
+            .child(
+                shader_transition()
+                    .flex_1()
                     .source(shader)
                     .duration(Duration::from_millis(motion::THEME_REVEAL_MS))
                     .uniform("origin", move || reveal_origin.get())
                     .value(move || {
                         nsh_core::shader::TransitionKey::number(f64::from(reveal_epoch.get()))
-                    }),
-            );
-        }
-        root
+                    })
+                    .child(root),
+            )
+            .into_element()
+    } else {
+        root.into_element()
     };
 
     root
@@ -2145,26 +2150,42 @@ pub(crate) fn build_settings_view_with_hooks(
 
 #[component]
 fn SettingsRoot() -> impl IntoElement {
-    let launch = SETTINGS_LAUNCH.lock().ok().and_then(|mut g| g.take());
-    match launch {
-        Some(launch) => build_settings_view_with_hooks(
-            launch.vm,
-            launch.outcome_sink,
-            true,
-            launch.on_autostart_change,
-            launch.theme_hooks,
-            launch.update_config,
-            launch.status_config,
-        )
-        .into_element(),
-        None => view()
-            .flex_1()
-            .bg(colors::BACKGROUND_BODY)
-            .items_center()
-            .justify_center()
-            .child(text("Safe Your Eyes — Settings").text_color(colors::TEXT_PRIMARY))
+    set_quit_mode(QuitMode::LastWindowClosed);
+    let launch_slot = Rc::new(RefCell::new(
+        SETTINGS_LAUNCH.lock().ok().and_then(|mut g| g.take()),
+    ));
+    let opts = settings_main_window_options();
+    nsh_core::element::desktop::window()
+        .id("settings")
+        .kind(WindowKind::Normal)
+        .title("Safe Your Eyes — Settings")
+        .default_size(size(px(920.0), px(680.0)))
+        .default_position(WindowPosition::Center)
+        .attributes(opts.attributes)
+        .on_open_change(|e| {
+            if !e.open {
+                quit();
+            }
+        })
+        .content(move || match launch_slot.borrow_mut().take() {
+            Some(launch) => build_settings_view_with_hooks(
+                launch.vm,
+                launch.outcome_sink,
+                true,
+                launch.on_autostart_change,
+                launch.theme_hooks,
+                launch.update_config,
+                launch.status_config,
+            )
             .into_element(),
-    }
+            None => view()
+                .flex_1()
+                .bg(colors::BACKGROUND_BODY)
+                .items_center()
+                .justify_center()
+                .child(text("Safe Your Eyes — Settings").text_color(colors::TEXT_PRIMARY))
+                .into_element(),
+        })
 }
 
 pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
@@ -4161,6 +4182,63 @@ mod tests {
         assert!(
             !app.shows("Paused (idle)"),
             "Countdown pill must hide when daemon status becomes unavailable"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_settings_root_opens_visible_desktop_window_and_quits_on_close()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-settings-root")?;
+        let path = dir.file("settings-root.toml");
+        let vm = SettingsViewModel::load(path);
+        let outcome_sink = Arc::new(Mutex::new(None));
+
+        {
+            let mut guard = SETTINGS_LAUNCH.lock().map_err(|e| e.to_string())?;
+            *guard = Some(SettingsLaunch {
+                vm,
+                outcome_sink,
+                on_autostart_change: None,
+                theme_hooks: ThemeTransitionHooks::default(),
+                update_config: SettingsUpdateConfig::default(),
+                status_config: SettingsStatusConfig::default(),
+            });
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            environment: nsh_core::platform::Environment {
+                os: nsh_core::platform::Os::MacOs,
+                ..nsh_core::platform::Environment::default()
+            },
+            ..EngineConfig::new(
+                Root::of::<SettingsRoot>().main_window(settings_main_window_options()),
+            )
+        })
+        .map_err(|e| e.to_string())?;
+
+        app.wait_for("Safe Your Eyes")?;
+        let ids = app.window_ids()?;
+        assert_eq!(
+            ids,
+            vec!["settings".to_owned()],
+            "SettingsRoot must open an explicit desktop window under nsh 0.7 window model v2"
+        );
+        let state = app
+            .window_state("settings")?
+            .ok_or("expected settings window state")?;
+        assert!(state.visible, "Settings window must be visible");
+        assert!(!app.quit());
+
+        app.press_window_close("settings")?;
+        app.settle();
+        assert!(
+            app.quit(),
+            "Closing the Settings window must quit the settings subprocess"
         );
         Ok(())
     }

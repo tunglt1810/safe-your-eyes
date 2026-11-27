@@ -31,11 +31,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Linux GTK 4 dependencies
+      - name: Install Linux GTK 4 and Xvfb dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libgtk-4-dev pkg-config
+          sudo apt-get install -y -qq libgtk-4-dev pkg-config xvfb x11-utils x11-xserver-utils xdotool
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -59,9 +59,20 @@ jobs:
         run: |
           cargo build --bin safe-your-eyes
           python3 e2e/run_e2e.py --bin target/debug/safe-your-eyes --tier all
+          xvfb-run -a -s "-screen 0 1920x1080x24" python3 e2e/gui_smoke.py --bin target/debug/safe-your-eyes
 
       - name: Build release binary
         run: cargo build --release --bin safe-your-eyes
+
+      - name: Run real-OS GUI window smoke E2E (macOS / Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            python3 e2e/gui_smoke.py --bin target/release/safe-your-eyes.exe
+          else
+            python3 e2e/gui_smoke.py --bin target/release/safe-your-eyes
+          fi
 
       - name: Calculate release SHA-256 and scan with VirusTotal
         shell: bash

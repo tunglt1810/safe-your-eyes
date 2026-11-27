@@ -134,6 +134,7 @@ pub(crate) fn theme_toggle_button(
 
     effect(move || {
         let _ = nsh_core::element::desktop::title_bar();
+        let _ = nsh_core::element::desktop::window_state();
         let _ = window();
         spawn(async move {
             if let Some(m) = btn_ref.measure().await {

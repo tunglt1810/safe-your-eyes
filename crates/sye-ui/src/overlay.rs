@@ -1,12 +1,14 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nsh_base::button;
 use nsh_core::desktop::{
-    MainWindowOptions, WindowAttributes, WindowFrameStyle, WindowKind, WindowLevel, WindowPosition,
-    Workspaces,
+    MainWindowOptions, QuitMode, WindowAttributes, WindowFrameStyle, WindowKind, WindowLevel,
+    WindowPosition, Workspaces,
 };
-use nsh_core::element::desktop::{current_window, displays, quit};
+use nsh_core::element::desktop::{current_window, displays, quit, set_quit_mode};
 use nsh_core::prelude::*;
 use sye_core::config::BreakType;
 use sye_core::scheduler::{OverlayOutcome, OverlayRequest};
@@ -250,6 +252,8 @@ fn overlay_main_window_options_for_primary(
     attrs.closable = Some(false);
     attrs.focusable = Some(true);
     attrs.activate = Some(true);
+    attrs.close_on_escape = Some(false);
+    attrs.close_on_blur = Some(false);
     attrs.close_on_press = Some(false);
     attrs.taskbar = Some(cfg!(target_os = "windows"));
     attrs.shadow = Some(false);
@@ -611,8 +615,12 @@ pub(crate) fn build_overlay_view(
         finish_tick();
     });
 
+    let key_opts = KeyOptions {
+        scope: KeyScope::App,
+        ..Default::default()
+    };
     let finish_esc = finish_if_ready.clone();
-    on_key("escape", move |_| {
+    on_key_with("escape", key_opts, move |_| {
         vm.update(|m| {
             let _ = m.handle_key(OverlayKey::Escape);
         });
@@ -620,24 +628,65 @@ pub(crate) fn build_overlay_view(
     });
 
     let finish_space = finish_if_ready.clone();
-    on_key("space", move |_| {
+    on_key_with("space", key_opts, move |_| {
         vm.update(|m| {
             let _ = m.handle_key(OverlayKey::Space);
         });
         finish_space();
     });
 
-    let entrance = Entrance::new(vm);
-    let mut root = view()
-        .flex_1()
-        .bg(colors::OVERLAY_CANVAS)
-        .items_center()
-        .justify_center()
-        .p_6()
-        .bind_opacity(&entrance.fade)
-        .child(build_overlay_card(vm, &entrance, finish_if_ready.clone()));
+    if !quit_on_finish {
+        let entrance = Entrance::new(vm);
+        if let Ok(mut guard) = started_at.lock() {
+            *guard = Some(nsh_core::time::now());
+        }
+        shown.set(true);
+        entrance.play(vm);
+        return view()
+            .flex_1()
+            .bg(colors::OVERLAY_CANVAS)
+            .items_center()
+            .justify_center()
+            .p_6()
+            .bind_opacity(&entrance.fade)
+            .child(build_overlay_card(vm, &entrance, finish_if_ready))
+            .into_element();
+    }
 
-    if quit_on_finish {
+    set_quit_mode(QuitMode::LastWindowClosed);
+
+    let primary_opts = overlay_main_window_options();
+    let initial_displays = displays();
+    let initial_primary = initial_displays
+        .iter()
+        .find(|d| d.primary)
+        .or_else(|| initial_displays.first());
+    let mut primary_win_el = nsh_core::element::desktop::window()
+        .id("overlay-primary")
+        .kind(WindowKind::Normal)
+        .title("Safe Your Eyes — Break")
+        .attributes(primary_opts.attributes);
+    if let Some(primary) = initial_primary {
+        primary_win_el = primary_win_el
+            .display(primary.id)
+            .default_position(WindowPosition::At(primary.bounds.origin))
+            .default_size(primary.bounds.size);
+    } else {
+        if let Some(sz) = primary_opts.default_size {
+            primary_win_el = primary_win_el.default_size(sz);
+        }
+        if let Some(pos) = primary_opts.default_position {
+            primary_win_el = primary_win_el.default_position(pos);
+        }
+    }
+    if let Some(mode) = primary_opts.default_mode {
+        primary_win_el = primary_win_el.default_mode(mode);
+    }
+
+    let on_shown_slot = Rc::new(RefCell::new(on_shown));
+    let finish_primary = finish_if_ready.clone();
+    let primary_win = primary_win_el.content(move || {
+        let entrance = Entrance::new(vm);
         let main_win = current_window();
         let effect_win = main_win.clone();
         effect(move || {
@@ -659,6 +708,7 @@ pub(crate) fn build_overlay_view(
         main_win.focus();
         let focus_win = main_win;
         let show_started = Arc::clone(&started_at);
+        let on_shown_cb = on_shown_slot.borrow_mut().take();
         drop(set_timeout(Duration::from_millis(50), move || {
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
@@ -677,25 +727,36 @@ pub(crate) fn build_overlay_view(
             }
             shown.set(true);
             entrance.play(vm);
-            if let Some(hook) = on_shown {
+            if let Some(hook) = on_shown_cb {
                 hook();
             }
         }));
+        view()
+            .flex_1()
+            .bg(colors::OVERLAY_CANVAS)
+            .items_center()
+            .justify_center()
+            .p_6()
+            .bind_opacity(&entrance.fade)
+            .child(build_overlay_card(vm, &entrance, finish_primary.clone()))
+    });
 
-        let secondary_displays = computed(|| {
-            let disp_list = displays();
-            if disp_list.len() <= 1 {
-                return Vec::new();
-            }
-            let primary_idx = disp_list.iter().position(|d| d.primary).unwrap_or(0);
-            disp_list
-                .into_iter()
-                .enumerate()
-                .filter_map(|(idx, d)| (idx != primary_idx).then_some(d))
-                .collect::<Vec<_>>()
-        });
+    let secondary_displays = computed(|| {
+        let disp_list = displays();
+        if disp_list.len() <= 1 {
+            return Vec::new();
+        }
+        let primary_idx = disp_list.iter().position(|d| d.primary).unwrap_or(0);
+        disp_list
+            .into_iter()
+            .enumerate()
+            .filter_map(|(idx, d)| (idx != primary_idx).then_some(d))
+            .collect::<Vec<_>>()
+    });
 
-        root = root.child(each(
+    view()
+        .child(primary_win)
+        .child(each(
             secondary_displays,
             |d| d.id.0,
             move |d, _| {
@@ -746,16 +807,8 @@ pub(crate) fn build_overlay_view(
                         .child(build_overlay_card(vm, &entrance, finish_if_ready.clone()))
                 })
             },
-        ));
-    } else {
-        if let Ok(mut guard) = started_at.lock() {
-            *guard = Some(nsh_core::time::now());
-        }
-        shown.set(true);
-        entrance.play(vm);
-    }
-
-    root
+        ))
+        .into_element()
 }
 
 #[component]
@@ -1114,6 +1167,8 @@ mod tests {
         assert_eq!(opts.attributes.closable, Some(false));
         assert_eq!(opts.attributes.focusable, Some(true));
         assert_eq!(opts.attributes.activate, Some(true));
+        assert_eq!(opts.attributes.close_on_escape, Some(false));
+        assert_eq!(opts.attributes.close_on_blur, Some(false));
         assert_eq!(opts.attributes.close_on_press, Some(false));
         assert_eq!(opts.attributes.taskbar, Some(cfg!(target_os = "windows")));
         assert_eq!(opts.attributes.shadow, Some(false));
@@ -1159,5 +1214,187 @@ mod tests {
         assert_eq!(sec.activate, Some(false));
         assert_eq!(sec.focusable, Some(false));
         assert_eq!(sec.transparent, Some(true));
+    }
+
+    static OVERLAY_ROOT_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn nsh_headless_overlay_root_opens_visible_primary_window()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Root};
+        use nsh_testing::Headless;
+
+        let _serial = OVERLAY_ROOT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let mut req = sample_request();
+        req.shortcut_disable_secs = 0;
+        req.fade_in_ms = 0;
+        let outcome_sink = Arc::new(Mutex::new(None));
+        let recorded: Arc<Mutex<Vec<OverlayOutcome>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded_cb = Arc::clone(&recorded);
+        let on_outcome: OverlayOutcomeCallback = Arc::new(move |outcome| {
+            if let Ok(mut guard) = recorded_cb.lock() {
+                guard.push(outcome);
+            }
+        });
+
+        {
+            let mut guard = OVERLAY_LAUNCH.lock().map_err(|e| e.to_string())?;
+            *guard = Some(OverlayLaunch {
+                request: req,
+                outcome_sink: Arc::clone(&outcome_sink),
+                on_shown: None,
+                on_outcome: Some(on_outcome),
+            });
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            environment: nsh_core::platform::Environment {
+                os: nsh_core::platform::Os::MacOs,
+                ..nsh_core::platform::Environment::default()
+            },
+            ..EngineConfig::new(Root::of::<BreakOverlayRoot>().appearance(Appearance::Dark))
+        })
+        .map_err(|e| e.to_string())?;
+
+        app.wait_for("SHORT BREAK")?;
+        let ids = app.window_ids()?;
+        assert!(
+            ids.contains(&"overlay-primary".to_owned()),
+            "BreakOverlayRoot must open an explicit primary desktop window, got {ids:?}"
+        );
+        let state = app
+            .window_state("overlay-primary")?
+            .ok_or("expected overlay-primary window state")?;
+        assert!(state.visible, "Primary overlay window must be visible");
+
+        app.press("Skip (Esc)")?;
+        app.settle();
+        assert_eq!(
+            *recorded.lock().map_err(|e| e.to_string())?,
+            vec![OverlayOutcome::Skipped]
+        );
+        assert!(
+            app.quit(),
+            "Skipping break must quit the overlay subprocess"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_engine_overlay_root_opens_window_for_every_display()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::mpsc;
+
+        use nsh_core::desktop::{DesktopCommand, Display, DisplayId, WindowRequest};
+        use nsh_core::{ApproxTextEngine, Command, MountBatch, MountItem};
+        use nsh_engine::{Engine, EngineConfig, MountSink, Root};
+
+        let _serial = OVERLAY_ROOT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        struct ChannelSink(mpsc::Sender<MountBatch>);
+        impl MountSink for ChannelSink {
+            fn submit(&self, batch: MountBatch) {
+                let _ = self.0.send(batch);
+            }
+        }
+
+        let primary_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1920.0), px(1080.0)));
+        let secondary_bounds =
+            Bounds::new(point(px(1920.0), px(0.0)), size(px(2560.0), px(1440.0)));
+        let displays = vec![
+            Display::new(DisplayId(1), primary_bounds, primary_bounds, true),
+            Display::new(DisplayId(2), secondary_bounds, secondary_bounds, false),
+        ];
+
+        {
+            let mut guard = OVERLAY_LAUNCH.lock().map_err(|e| e.to_string())?;
+            *guard = Some(OverlayLaunch {
+                request: sample_request(),
+                outcome_sink: Arc::new(Mutex::new(None)),
+                on_shown: None,
+                on_outcome: None,
+            });
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let engine = Engine::start_with(
+            EngineConfig {
+                environment: nsh_core::platform::Environment {
+                    os: nsh_core::platform::Os::MacOs,
+                    ..nsh_core::platform::Environment::default()
+                },
+                ..EngineConfig::new(Root::of::<BreakOverlayRoot>().appearance(Appearance::Dark))
+            },
+            || ApproxTextEngine,
+            ChannelSink(tx),
+            move |control| {
+                control.set_displays(displays);
+            },
+        )?;
+
+        let mut opened: Vec<(String, Option<DisplayId>, Option<Size<Points>>)> = Vec::new();
+        let mut primary_focused = false;
+        let mut primary_node = None;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline && (opened.len() < 2 || !primary_focused) {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(batch) = rx.recv_timeout(remaining.min(Duration::from_millis(100))) else {
+                continue;
+            };
+            for item in batch.items {
+                if let MountItem::Command {
+                    id,
+                    command: Command::Desktop(cmd),
+                } = item
+                {
+                    match *cmd {
+                        DesktopCommand::OpenWindow(open) => {
+                            if open.options.id == "overlay-primary" {
+                                primary_node = Some(id);
+                            }
+                            opened.push((
+                                open.options.id,
+                                open.options.display,
+                                open.options.default_size,
+                            ));
+                        }
+                        DesktopCommand::Request(WindowRequest::Focus)
+                            if Some(id) == primary_node =>
+                        {
+                            primary_focused = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        drop(engine);
+
+        assert!(
+            opened.contains(&(
+                "overlay-primary".to_owned(),
+                Some(DisplayId(1)),
+                Some(primary_bounds.size),
+            )),
+            "Expected primary display overlay window, got {opened:?}"
+        );
+        assert!(
+            opened.contains(&(
+                "overlay-secondary-2".to_owned(),
+                Some(DisplayId(2)),
+                Some(secondary_bounds.size),
+            )),
+            "Expected secondary display overlay window, got {opened:?}"
+        );
+        assert!(
+            primary_focused,
+            "Primary overlay window must request focus on launch"
+        );
+        Ok(())
     }
 }

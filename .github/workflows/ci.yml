@@ -69,7 +69,7 @@ jobs:
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
-            python3 e2e/gui_smoke.py --bin target/release/safe-your-eyes.exe
+            python e2e/gui_smoke.py --bin target/release/safe-your-eyes.exe
           else
             python3 e2e/gui_smoke.py --bin target/release/safe-your-eyes
           fi

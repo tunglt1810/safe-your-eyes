@@ -1905,7 +1905,8 @@ pub(crate) fn build_settings_view_with_hooks(
                             measured_theme_btn_center,
                             move |origin| {
                                 let resolved_origin = origin.unwrap_or_else(|| {
-                                    let win = window_state().map_or_else(window, |s| s.bounds.size);
+                                    let win = window_state()
+                                        .map_or_else(window, |s| s.content_bounds.size);
                                     [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
                                 });
                                 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -2042,7 +2043,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     measured_theme_btn_center
                         .get_untracked()
                         .unwrap_or_else(|| {
-                            let win = window_state().map_or_else(window, |s| s.bounds.size);
+                            let win = window_state().map_or_else(window, |s| s.content_bounds.size);
                             [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
                         });
                 #[cfg(any(target_os = "linux", target_os = "windows"))]

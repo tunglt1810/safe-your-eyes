@@ -665,7 +665,12 @@ pub(crate) fn build_overlay_view(
         .id("overlay-primary")
         .kind(WindowKind::Normal)
         .title("Safe Your Eyes — Break")
-        .attributes(primary_opts.attributes);
+        .attributes(primary_opts.attributes)
+        .on_open_change(|e| {
+            if !e.open {
+                quit();
+            }
+        });
     if let Some(primary) = initial_primary {
         primary_win_el = primary_win_el
             .display(primary.id)

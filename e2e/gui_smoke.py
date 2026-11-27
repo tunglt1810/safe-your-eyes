@@ -28,6 +28,7 @@ from typing import NamedTuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMP_BASE = REPO_ROOT / ".tmp" / f"gui-smoke-{os.getpid()}"
+SM_CMONITORS = 80
 
 
 class VisibleWindow(NamedTuple):
@@ -37,21 +38,15 @@ class VisibleWindow(NamedTuple):
     height: int
 
 
-# --- Linux (X11 / Xvfb) -----------------------------------------------------
-
-
 def _linux_active_display_count() -> int:
-    try:
-        out = subprocess.check_output(
-            ["xrandr", "--listmonitors"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-            timeout=5,
-        )
-        count = sum(1 for line in out.splitlines() if re.match(r"^\s*\d+:", line))
-        return max(count, 1)
-    except Exception:
-        return 1
+    out = subprocess.check_output(
+        ["xrandr", "--listmonitors"],
+        text=True,
+        stderr=subprocess.DEVNULL,
+        timeout=5,
+    )
+    count = sum(1 for line in out.splitlines() if re.match(r"^\s*\d+:", line))
+    return max(count, 1)
 
 
 def _linux_visible_windows(pid: int) -> list[VisibleWindow]:
@@ -101,9 +96,6 @@ def _linux_close_window(handle: int) -> None:
     )
 
 
-# --- macOS (CoreGraphics / Quartz) ------------------------------------------
-
-
 def _macos_active_display_count() -> int:
     try:
         cg = ctypes.CDLL(
@@ -123,9 +115,13 @@ def _macos_active_display_count() -> int:
     return 1
 
 
-def _macos_visible_windows(pid: int) -> list[VisibleWindow]:
-    # Query onscreen Quartz windows via Swift/CoreGraphics when available; avoids
-    # third-party PyObjC while decoding CFDictionary bounds cleanly.
+MACOS_PROBE = TMP_BASE / "macos_windows"
+
+
+def _macos_build_probe() -> None:
+    # Query onscreen Quartz windows via Swift/CoreGraphics; avoids third-party
+    # PyObjC while decoding CFDictionary bounds cleanly. Compiled once because
+    # `swift <file>` recompiles on every run, which outlasts a short break.
     swift_src = r"""
 import CoreGraphics
 import Foundation
@@ -157,10 +153,18 @@ if let data = try? JSONSerialization.data(withJSONObject: out),
 }
 """
     script_path = TMP_BASE / "macos_windows.swift"
-    if not script_path.exists():
-        script_path.write_text(swift_src, encoding="utf-8")
+    script_path.write_text(swift_src, encoding="utf-8")
+    subprocess.run(
+        ["swiftc", "-O", "-o", str(MACOS_PROBE), str(script_path)],
+        capture_output=True,
+        timeout=300,
+        check=True,
+    )
+
+
+def _macos_visible_windows(pid: int) -> list[VisibleWindow]:
     proc = subprocess.run(
-        ["swift", str(script_path), str(pid)],
+        [str(MACOS_PROBE), str(pid)],
         text=True,
         capture_output=True,
         timeout=15,
@@ -183,13 +187,9 @@ if let data = try? JSONSerialization.data(withJSONObject: out),
     ]
 
 
-# --- Windows (Win32 user32) -------------------------------------------------
-
-
 def _windows_active_display_count() -> int:
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-    # SM_CMONITORS = 80
-    return max(int(user32.GetSystemMetrics(80)), 1)
+    return max(int(user32.GetSystemMetrics(SM_CMONITORS)), 1)
 
 
 def _windows_visible_windows(pid: int) -> list[VisibleWindow]:
@@ -259,9 +259,6 @@ def _windows_close_window(handle: int) -> None:
     user32.PostMessageW(handle, wm_close, 0, 0)
 
 
-# --- Cross-platform helpers -------------------------------------------------
-
-
 def active_display_count() -> int:
     sys_name = platform.system()
     if sys_name == "Linux":
@@ -310,9 +307,15 @@ def wait_for_windows(
     )
 
 
+def _read_log(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def verify_settings_window(binary: Path) -> None:
     cfg = TMP_BASE / "config.toml"
     sock = TMP_BASE / "sye.sock"
+    log_path = TMP_BASE / "settings.stderr.log"
+    log = log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         [
             str(binary),
@@ -322,8 +325,8 @@ def verify_settings_window(binary: Path) -> None:
             "--socket",
             str(sock),
         ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=log,
         text=True,
     )
     try:
@@ -336,14 +339,12 @@ def verify_settings_window(binary: Path) -> None:
             _linux_close_window(wins[0].handle)
             rc = proc.wait(timeout=10.0)
             if rc != 0:
-                stderr = proc.stderr.read() if proc.stderr else ""
-                raise AssertionError(f"Settings exited with {rc}: {stderr}")
+                raise AssertionError(f"Settings exited with {rc}: {_read_log(log_path)}")
         elif sys_name == "Windows":
             _windows_close_window(wins[0].handle)
             rc = proc.wait(timeout=10.0)
             if rc != 0:
-                stderr = proc.stderr.read() if proc.stderr else ""
-                raise AssertionError(f"Settings exited with {rc}: {stderr}")
+                raise AssertionError(f"Settings exited with {rc}: {_read_log(log_path)}")
         else:
             proc.terminate()
             proc.wait(timeout=10.0)
@@ -351,6 +352,7 @@ def verify_settings_window(binary: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5.0)
+        log.close()
 
 
 def verify_overlay_windows(binary: Path) -> None:
@@ -359,7 +361,7 @@ def verify_overlay_windows(binary: Path) -> None:
         {
             "break_type": "short",
             "title": "GUI Smoke Overlay Check",
-            "duration_secs": 4,
+            "duration_secs": 8,
             "strict_break": False,
             "allow_postpone": True,
             "postpone_duration_secs": 60,
@@ -368,10 +370,12 @@ def verify_overlay_windows(binary: Path) -> None:
             "status_note": None,
         }
     )
+    log_path = TMP_BASE / "overlay.stderr.log"
+    log = log_path.open("w", encoding="utf-8")
     proc = subprocess.Popen(
         [str(binary), "--internal-overlay", payload],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=log,
         text=True,
     )
     events: list[dict[str, object]] = []
@@ -401,10 +405,9 @@ def verify_overlay_windows(binary: Path) -> None:
         ):
             if proc.poll() is not None:
                 thread.join(timeout=1.0)
-                stderr = proc.stderr.read() if proc.stderr else ""
                 raise AssertionError(
                     f"Overlay exited early ({proc.returncode}) before shown event; "
-                    f"stdout={raw_lines!r} stderr={stderr}"
+                    f"stdout={raw_lines!r} stderr={_read_log(log_path)}"
                 )
             time.sleep(0.05)
         if not any(e.get("kind") == "shown" for e in events):
@@ -426,8 +429,7 @@ def verify_overlay_windows(binary: Path) -> None:
         rc = proc.wait(timeout=15.0)
         thread.join(timeout=2.0)
         if rc != 0:
-            stderr = proc.stderr.read() if proc.stderr else ""
-            raise AssertionError(f"Overlay exited with {rc}: {stderr}")
+            raise AssertionError(f"Overlay exited with {rc}: {_read_log(log_path)}")
         if not any(e.get("kind") == "completed" for e in events):
             raise AssertionError(
                 f"Expected completed overlay outcome, got stdout={raw_lines!r}"
@@ -437,6 +439,7 @@ def verify_overlay_windows(binary: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5.0)
+        log.close()
 
 
 def main() -> int:
@@ -451,6 +454,8 @@ def main() -> int:
 
     TMP_BASE.mkdir(parents=True, exist_ok=True)
     try:
+        if platform.system() == "Darwin":
+            _macos_build_probe()
         verify_settings_window(binary)
         verify_overlay_windows(binary)
     finally:

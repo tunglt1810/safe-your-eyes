@@ -21,7 +21,7 @@ pub use settings::{
     OpenUrlCallback, SettingsOutcome, SettingsStatusConfig, SettingsTab, SettingsUpdateConfig,
     SettingsViewModel, SnapshotCancelCallback, SnapshotCaptureCallback, SnapshotRevealCallback,
     StatusPollCallback, SystemPrefersDarkCallback, ThemeChangeCallback, ThemeTransitionHooks,
-    run_settings, run_settings_with_autostart, run_settings_with_hooks,
+    WindowReadyCallback, run_settings, run_settings_with_autostart, run_settings_with_hooks,
 };
 pub use theme::{DOWNLOAD_PAGE_URL, SUPPORT_URL};
 

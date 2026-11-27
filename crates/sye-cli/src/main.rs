@@ -235,6 +235,13 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     #[cfg(not(target_os = "macos"))]
     let theme_hooks = sye_ui::ThemeTransitionHooks::default();
 
+    #[cfg(target_os = "macos")]
+    let on_window_ready: Option<sye_ui::WindowReadyCallback> = Some(Arc::new(
+        sye_platform::disable_native_titlebar_drag_for_own_windows,
+    ));
+    #[cfg(not(target_os = "macos"))]
+    let on_window_ready: Option<sye_ui::WindowReadyCallback> = None;
+
     match sye_ui::run_settings_with_hooks(
         config_file.clone(),
         initial_system_autostart,
@@ -242,6 +249,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         theme_hooks,
         update_config,
         status_config,
+        on_window_ready,
     ) {
         Ok(_) => ExitCode::SUCCESS,
         Err(err) => {

@@ -29,8 +29,8 @@ pub use autostart::{
 };
 pub use clock::SystemClock;
 pub use console::{
-    detach_console, hide_child_console, mark_own_windows_fullscreen, sync_own_windows_appearance,
-    take_foreground_for_own_window,
+    detach_console, disable_native_titlebar_drag_for_own_windows, hide_child_console,
+    mark_own_windows_fullscreen, sync_own_windows_appearance, take_foreground_for_own_window,
 };
 pub use dnd::SystemDndProvider;
 pub use idle::SystemIdleProvider;

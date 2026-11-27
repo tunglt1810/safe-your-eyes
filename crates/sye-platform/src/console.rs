@@ -168,3 +168,109 @@ pub fn sync_own_windows_appearance(mode: sye_core::config::ThemeMode) {
     #[cfg(not(target_os = "macos"))]
     let _ = mode;
 }
+
+pub fn disable_native_titlebar_drag_for_own_windows() {
+    #[cfg(target_os = "macos")]
+    {
+        use block2::RcBlock;
+        use objc2::rc::autoreleasepool;
+        use objc2::runtime::{AnyClass, Imp, Sel};
+        use objc2::{ClassType, MainThreadMarker, sel};
+        use objc2_app_kit::{NSApplication, NSView, NSWindowStyleMask};
+        use objc2_foundation::{NSArray, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize};
+
+        // AppKit treats the `NSTitlebarContainerView` strip of a `FullSizeContentView` window as a
+        // system drag region unless a content view claims it via
+        // `_opaqueRectForWindowMoveWhenInTitlebar`. `nsh-platform-macos` 0.7.1 does not implement
+        // that SPI on `NshView`, so on macOS 27.2+ WindowServer starts a native titlebar drag
+        // before `nsh` calls `performWindowDragWithEvent:`, causing AppKit frame re-fits and
+        // pointer jumps across stacked displays.
+        #[expect(unsafe_code, reason = "macOS Objective-C method implementation ABI")]
+        unsafe extern "C-unwind" fn opaque_rect_for_window_move_when_in_titlebar(
+            this: &NSView,
+            _cmd: Sel,
+        ) -> NSRect {
+            if let Some(window) = this.window()
+                && window
+                    .styleMask()
+                    .contains(NSWindowStyleMask::FullSizeContentView)
+            {
+                return this.bounds();
+            }
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0))
+        }
+
+        fn apply_on_main(mtm: MainThreadMarker) {
+            autoreleasepool(|_| {
+                let sel = sel!(_opaqueRectForWindowMoveWhenInTitlebar);
+                if let Some(nsh_view_cls) = AnyClass::get(c"NshView")
+                    && let Some(ns_view_method) = NSView::class().instance_method(sel)
+                {
+                    // SAFETY: `ns_view_method` is AppKit's
+                    // `-[NSView _opaqueRectForWindowMoveWhenInTitlebar]` returning `NSRect`.
+                    // `opaque_rect_for_window_move_when_in_titlebar` matches that C-unwind ABI,
+                    // and `class_addMethod` only adds an override if `NshView` lacks its own.
+                    #[expect(
+                        unsafe_code,
+                        reason = "macOS Objective-C runtime class_addMethod for NshView"
+                    )]
+                    unsafe {
+                        let types =
+                            objc2::ffi::method_getTypeEncoding(std::ptr::from_ref(ns_view_method));
+                        if !types.is_null() {
+                            let imp: Imp = std::mem::transmute::<
+                                unsafe extern "C-unwind" fn(&NSView, Sel) -> NSRect,
+                                Imp,
+                            >(
+                                opaque_rect_for_window_move_when_in_titlebar
+                            );
+                            let _ = objc2::ffi::class_addMethod(
+                                std::ptr::from_ref(nsh_view_cls).cast_mut(),
+                                sel,
+                                imp,
+                                types,
+                            );
+                        }
+                    }
+                }
+
+                let app = NSApplication::sharedApplication(mtm);
+                for window in app.windows() {
+                    if !window
+                        .styleMask()
+                        .contains(NSWindowStyleMask::FullSizeContentView)
+                    {
+                        continue;
+                    }
+                    if let Some(content) = window.contentView() {
+                        content.setNeedsLayout(true);
+                        // SAFETY: Main-thread getter; AppKit keeps the frame superview alive while
+                        // `content` is attached to the window.
+                        #[expect(unsafe_code, reason = "NSView::superview getter")]
+                        let frame_view = unsafe { content.superview() };
+                        if let Some(frame_view) = frame_view {
+                            frame_view.setNeedsLayout(true);
+                        }
+                    }
+                }
+            });
+        }
+
+        if let Some(mtm) = MainThreadMarker::new() {
+            apply_on_main(mtm);
+        } else {
+            let block = RcBlock::new(|| {
+                if let Some(mtm) = MainThreadMarker::new() {
+                    apply_on_main(mtm);
+                }
+            });
+            // SAFETY: `NSRunLoopCommonModes` is an immutable Foundation constant and
+            // `-[NSRunLoop performInModes:block:]` copies the block onto the main run loop.
+            #[expect(unsafe_code, reason = "Foundation main run loop dispatch FFI")]
+            unsafe {
+                let modes = NSArray::from_slice(&[NSRunLoopCommonModes]);
+                NSRunLoop::mainRunLoop().performInModes_block(&modes, &block);
+            }
+        }
+    }
+}

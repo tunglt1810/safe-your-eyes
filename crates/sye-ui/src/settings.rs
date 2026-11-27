@@ -341,6 +341,7 @@ pub type SnapshotCaptureCallback = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type SnapshotRevealCallback = Arc<dyn Fn([f32; 2], u64) + Send + Sync>;
 pub type SnapshotCancelCallback = Arc<dyn Fn() + Send + Sync>;
 pub type SystemPrefersDarkCallback = Arc<dyn Fn() -> Option<bool> + Send + Sync>;
+pub type WindowReadyCallback = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Clone, Default)]
 pub struct ThemeTransitionHooks {
@@ -438,6 +439,7 @@ struct SettingsLaunch {
     theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
+    on_window_ready: Option<WindowReadyCallback>,
 }
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
@@ -1742,14 +1744,16 @@ pub(crate) fn build_settings_view_with_hooks(
         .bg(colors::SIDEBAR_BG)
         .border_1()
         .border_color(colors::BORDER)
-        .p_3()
+        .px_3()
+        .pb_3()
+        .pt(move || px(if title_bar().left.0 > 0.0 { 0.0 } else { 12.0 }))
         .justify_between()
         .child(
             view()
                 .gap_2()
                 .child(when(
                     move || title_bar().left.0 > 0.0,
-                    || view().h(px(26.0)).window_drag(true),
+                    || view().h(px(38.0)).window_drag(true),
                 ))
                 .child(
                     view()
@@ -2169,16 +2173,24 @@ fn SettingsRoot() -> impl IntoElement {
             }
         })
         .content(move || match launch_slot.borrow_mut().take() {
-            Some(launch) => build_settings_view_with_hooks(
-                launch.vm,
-                launch.outcome_sink,
-                true,
-                launch.on_autostart_change,
-                launch.theme_hooks,
-                launch.update_config,
-                launch.status_config,
-            )
-            .into_element(),
+            Some(launch) => {
+                if let Some(on_window_ready) = launch.on_window_ready {
+                    on_window_ready();
+                    drop(set_timeout(Duration::from_millis(60), move || {
+                        on_window_ready();
+                    }));
+                }
+                build_settings_view_with_hooks(
+                    launch.vm,
+                    launch.outcome_sink,
+                    true,
+                    launch.on_autostart_change,
+                    launch.theme_hooks,
+                    launch.update_config,
+                    launch.status_config,
+                )
+                .into_element()
+            }
             None => view()
                 .flex_1()
                 .bg(colors::BACKGROUND_BODY)
@@ -2205,6 +2217,7 @@ pub fn run_settings_with_autostart(
         ThemeTransitionHooks::default(),
         SettingsUpdateConfig::default(),
         SettingsStatusConfig::default(),
+        None,
     )
 }
 
@@ -2215,6 +2228,7 @@ pub fn run_settings_with_hooks(
     theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
+    on_window_ready: Option<WindowReadyCallback>,
 ) -> Result<SettingsOutcome, UiError> {
     let vm = load_settings_vm(config_path, system_autostart);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
@@ -2233,6 +2247,7 @@ pub fn run_settings_with_hooks(
         theme_hooks,
         update_config,
         status_config,
+        on_window_ready,
     });
     drop(guard);
 
@@ -4197,6 +4212,8 @@ mod tests {
         let path = dir.file("settings-root.toml");
         let vm = SettingsViewModel::load(path);
         let outcome_sink = Arc::new(Mutex::new(None));
+        let ready_calls = Arc::new(AtomicU64::new(0));
+        let ready_counter = Arc::clone(&ready_calls);
 
         {
             let mut guard = SETTINGS_LAUNCH.lock().map_err(|e| e.to_string())?;
@@ -4207,6 +4224,9 @@ mod tests {
                 theme_hooks: ThemeTransitionHooks::default(),
                 update_config: SettingsUpdateConfig::default(),
                 status_config: SettingsStatusConfig::default(),
+                on_window_ready: Some(Arc::new(move || {
+                    ready_counter.fetch_add(1, Ordering::SeqCst);
+                })),
             });
         }
 
@@ -4223,6 +4243,10 @@ mod tests {
         .map_err(|e| e.to_string())?;
 
         app.wait_for("Safe Your Eyes")?;
+        assert!(
+            ready_calls.load(Ordering::SeqCst) >= 1,
+            "SettingsRoot must invoke on_window_ready when opening the Settings window"
+        );
         let ids = app.window_ids()?;
         assert_eq!(
             ids,

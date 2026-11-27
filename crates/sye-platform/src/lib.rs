@@ -52,7 +52,7 @@ pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_status_label_localized,
     format_tooltip, format_tooltip_localized, format_update_menu_label,
     format_update_menu_label_localized, icon_state_for_snapshot, map_menu_id_to_event,
-    render_eye_icon_rgba, render_tray_icon_rgba, tray_tooltip, tray_tooltip_for_platform,
+    render_eye_icon_rgba, render_tray_icon_rgba, tray_tooltip_for_platform,
     tray_tooltip_for_platform_localized, tray_tooltip_localized,
 };
 pub use update::{

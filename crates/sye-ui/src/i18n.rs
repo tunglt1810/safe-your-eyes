@@ -404,6 +404,7 @@ pub(crate) fn format_kpi_max_skips(max_skips: u32, locale: Locale) -> String {
     }
 }
 
+// Screen readers can re-announce a changed label, so it carries whole minutes, not seconds.
 #[must_use]
 pub(crate) fn format_spoken_duration(total_secs: u64, locale: Locale) -> String {
     if total_secs < 60 {

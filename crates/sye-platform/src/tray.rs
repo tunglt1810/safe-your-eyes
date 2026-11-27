@@ -1092,11 +1092,6 @@ pub fn format_tooltip_localized(snapshot: &TraySnapshot, locale: Locale) -> Stri
 }
 
 #[must_use]
-pub fn tray_tooltip(snapshot: &TraySnapshot) -> Option<String> {
-    tray_tooltip_localized(snapshot, Locale::En)
-}
-
-#[must_use]
 pub fn tray_tooltip_localized(snapshot: &TraySnapshot, locale: Locale) -> Option<String> {
     tray_tooltip_for_platform_localized(snapshot, cfg!(target_os = "macos"), locale)
 }

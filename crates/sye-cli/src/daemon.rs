@@ -936,6 +936,11 @@ fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io:
 
 fn spawn_restarted_daemon(paths: &AppPaths, headless: bool) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
+    // Linux reports `<path> (deleted)` when a self-update replaced the running binary.
+    let exe = exe
+        .to_str()
+        .and_then(|text| text.strip_suffix(" (deleted)"))
+        .map_or(exe.clone(), std::path::PathBuf::from);
     let resolved = exe.canonicalize().unwrap_or(exe);
     let mut cmd = Command::new(resolved);
     cmd.arg("--background")

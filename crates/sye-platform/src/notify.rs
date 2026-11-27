@@ -216,7 +216,7 @@ pub fn format_pre_break_notification(
 pub(crate) fn format_pre_break_banner_copy(
     break_type: BreakType,
     title: &str,
-    warning_secs: u64,
+    _warning_secs: u64,
 ) -> (String, String, String) {
     let kind_label = match break_type {
         BreakType::Short => "Short break",
@@ -228,12 +228,8 @@ pub(crate) fn format_pre_break_banner_copy(
     } else {
         trimmed.to_owned()
     };
-    let sec_unit = if warning_secs == 1 {
-        "second"
-    } else {
-        "seconds"
-    };
-    let accessible = format!("Safe Your Eyes: {kind_label} in {warning_secs} {sec_unit}. {body}");
+    // The label is set once per banner, so it must not carry a countdown number that goes stale.
+    let accessible = format!("Safe Your Eyes: {kind_label} starting soon. {body}");
     (kind_label.to_owned(), body, accessible)
 }
 
@@ -1652,7 +1648,7 @@ mod tests {
         let (title, body, a11y) = format_pre_break_banner_copy(BreakType::Short, "Blink", 10);
         assert_eq!(title, "Short break");
         assert_eq!(body, "Blink");
-        assert_eq!(a11y, "Safe Your Eyes: Short break in 10 seconds. Blink");
+        assert_eq!(a11y, "Safe Your Eyes: Short break starting soon. Blink");
 
         let (long_title, long_body, long_a11y) =
             format_pre_break_banner_copy(BreakType::Long, "  ", 1);
@@ -1660,7 +1656,7 @@ mod tests {
         assert_eq!(long_body, "Prepare to rest your eyes.");
         assert_eq!(
             long_a11y,
-            "Safe Your Eyes: Long break in 1 second. Prepare to rest your eyes."
+            "Safe Your Eyes: Long break starting soon. Prepare to rest your eyes."
         );
     }
 

@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "Cross-platform OS adapters for tray, idle, DND, notifications, audio, IPC, and autostart"
 
+[features]
+msstore = []
+
 [dependencies]
 directories = "6"
 interprocess = { version = "2.4", default-features = false }

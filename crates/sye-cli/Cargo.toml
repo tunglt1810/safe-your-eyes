@@ -10,6 +10,9 @@ description = "Single-binary CLI, lightweight background daemon, and GUI subproc
 name = "safe-your-eyes"
 path = "src/main.rs"
 
+[features]
+msstore = ["sye-platform/msstore", "sye-ui/msstore"]
+
 [dependencies]
 serde_json = { workspace = true }
 sye-core = { workspace = true }

@@ -18,6 +18,7 @@ mod paths;
 mod test_util;
 mod theme_reveal;
 mod tray;
+#[cfg(not(feature = "msstore"))]
 mod update;
 
 pub use app_loop::PlatformEventLoop;
@@ -44,11 +45,14 @@ pub use theme_reveal::{
     circular_reveal_max_radius, map_reveal_origin_y, reveal_theme_transition_snapshot,
     system_prefers_dark,
 };
+#[cfg(not(feature = "msstore"))]
+pub use tray::format_update_menu_label;
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
-    format_update_menu_label, icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba,
-    render_tray_icon_rgba, tray_tooltip, tray_tooltip_for_platform,
+    icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba, render_tray_icon_rgba,
+    tray_tooltip, tray_tooltip_for_platform,
 };
+#[cfg(not(feature = "msstore"))]
 pub use update::{
     apply_self_update, apply_self_update_to_path, check_and_cache_update, check_latest_version,
     cleanup_current_stale_old_executable, cleanup_stale_old_executable, compute_sha256_hex,

@@ -173,50 +173,60 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
         }
     });
 
-    let current_version = env!("CARGO_PKG_VERSION");
-    let (cached_update, _) = sye_core::UpdateCacheState::load_or_default(&paths.update_cache_file);
-    let initial_update = cached_update.available_update(current_version);
-    let strategy = sye_platform::detect_current_update_strategy();
+    #[cfg(not(feature = "msstore"))]
+    let update_config = {
+        let current_version = env!("CARGO_PKG_VERSION");
+        let (cached_update, _) =
+            sye_core::UpdateCacheState::load_or_default(&paths.update_cache_file);
+        let initial_update = cached_update.available_update(current_version);
+        let strategy = sye_platform::detect_current_update_strategy();
 
-    let check_cache_path = paths.update_cache_file.clone();
-    let on_check_now: sye_ui::CheckUpdatesCallback = Arc::new(move || {
-        sye_platform::check_and_cache_update(
-            &check_cache_path,
-            current_version,
-            sye_platform::now_unix_secs(),
-        )
-        .map_err(|err| err.to_string())
-    });
+        let check_cache_path = paths.update_cache_file.clone();
+        let on_check_now: sye_ui::CheckUpdatesCallback = Arc::new(move || {
+            sye_platform::check_and_cache_update(
+                &check_cache_path,
+                current_version,
+                sye_platform::now_unix_secs(),
+            )
+            .map_err(|err| err.to_string())
+        });
 
-    let on_apply_update: Option<sye_ui::ApplyUpdateCallback> = match strategy {
-        sye_core::UpdateStrategy::SelfUpdate { asset_name } => {
-            let socket_path = paths.socket_path.clone();
-            Some(Arc::new(move |target_version: &str| {
-                sye_platform::apply_self_update(target_version, asset_name, current_version)
-                    .map_err(|err| err.to_string())?;
-                match IpcClient::send_command(&socket_path, &IpcCommand::Restart) {
-                    Ok(IpcResponse::Ok { .. }) => Ok(sye_ui::ApplyUpdateOutcome::RestartingDaemon),
-                    Ok(IpcResponse::Status(_)) | Err(IpcError::NotRunning) => {
-                        Ok(sye_ui::ApplyUpdateOutcome::UpdatedStandalone)
+        let on_apply_update: Option<sye_ui::ApplyUpdateCallback> = match strategy {
+            sye_core::UpdateStrategy::SelfUpdate { asset_name } => {
+                let socket_path = paths.socket_path.clone();
+                Some(Arc::new(move |target_version: &str| {
+                    sye_platform::apply_self_update(target_version, asset_name, current_version)
+                        .map_err(|err| err.to_string())?;
+                    match IpcClient::send_command(&socket_path, &IpcCommand::Restart) {
+                        Ok(IpcResponse::Ok { .. }) => {
+                            Ok(sye_ui::ApplyUpdateOutcome::RestartingDaemon)
+                        }
+                        Ok(IpcResponse::Status(_)) | Err(IpcError::NotRunning) => {
+                            Ok(sye_ui::ApplyUpdateOutcome::UpdatedStandalone)
+                        }
+                        Ok(IpcResponse::Error { message, .. }) => Err(message),
+                        Err(err) => Err(err.to_string()),
                     }
-                    Ok(IpcResponse::Error { message, .. }) => Err(message),
-                    Err(err) => Err(err.to_string()),
-                }
-            }))
+                }))
+            }
+            sye_core::UpdateStrategy::HomebrewCask | sye_core::UpdateStrategy::ManualDownload => {
+                None
+            }
+        };
+
+        let on_open_download: sye_ui::OpenUrlCallback =
+            Arc::new(|url: &str| sye_platform::open_url(url).map_err(|err| err.to_string()));
+
+        sye_ui::SettingsUpdateConfig {
+            initial_update,
+            strategy: Some(strategy),
+            on_check_now: Some(on_check_now),
+            on_apply_update,
+            on_open_download: Some(on_open_download),
         }
-        sye_core::UpdateStrategy::HomebrewCask | sye_core::UpdateStrategy::ManualDownload => None,
     };
-
-    let on_open_download: sye_ui::OpenUrlCallback =
-        Arc::new(|url: &str| sye_platform::open_url(url).map_err(|err| err.to_string()));
-
-    let update_config = sye_ui::SettingsUpdateConfig {
-        initial_update,
-        strategy: Some(strategy),
-        on_check_now: Some(on_check_now),
-        on_apply_update,
-        on_open_download: Some(on_open_download),
-    };
+    #[cfg(feature = "msstore")]
+    let update_config = sye_ui::SettingsUpdateConfig::default();
 
     let status_socket_path = paths.socket_path.clone();
     let status_config = sye_ui::SettingsStatusConfig {

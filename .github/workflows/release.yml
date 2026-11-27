@@ -47,10 +47,12 @@ jobs:
             target: ""
             bin_path: target/release/safe-your-eyes.exe
             asset_name: safe-your-eyes-windows-x86_64.exe
+            msix_arch: x64
           - os: windows-11-arm
             target: ""
             bin_path: target/release/safe-your-eyes.exe
             asset_name: safe-your-eyes-windows-arm64.exe
+            msix_arch: arm64
 
     steps:
       - uses: actions/checkout@v7
@@ -207,6 +209,21 @@ jobs:
           name: release-${{ matrix.asset_name }}
           path: dist/*
 
+      - name: Build Microsoft Store binary
+        if: ${{ runner.os == 'Windows' && !contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
+        shell: bash
+        run: |
+          cargo build --release --bin safe-your-eyes --features msstore
+          mkdir -p dist-msstore
+          cp "${{ matrix.bin_path }}" "dist-msstore/safe-your-eyes-msstore-${{ matrix.msix_arch }}.exe"
+
+      - name: Upload Microsoft Store binary artifact
+        if: ${{ runner.os == 'Windows' && !contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: msstore-bin-${{ matrix.msix_arch }}
+          path: dist-msstore/safe-your-eyes-msstore-${{ matrix.msix_arch }}.exe
+
   package-msix:
     name: Package Microsoft Store MSIX Bundle
     needs: build
@@ -217,12 +234,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Download Windows release binaries
+      - name: Download Microsoft Store Windows binaries
         uses: actions/download-artifact@v8
         with:
-          pattern: release-safe-your-eyes-windows-*
+          pattern: msstore-bin-*
           merge-multiple: true
-          path: win-assets
+          path: msstore-assets
 
       - name: Build .msixbundle for Microsoft Store
         id: msix
@@ -246,11 +263,11 @@ jobs:
             -PackageName $env:MS_STORE_PACKAGE_NAME `
             -Publisher $env:MS_STORE_PUBLISHER `
             -PublisherDisplayName $env:MS_STORE_PUBLISHER_DISPLAY_NAME `
-            -X64Exe "win-assets/safe-your-eyes-windows-x86_64.exe" `
-            -Arm64Exe "win-assets/safe-your-eyes-windows-arm64.exe" `
+            -X64Exe "msstore-assets/safe-your-eyes-msstore-x64.exe" `
+            -Arm64Exe "msstore-assets/safe-your-eyes-msstore-arm64.exe" `
             -OutputDir "dist-msix"
           $bundle = Get-ChildItem -Path "dist-msix" -Filter "*.msixbundle" | Select-Object -First 1
-          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Microsoft Store MSIX Bundle`n- **Artifact**: ``msix-store-bundle`` (``$($bundle.Name)``)`n- Unsigned by design; upload directly to Microsoft Partner Center where Microsoft signs it."
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### Microsoft Store MSIX Bundle`n- **Artifact**: ``msix-store-bundle`` (``$($bundle.Name)``)`n- Built with ``--features msstore`` (in-app updater disabled). Unsigned by design; upload directly to Microsoft Partner Center where Microsoft signs it."
           "built=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Upload MSIX Store bundle artifact

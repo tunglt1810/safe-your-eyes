@@ -23,6 +23,7 @@ const MOON_ICON_SVG: &str = "M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z";
 const MONITOR_ICON_SVG: &str = "\
 M4 4h16a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z \
 M8 21h8 M12 17v4";
+#[cfg(not(feature = "msstore"))]
 const DOWNLOAD_ICON_SVG: &str = "\
 M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 \
 M7 10l5 5 5-5 M12 15V3";
@@ -715,6 +716,7 @@ pub(crate) fn support_link(label: &'static str) -> impl IntoElement {
         )
 }
 
+#[cfg(not(feature = "msstore"))]
 pub(crate) fn external_link_button(
     label: impl IntoReactive<SharedString>,
     href: &'static str,
@@ -767,6 +769,7 @@ pub(crate) fn external_link_button(
     }
 }
 
+#[cfg(not(feature = "msstore"))]
 pub(crate) fn version_update_badge(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,

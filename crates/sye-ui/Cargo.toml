@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 description = "On-demand Native Shell (nsh) Cozy UI for multi-monitor break overlay and settings"
 
+[features]
+msstore = []
+
 [dependencies]
 sye-core = { workspace = true }
 nsh-core = "0.7.1"

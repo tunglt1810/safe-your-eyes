@@ -50,10 +50,14 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo clippy -p sye-cli -p sye-platform -p sye-ui --all-targets --features msstore -- -D warnings
 
       - name: Run unit and headless UI tests
-        run: cargo test --workspace --no-fail-fast
+        run: |
+          cargo test --workspace --no-fail-fast
+          cargo test -p sye-cli -p sye-platform -p sye-ui --features msstore --no-fail-fast
 
       - name: Run opaque-box E2E suite (Linux)
         if: runner.os == 'Linux'
@@ -64,20 +68,6 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release --bin safe-your-eyes
-
-      - name: Verify MSIX packaging (Windows)
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
-          & packaging/msix/package-msix.ps1 `
-            -Version $version `
-            -PackageName "SafeYourEyes.CIVerify" `
-            -Publisher "CN=CI-Verify" `
-            -PublisherDisplayName "Safe Your Eyes CI" `
-            -X64Exe "target/release/safe-your-eyes.exe" `
-            -OutputDir "dist-msix-ci" `
-            -SkipBundle
 
       - name: Run real-OS GUI window smoke E2E (macOS / Windows)
         if: runner.os != 'Linux'
@@ -120,3 +110,21 @@ jobs:
           else
             echo "- **VirusTotal Upload**: Skipped (\`VT_API_KEY\` repository secret not configured)" >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: Build Microsoft Store release binary (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --bin safe-your-eyes --features msstore
+
+      - name: Verify MSIX packaging (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & packaging/msix/package-msix.ps1 `
+            -Version $version `
+            -PackageName "SafeYourEyes.CIVerify" `
+            -Publisher "CN=CI-Verify" `
+            -PublisherDisplayName "Safe Your Eyes CI" `
+            -X64Exe "target/release/safe-your-eyes.exe" `
+            -OutputDir "dist-msix-ci" `
+            -SkipBundle

@@ -112,6 +112,7 @@ objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Storage_Packaging_Appx",

@@ -5,14 +5,20 @@ use nsh_core::canvas::{LineCap, LineJoin};
 use nsh_core::element::{ImageSrc, Painter, Timing};
 use nsh_core::prelude::*;
 use sye_core::config::ThemeMode;
+use sye_core::{LanguageMode, Locale};
 
-use crate::theme::{SUPPORT_URL, colors, motion, radii, theme_mode_label};
+use crate::i18n::{language_mode_a11y_label, language_mode_label, theme_mode_label_localized};
+use crate::theme::{SUPPORT_URL, colors, motion, radii};
 
 include!(concat!(env!("OUT_DIR"), "/app_icon.rs"));
 
 const SIDEBAR_ITEM_HEIGHT: f32 = 38.0;
 const SIDEBAR_ITEM_GAP: f32 = 4.0;
 
+const GLOBE_ICON_SVG: &str = "\
+M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z \
+M2 12h20 \
+M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z";
 const SUN_ICON_SVG: &str = "\
 M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z \
 M12 2v2 M12 20v2 \
@@ -137,8 +143,61 @@ pub(crate) fn stagger_item(
     container.bind_opacity(&opacity).bind_translate_y(&y)
 }
 
+pub(crate) fn language_toggle_button(
+    mode: impl Fn() -> LanguageMode + Copy + 'static,
+    locale: impl Fn() -> Locale + Copy + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+
+    let icon = canvas(move || {
+        let stroke = color(colors::TEXT_PRIMARY);
+        Painter::new()
+            .scale(15.0_f32 / 24.0_f32, 15.0_f32 / 24.0_f32)
+            .stroke_color(stroke)
+            .line_width(2.0_f32)
+            .line_cap(LineCap::Round)
+            .line_join(LineJoin::Round)
+            .stroke_svg(GLOBE_ICON_SVG)
+    })
+    .w(px(15.0))
+    .h(px(15.0))
+    .flex_shrink_0();
+
+    view()
+        .accessible(true)
+        .role(AccessibilityRole::Button)
+        .label(move || language_mode_a11y_label(mode(), locale()))
+        .focusable(true)
+        .window_drag(false)
+        .on_press(move |_: &PressEvent| on_press())
+        .h(px(36.0))
+        .px_3()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded(radii::PILL)
+        .bg(colors::BACKGROUND_SURFACE)
+        .border_1()
+        .border_color(colors::BORDER_EMPHASIZED)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_bezier(bx1, by1, bx2, by2)
+        .hover(|s| s.bg(colors::OVERLAY_HOVER))
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
+        .child(icon)
+        .child(
+            text(move || language_mode_label(mode(), locale()))
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(colors::TEXT_PRIMARY),
+        )
+}
+
 pub(crate) fn theme_toggle_button(
     mode: impl Fn() -> ThemeMode + Copy + 'static,
+    locale: impl Fn() -> Locale + Copy + 'static,
     measured_center: Signal<Option<[f32; 2]>>,
     on_press: impl Fn(Option<[f32; 2]>) + 'static,
 ) -> impl IntoElement {
@@ -214,7 +273,7 @@ pub(crate) fn theme_toggle_button(
         .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
         .child(icon)
         .child(
-            text(move || theme_mode_label(mode()))
+            text(move || theme_mode_label_localized(mode(), locale()))
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::TEXT_PRIMARY),
@@ -363,7 +422,10 @@ pub(crate) fn countdown_status_pill(
         ))
 }
 
-pub(crate) fn section_header(title: &'static str, caption: &'static str) -> impl IntoElement {
+pub(crate) fn section_header(
+    title: impl IntoReactive<SharedString>,
+    caption: impl IntoReactive<SharedString>,
+) -> impl IntoElement {
     view()
         .gap_1()
         .child(
@@ -477,7 +539,7 @@ pub(crate) fn destructive_button(
 
 pub(crate) fn pastel_kpi_card(
     tone: KpiTone,
-    label: &'static str,
+    label: impl IntoReactive<SharedString>,
     value: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
     view()
@@ -517,7 +579,7 @@ pub(crate) fn pastel_kpi_card(
 }
 
 pub(crate) fn cozy_switch(
-    label: &'static str,
+    label: impl Fn() -> &'static str + Copy + 'static,
     checked: impl Fn() -> bool + 'static,
     on_change: impl Fn(bool) + 'static,
 ) -> impl IntoElement {
@@ -525,7 +587,7 @@ pub(crate) fn cozy_switch(
 }
 
 pub(crate) fn cozy_switch_with_disabled(
-    label: &'static str,
+    label: impl Fn() -> &'static str + Copy + 'static,
     checked: impl Fn() -> bool + 'static,
     disabled: impl Fn() -> bool + Copy + 'static,
     on_change: impl Fn(bool) + 'static,
@@ -552,7 +614,7 @@ pub(crate) fn cozy_switch_with_disabled(
                         on_change(*val);
                     }
                 })
-                .accessibility_label(label)
+                .accessibility_label(move || Some(SharedString::from(label())))
                 .track_style(|s| {
                     s.w(px(42.0))
                         .h(px(24.0))
@@ -582,7 +644,7 @@ pub(crate) fn cozy_switch_with_disabled(
 }
 
 pub(crate) fn cozy_input(
-    placeholder: &'static str,
+    placeholder: impl IntoReactive<String>,
     value: impl Fn() -> String + 'static,
     on_change: impl Fn(&str) + 'static,
 ) -> impl IntoElement {
@@ -590,7 +652,7 @@ pub(crate) fn cozy_input(
 }
 
 pub(crate) fn cozy_input_with_disabled(
-    placeholder: &'static str,
+    placeholder: impl IntoReactive<String>,
     value: impl Fn() -> String + 'static,
     disabled: impl Fn() -> bool + Copy + 'static,
     on_change: impl Fn(&str) + 'static,
@@ -640,7 +702,7 @@ pub(crate) fn sidebar_nav_indicator(active_index: impl Fn() -> u8 + 'static) -> 
 }
 
 pub(crate) fn sidebar_nav_item(
-    label: &'static str,
+    label: impl IntoReactive<SharedString>,
     selected: impl Fn() -> bool + 'static,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
@@ -693,7 +755,7 @@ pub(crate) fn status_banner(
         )
 }
 
-pub(crate) fn support_link(label: &'static str) -> impl IntoElement {
+pub(crate) fn support_link(label: impl IntoReactive<SharedString>) -> impl IntoElement {
     link()
         .href(SUPPORT_URL)
         .h(px(36.0))
@@ -825,7 +887,7 @@ pub(crate) fn build_support_qr_matrix() -> Option<&'static (usize, Box<[bool]>)>
         .as_ref()
 }
 
-pub(crate) fn support_qr_card() -> impl IntoElement {
+pub(crate) fn support_qr_card(caption: impl IntoReactive<SharedString>) -> impl IntoElement {
     let qr_bg = rgb(0xFFFEF7);
     let qr_fg = rgb(0x261101);
     let module_px = 3.5_f32;
@@ -859,7 +921,7 @@ pub(crate) fn support_qr_card() -> impl IntoElement {
                 .child(grid),
         )
         .child(
-            text("Scan to Buy Me a Coffee")
+            text(caption)
                 .text_xs()
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(colors::TEXT_SECONDARY),
@@ -903,7 +965,7 @@ mod tests {
         fn SwitchHost() -> impl IntoElement {
             let checked = signal(false);
             view().p_4().child(cozy_switch(
-                "Smart Pause on idle",
+                || "Smart Pause on idle",
                 move || checked.get(),
                 move |next| checked.set(next),
             ))
@@ -1006,6 +1068,7 @@ mod tests {
                 .child(secondary_button("Shift", move || shift.set(36.0)))
                 .child(theme_toggle_button(
                     move || mode.get(),
+                    || Locale::En,
                     measured,
                     move |origin| {
                         if let Ok(mut guard) = LAST_ORIGIN.lock() {

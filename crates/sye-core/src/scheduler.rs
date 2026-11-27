@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::chime::ChimeKind;
 use crate::config::{BreakType, Config, SkipLimitConfig};
+use crate::i18n::Locale;
 use crate::policies::{
     DndContext, DoNotDisturbPolicy, SkipLimitPolicy, SmartPauseDecision, SmartPausePolicy,
 };
@@ -39,6 +40,8 @@ pub struct OverlayRequest {
     pub shortcut_disable_secs: u64,
     pub fade_in_ms: u64,
     pub status_note: Option<String>,
+    #[serde(default)]
+    pub locale: Locale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +116,7 @@ pub enum SchedulerAction {
 #[derive(Debug)]
 pub struct Scheduler<C: Clock> {
     config: Config,
+    system_locale: Locale,
     clock: C,
     rng_seed: u64,
     queue: Option<BreakQueue>,
@@ -144,6 +148,7 @@ impl<C: Clock> Scheduler<C> {
         let queue = BreakQueue::from_config(&config, rng_seed);
         Self {
             config,
+            system_locale: Locale::En,
             clock,
             rng_seed,
             queue,
@@ -166,6 +171,15 @@ impl<C: Clock> Scheduler<C> {
             resting_since_wall_secs: 0,
             remaining_until_break_ms: 0,
         }
+    }
+
+    pub const fn set_system_locale(&mut self, locale: Locale) {
+        self.system_locale = locale;
+    }
+
+    #[must_use]
+    pub const fn active_locale(&self) -> Locale {
+        self.config.language.resolve(self.system_locale)
     }
 
     pub fn restore_session(&mut self, session: &SessionState) {
@@ -717,9 +731,11 @@ impl<C: Clock> Scheduler<C> {
     fn handle_reload_config(&mut self, new_cfg: Config) -> Vec<SchedulerAction> {
         let mut current_non_schedule = self.config.clone();
         current_non_schedule.theme = new_cfg.theme;
+        current_non_schedule.language = new_cfg.language;
         current_non_schedule.check_for_updates = new_cfg.check_for_updates;
         if new_cfg == current_non_schedule {
             self.config.theme = new_cfg.theme;
+            self.config.language = new_cfg.language;
             self.config.check_for_updates = new_cfg.check_for_updates;
             return Vec::new();
         }
@@ -817,6 +833,7 @@ impl<C: Clock> Scheduler<C> {
 
         let skip_limit_cfg = self.effective_skip_limit();
         let limit_hit = self.skip_limit.controls_disabled(&skip_limit_cfg);
+        let locale = self.active_locale();
         let request = OverlayRequest {
             break_type: spec.break_type,
             title: spec.name,
@@ -826,7 +843,10 @@ impl<C: Clock> Scheduler<C> {
             postpone_duration_secs: self.config.postpone_duration_secs,
             shortcut_disable_secs: self.config.shortcut_disable_secs,
             fade_in_ms: self.config.fade_in_ms,
-            status_note: self.skip_limit.status_label(&skip_limit_cfg),
+            status_note: self
+                .skip_limit
+                .status_label_localized(&skip_limit_cfg, locale),
+            locale,
         };
         vec![
             SchedulerAction::ShowOverlay(request),
@@ -1757,6 +1777,55 @@ mod tests {
         assert!(actions.is_empty());
         assert_eq!(sched.config().theme, crate::config::ThemeMode::Dark);
         assert_eq!(sched.status_snapshot().seconds_until_next_break, 780);
+    }
+
+    #[test]
+    fn reload_config_language_only_preserves_countdown_and_updates_locale() {
+        let clock = FakeClock::default();
+        let cfg = test_config();
+        let mut sched = Scheduler::new(cfg.clone(), &clock, 1);
+        sched.set_system_locale(Locale::En);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        clock.advance_secs(120);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 780);
+        assert_eq!(sched.active_locale(), Locale::En);
+
+        let mut lang_only = cfg;
+        lang_only.language = crate::i18n::LanguageMode::Vi;
+        let actions = sched.handle_event(SchedulerEvent::ReloadConfig(lang_only));
+        assert!(actions.is_empty());
+        assert_eq!(sched.config().language, crate::i18n::LanguageMode::Vi);
+        assert_eq!(sched.active_locale(), Locale::Vi);
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 780);
+    }
+
+    #[test]
+    fn overlay_request_uses_active_locale_for_skip_note() {
+        let clock = FakeClock::default();
+        let cfg = Config {
+            language: crate::i18n::LanguageMode::Vi,
+            limit_consecutive_skips: SkipLimitConfig {
+                enabled: true,
+                max_skips: 2,
+            },
+            ..test_config()
+        };
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+        let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+        clock.advance_secs(3);
+        let _ = sched.handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Skipped));
+
+        let actions = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+        let req = actions.into_iter().find_map(|a| match a {
+            SchedulerAction::ShowOverlay(r) => Some(r),
+            _ => None,
+        });
+        assert_eq!(req.as_ref().map(|r| r.locale), Some(Locale::Vi));
+        assert_eq!(
+            req.as_ref().and_then(|r| r.status_note.as_deref()),
+            Some("Đã bỏ qua hoặc hoãn 1/2 lần nghỉ liên tiếp")
+        );
     }
 
     #[test]

@@ -11,6 +11,7 @@ mod console;
 mod dnd;
 mod idle;
 mod ipc;
+mod locale;
 mod notify;
 mod overlay;
 mod paths;
@@ -35,7 +36,10 @@ pub use console::{
 pub use dnd::SystemDndProvider;
 pub use idle::SystemIdleProvider;
 pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};
-pub use notify::{OsNotifier, format_pre_break_notification};
+pub use locale::detect_system_locale;
+pub use notify::{
+    OsNotifier, format_pre_break_notification, format_pre_break_notification_localized,
+};
 pub use overlay::{OVERLAY_SHOWN_SIGNAL, SubprocessOverlayLauncher};
 pub use paths::{AppPaths, session_path_for_config, update_cache_path_for_config};
 pub use sye_core::traits;
@@ -45,9 +49,11 @@ pub use theme_reveal::{
     system_prefers_dark,
 };
 pub use tray::{
-    TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,
-    format_update_menu_label, icon_state_for_snapshot, map_menu_id_to_event, render_eye_icon_rgba,
-    render_tray_icon_rgba, tray_tooltip, tray_tooltip_for_platform,
+    TrayEvent, TrayHandle, TrayIconState, format_status_label, format_status_label_localized,
+    format_tooltip, format_tooltip_localized, format_update_menu_label,
+    format_update_menu_label_localized, icon_state_for_snapshot, map_menu_id_to_event,
+    render_eye_icon_rgba, render_tray_icon_rgba, tray_tooltip, tray_tooltip_for_platform,
+    tray_tooltip_for_platform_localized, tray_tooltip_localized,
 };
 pub use update::{
     apply_self_update, apply_self_update_to_path, check_and_cache_update, check_latest_version,

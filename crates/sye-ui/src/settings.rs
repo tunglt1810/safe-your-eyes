@@ -11,9 +11,14 @@ use nsh_core::element::desktop::{current_window, quit, set_quit_mode, title_bar,
 use nsh_core::prelude::*;
 use sye_core::config::{BreakSpec, BreakType, Config, ThemeMode};
 use sye_core::scheduler::{SchedulerState, StatusSnapshot};
-use sye_core::{HOMEBREW_UPGRADE_COMMAND, UpdateInfo, UpdateStrategy};
+use sye_core::{Locale, UpdateInfo, UpdateStrategy, localize_exercise_name};
 
 use crate::UiError;
+use crate::i18n::{
+    UpdateStatusMessage, format_exercise_index_oob, format_homebrew_upgrade_hint,
+    format_kpi_cadence, format_kpi_max_skips, format_support_link_caption, format_version_summary,
+    format_waiting_a11y, format_window_index_oob, format_window_pattern_empty, ui_text,
+};
 use crate::overlay::format_mm_ss;
 use crate::theme::{
     DOWNLOAD_PAGE_URL, SUPPORT_URL, appearance_for_theme_mode, colors, motion, next_theme_mode,
@@ -22,10 +27,10 @@ use crate::theme::{
 use crate::ui::{
     CountdownPillState, CountdownTone, KpiTone, app_icon, countdown_status_pill, cozy_input,
     cozy_input_with_disabled, cozy_switch, cozy_switch_with_disabled, destructive_button,
-    external_link_button, page_heading, pastel_kpi_card, primary_button_with_disabled,
-    secondary_button, section_divider, section_header, sidebar_nav_indicator, sidebar_nav_item,
-    stagger_item, status_banner, support_link, support_qr_card, theme_toggle_button,
-    version_update_badge,
+    external_link_button, language_toggle_button, page_heading, pastel_kpi_card,
+    primary_button_with_disabled, secondary_button, section_divider, section_header,
+    sidebar_nav_indicator, sidebar_nav_item, stagger_item, status_banner, support_link,
+    support_qr_card, theme_toggle_button, version_update_badge,
 };
 
 #[cfg(target_os = "linux")]
@@ -46,12 +51,13 @@ pub enum SettingsTab {
 impl SettingsTab {
     const ALL: [Self; 4] = [Self::Timing, Self::Policies, Self::Exercises, Self::About];
 
-    const fn label(self) -> &'static str {
+    const fn label(self, locale: Locale) -> &'static str {
+        let copy = ui_text(locale);
         match self {
-            Self::Timing => "Timing",
-            Self::Policies => "Policies",
-            Self::Exercises => "Exercises",
-            Self::About => "About & Support",
+            Self::Timing => copy.tab_timing,
+            Self::Policies => copy.tab_policies,
+            Self::Exercises => copy.tab_exercises,
+            Self::About => copy.tab_about,
         }
     }
 }
@@ -66,6 +72,7 @@ pub enum SettingsOutcome {
 pub struct SettingsViewModel {
     pub config_path: PathBuf,
     pub config: Config,
+    pub system_locale: Locale,
     pub active_tab: SettingsTab,
     pub load_warning: Option<String>,
     pub validation_error: Option<String>,
@@ -80,6 +87,11 @@ pub struct SettingsViewModel {
 impl SettingsViewModel {
     #[must_use]
     pub fn load(config_path: PathBuf) -> Self {
+        Self::load_with_locale(config_path, Locale::En)
+    }
+
+    #[must_use]
+    pub fn load_with_locale(config_path: PathBuf, system_locale: Locale) -> Self {
         let (mut config, load_err) = Config::load_or_default(&config_path);
         if config.strict_break {
             config.limit_consecutive_skips.enabled = false;
@@ -87,6 +99,7 @@ impl SettingsViewModel {
         Self {
             config_path,
             config,
+            system_locale,
             active_tab: SettingsTab::Timing,
             load_warning: load_err.map(|err| err.to_string()),
             validation_error: None,
@@ -99,10 +112,16 @@ impl SettingsViewModel {
         }
     }
 
+    #[must_use]
+    pub const fn active_locale(&self) -> Locale {
+        self.config.language.resolve(self.system_locale)
+    }
+
     pub fn add_exercise(&mut self, kind: BreakType, name: &str) -> Result<(), String> {
         let trimmed = name.trim();
         if trimmed.is_empty() {
-            return self.fail_validation("Exercise name must not be empty");
+            let msg = ui_text(self.active_locale()).err_exercise_empty;
+            return self.fail_validation(msg);
         }
         self.breaks_mut(kind).push(BreakSpec::new(trimmed));
         self.validation_error = None;
@@ -112,11 +131,13 @@ impl SettingsViewModel {
     pub fn remove_exercise(&mut self, kind: BreakType, index: usize) -> Result<(), String> {
         let total = self.config.short_breaks.len() + self.config.long_breaks.len();
         if total <= 1 {
-            return self.fail_validation("At least one break exercise must remain configured");
+            let msg = ui_text(self.active_locale()).err_exercise_last_remaining;
+            return self.fail_validation(msg);
         }
+        let locale = self.active_locale();
         let list = self.breaks_mut(kind);
         if index >= list.len() {
-            return self.fail_validation(format!("Exercise index {index} out of bounds"));
+            return self.fail_validation(format_exercise_index_oob(index, locale));
         }
         list.remove(index);
         self.validation_error = None;
@@ -193,12 +214,30 @@ impl SettingsViewModel {
             .map_err(|err| err.to_string())
     }
 
+    pub fn persist_language(&self) -> Result<(), String> {
+        let (mut on_disk, load_err) = Config::load_or_default(&self.config_path);
+        if load_err.is_some() {
+            return Ok(());
+        }
+        if on_disk.language == self.config.language {
+            return Ok(());
+        }
+        if let Some(actual) = self.system_autostart {
+            on_disk.autostart = actual;
+        }
+        on_disk.language = self.config.language;
+        on_disk
+            .save_to_path(&self.config_path)
+            .map_err(|err| err.to_string())
+    }
+
     pub fn validate(&mut self) -> Result<(), String> {
         if let Err(err) = self.config.validate() {
             return self.fail_validation(err.to_string());
         }
         if self.config.short_breaks.is_empty() && self.config.long_breaks.is_empty() {
-            return self.fail_validation("At least one break exercise must be configured");
+            let msg = ui_text(self.active_locale()).err_exercise_none_configured;
+            return self.fail_validation(msg);
         }
         self.validation_error = None;
         Ok(())
@@ -271,17 +310,19 @@ impl SettingsViewModel {
     }
 
     fn exercise_mut(&mut self, kind: BreakType, index: usize) -> Result<&mut BreakSpec, String> {
+        let locale = self.active_locale();
         if index >= self.breaks_mut(kind).len() {
-            return self.fail_validation(format!("Exercise index {index} out of bounds"));
+            return self.fail_validation(format_exercise_index_oob(index, locale));
         }
         Ok(&mut self.breaks_mut(kind)[index])
     }
 
     fn add_window_pattern(&mut self, list: WindowList, pattern: &str) -> Result<(), String> {
         let trimmed = pattern.trim();
+        let locale = self.active_locale();
         if trimmed.is_empty() {
-            let label = list.label();
-            return self.fail_validation(format!("{label} window pattern must not be empty"));
+            let label = list.label(locale);
+            return self.fail_validation(format_window_pattern_empty(label, locale));
         }
         self.window_list_mut(list).push(trimmed.to_owned());
         self.validation_error = None;
@@ -289,10 +330,11 @@ impl SettingsViewModel {
     }
 
     fn remove_window_pattern(&mut self, list: WindowList, index: usize) -> Result<(), String> {
+        let locale = self.active_locale();
         let entries = self.window_list_mut(list);
         if index >= entries.len() {
-            let label = list.label();
-            return self.fail_validation(format!("{label} window index {index} out of bounds"));
+            let label = list.label(locale);
+            return self.fail_validation(format_window_index_oob(label, index, locale));
         }
         entries.remove(index);
         self.validation_error = None;
@@ -328,10 +370,11 @@ enum WindowList {
 }
 
 impl WindowList {
-    const fn label(self) -> &'static str {
+    const fn label(self, locale: Locale) -> &'static str {
+        let copy = ui_text(locale);
         match self {
-            Self::Skip => "Skip-break",
-            Self::Take => "Take-break",
+            Self::Skip => copy.window_list_skip,
+            Self::Take => copy.window_list_take,
         }
     }
 }
@@ -399,68 +442,62 @@ pub struct SettingsStatusConfig {
     pub on_poll_status: Option<StatusPollCallback>,
 }
 
-// Screen readers can re-announce a changed label, so it carries whole minutes, not seconds.
-fn format_spoken_duration(total_secs: u64) -> String {
-    if total_secs < 60 {
-        return "less than a minute".to_owned();
-    }
-    let mins = total_secs.div_ceil(60);
-    let min_unit = if mins == 1 { "minute" } else { "minutes" };
-    format!("{mins} {min_unit}")
-}
-
-fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<CountdownPillState> {
+fn format_countdown_pill(snapshot: &StatusSnapshot, locale: Locale) -> Option<CountdownPillState> {
+    let copy = ui_text(locale);
     match snapshot.state {
         SchedulerState::Quit => None,
         _ if !snapshot.enabled => Some(CountdownPillState {
             tone: CountdownTone::Disabled,
-            label: "Disabled".to_owned(),
+            label: copy.countdown_disabled.to_owned(),
             time: None,
-            accessible_label: "Break timer disabled".to_owned(),
+            accessible_label: copy.countdown_disabled_a11y.to_owned(),
         }),
         SchedulerState::Stopped => Some(CountdownPillState {
             tone: CountdownTone::Disabled,
-            label: "Disabled".to_owned(),
+            label: copy.countdown_disabled.to_owned(),
             time: None,
-            accessible_label: "Break timer disabled".to_owned(),
+            accessible_label: copy.countdown_disabled_a11y.to_owned(),
         }),
         SchedulerState::Waiting => {
-            let (kind, spoken_kind) = match snapshot.next_break_type {
-                Some(BreakType::Short) => ("Short", "Next short break"),
-                Some(BreakType::Long) => ("Long", "Next long break"),
-                None => ("Next", "Next break"),
+            let kind = match snapshot.next_break_type {
+                Some(BreakType::Short) => copy.countdown_short,
+                Some(BreakType::Long) => copy.countdown_long,
+                None => copy.countdown_next,
             };
-            let spoken_time = format_spoken_duration(snapshot.seconds_until_next_break);
             Some(CountdownPillState {
                 tone: CountdownTone::Active,
                 label: kind.to_owned(),
                 time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
-                accessible_label: format!("{spoken_kind} in {spoken_time}"),
+                accessible_label: format_waiting_a11y(
+                    snapshot.next_break_type,
+                    snapshot.seconds_until_next_break,
+                    locale,
+                ),
             })
         }
         SchedulerState::PreBreak => Some(CountdownPillState {
             tone: CountdownTone::Warning,
-            label: "Starting".to_owned(),
+            label: copy.countdown_starting.to_owned(),
             time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
-            accessible_label: "Break starting soon".to_owned(),
+            accessible_label: copy.countdown_starting_a11y.to_owned(),
         }),
         SchedulerState::Break => Some(CountdownPillState {
             tone: CountdownTone::Break,
-            label: "Break active".to_owned(),
+            label: copy.countdown_break_active.to_owned(),
             time: None,
-            accessible_label: "Break active".to_owned(),
+            accessible_label: copy.countdown_break_active_a11y.to_owned(),
         }),
         SchedulerState::Resting => Some(CountdownPillState {
             tone: CountdownTone::Paused,
-            label: "Paused (idle)".to_owned(),
+            label: copy.countdown_paused.to_owned(),
             time: None,
-            accessible_label: "Break timer paused while idle".to_owned(),
+            accessible_label: copy.countdown_paused_a11y.to_owned(),
         }),
         SchedulerState::Start => Some(CountdownPillState {
             tone: CountdownTone::Disabled,
-            label: "Initializing".to_owned(),
+            label: copy.countdown_initializing.to_owned(),
             time: None,
-            accessible_label: "Break timer initializing".to_owned(),
+            accessible_label: copy.countdown_initializing_a11y.to_owned(),
         }),
     }
 }
@@ -479,8 +516,12 @@ struct SettingsLaunch {
 
 static SETTINGS_LAUNCH: Mutex<Option<SettingsLaunch>> = Mutex::new(None);
 
-fn load_settings_vm(config_path: PathBuf, system_autostart: Option<bool>) -> SettingsViewModel {
-    let mut vm = SettingsViewModel::load(config_path);
+fn load_settings_vm(
+    config_path: PathBuf,
+    system_autostart: Option<bool>,
+    system_locale: Locale,
+) -> SettingsViewModel {
+    let mut vm = SettingsViewModel::load_with_locale(config_path, system_locale);
     vm.system_autostart = system_autostart;
     if let Some(actual) = system_autostart {
         vm.config.autostart = actual;
@@ -489,8 +530,8 @@ fn load_settings_vm(config_path: PathBuf, system_autostart: Option<bool>) -> Set
 }
 
 fn number_field_row(
-    label: &'static str,
-    unit: &'static str,
+    label: impl IntoReactive<SharedString>,
+    unit: impl IntoReactive<SharedString>,
     read: impl Fn() -> u64 + 'static,
     write: impl Fn(u64) + 'static,
 ) -> impl IntoElement {
@@ -498,8 +539,8 @@ fn number_field_row(
 }
 
 fn number_field_row_with_disabled(
-    label: &'static str,
-    unit: &'static str,
+    label: impl IntoReactive<SharedString>,
+    unit: impl IntoReactive<SharedString>,
     read: impl Fn() -> u64 + 'static,
     disabled: impl Fn() -> bool + Copy + 'static,
     write: impl Fn(u64) + 'static,
@@ -575,6 +616,7 @@ fn try_update_and_autosave(
 
 fn timing_section(
     vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     on_autostart_change: Option<AutostartHook>,
     animate: bool,
@@ -600,48 +642,60 @@ fn timing_section(
                     0,
                     animate,
                     section_header(
-                        "Break Schedule",
-                        "Configure short and long break cadence and durations.",
+                        move || ui_text(active_locale.get()).timing_schedule_title,
+                        move || ui_text(active_locale.get()).timing_schedule_caption,
                     ),
                 ))
                 .child(stagger_item(
                     1,
                     animate,
                     number_field_row(
-                        "Short break interval",
-                        "secs",
+                        move || ui_text(active_locale.get()).short_break_interval,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.short_break_interval_secs),
-                        move |v| update_and_autosave(vm, &s1, |m| m.config.short_break_interval_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s1, |m| {
+                                m.config.short_break_interval_secs = v;
+                            });
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     2,
                     animate,
                     number_field_row(
-                        "Short break duration",
-                        "secs",
+                        move || ui_text(active_locale.get()).short_break_duration,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.short_break_duration_secs),
-                        move |v| update_and_autosave(vm, &s2, |m| m.config.short_break_duration_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s2, |m| {
+                                m.config.short_break_duration_secs = v;
+                            });
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     3,
                     animate,
                     number_field_row(
-                        "Long break interval",
-                        "secs",
+                        move || ui_text(active_locale.get()).long_break_interval,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.long_break_interval_secs),
-                        move |v| update_and_autosave(vm, &s3, |m| m.config.long_break_interval_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s3, |m| m.config.long_break_interval_secs = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     4,
                     animate,
                     number_field_row(
-                        "Long break duration",
-                        "secs",
+                        move || ui_text(active_locale.get()).long_break_duration,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.long_break_duration_secs),
-                        move |v| update_and_autosave(vm, &s4, |m| m.config.long_break_duration_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s4, |m| m.config.long_break_duration_secs = v);
+                        },
                     ),
                 )),
         )
@@ -653,26 +707,28 @@ fn timing_section(
                     6,
                     animate,
                     section_header(
-                        "Transitions & Controls",
-                        "Fine-tune warnings, fade-in speed, postpone length, session persistence, and OS startup.",
+                        move || ui_text(active_locale.get()).timing_controls_title,
+                        move || ui_text(active_locale.get()).timing_controls_caption,
                     ),
                 ))
                 .child(stagger_item(
                     7,
                     animate,
                     number_field_row(
-                        "Pre-break warning",
-                        "secs",
+                        move || ui_text(active_locale.get()).pre_break_warning,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.pre_break_warning_secs),
-                        move |v| update_and_autosave(vm, &s5, |m| m.config.pre_break_warning_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s5, |m| m.config.pre_break_warning_secs = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     8,
                     animate,
                     number_field_row(
-                        "Fade-in duration",
-                        "ms",
+                        move || ui_text(active_locale.get()).fade_in_duration,
+                        move || ui_text(active_locale.get()).unit_ms,
                         move || vm.with(|m| m.config.fade_in_ms),
                         move |v| update_and_autosave(vm, &s6, |m| m.config.fade_in_ms = v),
                     ),
@@ -681,27 +737,31 @@ fn timing_section(
                     9,
                     animate,
                     number_field_row(
-                        "Shortcut unlock delay",
-                        "secs",
+                        move || ui_text(active_locale.get()).shortcut_unlock_delay,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.shortcut_disable_secs),
-                        move |v| update_and_autosave(vm, &s7, |m| m.config.shortcut_disable_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s7, |m| m.config.shortcut_disable_secs = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     10,
                     animate,
                     number_field_row(
-                        "Postpone duration",
-                        "secs",
+                        move || ui_text(active_locale.get()).postpone_duration,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.postpone_duration_secs),
-                        move |v| update_and_autosave(vm, &s8, |m| m.config.postpone_duration_secs = v),
+                        move |v| {
+                            update_and_autosave(vm, &s8, |m| m.config.postpone_duration_secs = v);
+                        },
                     ),
                 ))
                 .child(stagger_item(
                     11,
                     animate,
                     cozy_switch(
-                        "Randomize exercise order",
+                        move || ui_text(active_locale.get()).randomize_exercise_order,
                         move || vm.with(|m| m.config.random_order),
                         move |v| update_and_autosave(vm, &s9, |m| m.config.random_order = v),
                     ),
@@ -710,7 +770,7 @@ fn timing_section(
                     12,
                     animate,
                     cozy_switch(
-                        "Persist session across restarts",
+                        move || ui_text(active_locale.get()).persist_session,
                         move || vm.with(|m| m.config.persist_state),
                         move |v| update_and_autosave(vm, &s10, |m| m.config.persist_state = v),
                     ),
@@ -719,7 +779,7 @@ fn timing_section(
                     13,
                     animate,
                     cozy_switch(
-                        "Launch at login (startup)",
+                        move || ui_text(active_locale.get()).launch_at_login,
                         move || vm.with(|m| m.config.autostart),
                         move |v| {
                             if try_update_and_autosave(vm, &s11, |m| m.config.autostart = v)
@@ -735,6 +795,7 @@ fn timing_section(
 
 fn policies_section(
     vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     animate: bool,
 ) -> impl IntoElement {
@@ -760,15 +821,15 @@ fn policies_section(
                     0,
                     animate,
                     section_header(
-                        "Break Enforcement",
-                        "Control whether breaks can be skipped, postponed, or strictly enforced.",
+                        move || ui_text(active_locale.get()).policies_enforcement_title,
+                        move || ui_text(active_locale.get()).policies_enforcement_caption,
                     ),
                 ))
                 .child(stagger_item(
                     1,
                     animate,
                     cozy_switch(
-                        "Strict break (hide Skip)",
+                        move || ui_text(active_locale.get()).strict_break,
                         move || vm.with(|m| m.config.strict_break),
                         move |v| update_and_autosave(vm, &s1, |m| m.set_strict_break(v)),
                     ),
@@ -777,7 +838,7 @@ fn policies_section(
                     2,
                     animate,
                     cozy_switch(
-                        "Allow postpone (Space)",
+                        move || ui_text(active_locale.get()).allow_postpone,
                         move || vm.with(|m| m.config.allow_postpone),
                         move |v| update_and_autosave(vm, &s2, |m| m.config.allow_postpone = v),
                     ),
@@ -786,7 +847,7 @@ fn policies_section(
                     3,
                     animate,
                     cozy_switch_with_disabled(
-                        "Limit consecutive skips",
+                        move || ui_text(active_locale.get()).limit_consecutive_skips,
                         move || {
                             vm.with(|m| {
                                 !m.config.strict_break && m.config.limit_consecutive_skips.enabled
@@ -800,8 +861,8 @@ fn policies_section(
                     4,
                     animate,
                     number_field_row_with_disabled(
-                        "Max consecutive skips",
-                        "skips",
+                        move || ui_text(active_locale.get()).max_consecutive_skips,
+                        move || ui_text(active_locale.get()).unit_skips,
                         move || u64::from(vm.with(|m| m.config.limit_consecutive_skips.max_skips)),
                         move || {
                             vm.with(|m| {
@@ -825,15 +886,15 @@ fn policies_section(
                     6,
                     animate,
                     section_header(
-                        "Smart Pause & Do Not Disturb",
-                        "Automatically pause timers while idle, gaming, on battery, or in fullscreen apps.",
+                        move || ui_text(active_locale.get()).policies_smart_dnd_title,
+                        move || ui_text(active_locale.get()).policies_smart_dnd_caption,
                     ),
                 ))
                 .child(stagger_item(
                     7,
                     animate,
                     cozy_switch(
-                        "Smart Pause on idle",
+                        move || ui_text(active_locale.get()).smart_pause_on_idle,
                         move || vm.with(|m| m.config.smart_pause.enabled),
                         move |v| update_and_autosave(vm, &s5, |m| m.config.smart_pause.enabled = v),
                     ),
@@ -842,8 +903,8 @@ fn policies_section(
                     8,
                     animate,
                     number_field_row(
-                        "Idle threshold",
-                        "secs",
+                        move || ui_text(active_locale.get()).idle_threshold,
+                        move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.smart_pause.idle_threshold_secs),
                         move |v| {
                             update_and_autosave(vm, &s6, |m| {
@@ -856,7 +917,7 @@ fn policies_section(
                     9,
                     animate,
                     cozy_switch(
-                        "Do Not Disturb in fullscreen",
+                        move || ui_text(active_locale.get()).dnd_fullscreen,
                         move || vm.with(|m| m.config.do_not_disturb.enabled),
                         move |v| {
                             update_and_autosave(vm, &s7, |m| m.config.do_not_disturb.enabled = v);
@@ -867,7 +928,7 @@ fn policies_section(
                     10,
                     animate,
                     cozy_switch(
-                        "Pause while gaming (auto-detect)",
+                        move || ui_text(active_locale.get()).pause_while_gaming,
                         move || vm.with(|m| m.config.do_not_disturb.while_gaming),
                         move |v| {
                             update_and_autosave(vm, &s8, |m| {
@@ -880,7 +941,7 @@ fn policies_section(
                     11,
                     animate,
                     cozy_switch(
-                        "Pause while on battery",
+                        move || ui_text(active_locale.get()).pause_while_on_battery,
                         move || vm.with(|m| m.config.do_not_disturb.while_on_battery),
                         move |v| {
                             update_and_autosave(vm, &s9, |m| {
@@ -898,15 +959,15 @@ fn policies_section(
                     13,
                     animate,
                     section_header(
-                        "Audible Chime",
-                        "Play a gentle synthesized chime before or after breaks.",
+                        move || ui_text(active_locale.get()).policies_chime_title,
+                        move || ui_text(active_locale.get()).policies_chime_caption,
                     ),
                 ))
                 .child(stagger_item(
                     14,
                     animate,
                     cozy_switch(
-                        "Pre-break chime",
+                        move || ui_text(active_locale.get()).pre_break_chime,
                         move || vm.with(|m| m.config.audible_alert.pre_break),
                         move |v| {
                             update_and_autosave(vm, &s10, |m| m.config.audible_alert.pre_break = v);
@@ -917,7 +978,7 @@ fn policies_section(
                     15,
                     animate,
                     cozy_switch(
-                        "Post-break chime",
+                        move || ui_text(active_locale.get()).post_break_chime,
                         move || vm.with(|m| m.config.audible_alert.post_break),
                         move |v| {
                             update_and_autosave(vm, &s11, |m| {
@@ -930,8 +991,8 @@ fn policies_section(
                     16,
                     animate,
                     number_field_row(
-                        "Chime volume",
-                        "0–100",
+                        move || ui_text(active_locale.get()).chime_volume,
+                        move || ui_text(active_locale.get()).unit_volume_range,
                         move || u64::from(vm.with(|m| m.config.audible_alert.volume)),
                         move |v| {
                             update_and_autosave(vm, &s12, |m| {
@@ -946,24 +1007,15 @@ fn policies_section(
 
 fn exercise_tier_section(
     vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     kind: BreakType,
     base_index: usize,
     animate: bool,
 ) -> impl IntoElement {
-    let (title, caption, placeholder, key_prefix) = match kind {
-        BreakType::Short => (
-            "Short Break Exercises",
-            "Quick 15-second prompts cycled during work intervals.",
-            "Add a short exercise...",
-            "short",
-        ),
-        BreakType::Long => (
-            "Long Break Exercises",
-            "Restorative prompts shown after every four short breaks.",
-            "Add a long exercise...",
-            "long",
-        ),
+    let key_prefix = match kind {
+        BreakType::Short => "short",
+        BreakType::Long => "long",
     };
     let initial_remaining = Rc::new(Cell::new(if animate {
         vm.with_untracked(|m| match kind {
@@ -991,7 +1043,22 @@ fn exercise_tier_section(
         .child(stagger_item(
             base_index,
             animate,
-            section_header(title, caption),
+            section_header(
+                move || {
+                    let copy = ui_text(active_locale.get());
+                    match kind {
+                        BreakType::Short => copy.short_exercises_title,
+                        BreakType::Long => copy.long_exercises_title,
+                    }
+                },
+                move || {
+                    let copy = ui_text(active_locale.get());
+                    match kind {
+                        BreakType::Short => copy.short_exercises_caption,
+                        BreakType::Long => copy.long_exercises_caption,
+                    }
+                },
+            ),
         ))
         .child(stagger_item(
             base_index + 1,
@@ -1001,26 +1068,35 @@ fn exercise_tier_section(
                 .gap_2()
                 .items_center()
                 .child(view().flex_1().child(cozy_input(
-                    placeholder,
+                    move || {
+                        let copy = ui_text(active_locale.get());
+                        match kind {
+                            BreakType::Short => copy.short_exercises_placeholder.to_owned(),
+                            BreakType::Long => copy.long_exercises_placeholder.to_owned(),
+                        }
+                    },
                     move || vm.with(|m| m.draft_exercise(kind).to_owned()),
                     move |s: &str| vm.update(|m| *m.draft_exercise_mut(kind) = s.to_owned()),
                 )))
-                .child(secondary_button("Add", move || {
-                    let mut saved = false;
-                    vm.update(|m| {
-                        let name = std::mem::take(m.draft_exercise_mut(kind));
-                        if m.add_exercise(kind, &name).is_ok() {
-                            if m.autosave().is_ok() {
-                                saved = true;
+                .child(secondary_button(
+                    move || ui_text(active_locale.get()).add_button,
+                    move || {
+                        let mut saved = false;
+                        vm.update(|m| {
+                            let name = std::mem::take(m.draft_exercise_mut(kind));
+                            if m.add_exercise(kind, &name).is_ok() {
+                                if m.autosave().is_ok() {
+                                    saved = true;
+                                }
+                            } else {
+                                *m.draft_exercise_mut(kind) = name;
                             }
-                        } else {
-                            *m.draft_exercise_mut(kind) = name;
+                        });
+                        if saved {
+                            crate::store_outcome(&add_sink, SettingsOutcome::Saved);
                         }
-                    });
-                    if saved {
-                        crate::store_outcome(&add_sink, SettingsOutcome::Saved);
-                    }
-                })),
+                    },
+                )),
         ))
         .child(view().gap_2().child(each(
             items,
@@ -1045,22 +1121,29 @@ fn exercise_tier_section(
                         .px_3()
                         .py_2()
                         .child(
-                            text(move || item.get())
-                                .text_sm()
-                                .text_color(colors::TEXT_PRIMARY),
+                            text(move || {
+                                let raw = item.get();
+                                localize_exercise_name(&raw, active_locale.get()).to_owned()
+                            })
+                            .text_sm()
+                            .text_color(colors::TEXT_PRIMARY),
                         )
-                        .child(destructive_button("Remove", move || {
-                            let idx = row_idx.get_untracked();
-                            let mut saved = false;
-                            vm.update(|m| {
-                                if m.remove_exercise(kind, idx).is_ok() && m.autosave().is_ok() {
-                                    saved = true;
+                        .child(destructive_button(
+                            move || ui_text(active_locale.get()).remove_button,
+                            move || {
+                                let idx = row_idx.get_untracked();
+                                let mut saved = false;
+                                vm.update(|m| {
+                                    if m.remove_exercise(kind, idx).is_ok() && m.autosave().is_ok()
+                                    {
+                                        saved = true;
+                                    }
+                                });
+                                if saved {
+                                    crate::store_outcome(&remove_sink, SettingsOutcome::Saved);
                                 }
-                            });
-                            if saved {
-                                crate::store_outcome(&remove_sink, SettingsOutcome::Saved);
-                            }
-                        })),
+                            },
+                        )),
                 )
             },
         )))
@@ -1068,6 +1151,7 @@ fn exercise_tier_section(
 
 fn exercises_section(
     vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     animate: bool,
 ) -> impl IntoElement {
@@ -1077,6 +1161,7 @@ fn exercises_section(
         .gap_5()
         .child(exercise_tier_section(
             vm,
+            active_locale,
             Arc::clone(&outcome_sink),
             BreakType::Short,
             0,
@@ -1085,6 +1170,7 @@ fn exercises_section(
         .child(stagger_item(divider_idx, animate, section_divider()))
         .child(exercise_tier_section(
             vm,
+            active_locale,
             outcome_sink,
             BreakType::Long,
             divider_idx + 1,
@@ -1102,7 +1188,7 @@ struct UpdateUiState {
     available: Signal<Option<UpdateInfo>>,
     busy: Signal<bool>,
     applying: Signal<bool>,
-    status_text: Signal<Option<String>>,
+    status_msg: Signal<Option<UpdateStatusMessage>>,
     is_error: Signal<bool>,
     strategy: UpdateStrategy,
 }
@@ -1114,9 +1200,8 @@ fn poll_update_worker(
 ) {
     match rx.try_recv() {
         Ok(UpdateWorkerResult::Check(Ok(Some(info)))) => {
-            state.status_text.set(Some(format!(
-                "Version v{} is available.",
-                info.latest_version
+            state.status_msg.set(Some(UpdateStatusMessage::Available(
+                info.latest_version.clone(),
             )));
             state.is_error.set(false);
             state.available.set(Some(info));
@@ -1125,9 +1210,8 @@ fn poll_update_worker(
         }
         Ok(UpdateWorkerResult::Check(Ok(None))) => {
             state.available.set(None);
-            state.status_text.set(Some(format!(
-                "You are up to date (v{}).",
-                env!("CARGO_PKG_VERSION")
+            state.status_msg.set(Some(UpdateStatusMessage::UpToDate(
+                env!("CARGO_PKG_VERSION").to_owned(),
             )));
             state.is_error.set(false);
             state.busy.set(false);
@@ -1135,16 +1219,16 @@ fn poll_update_worker(
         }
         Ok(UpdateWorkerResult::Check(Err(err))) => {
             state
-                .status_text
-                .set(Some(format!("Update check failed: {err}")));
+                .status_msg
+                .set(Some(UpdateStatusMessage::CheckFailed(err)));
             state.is_error.set(true);
             state.busy.set(false);
             state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::RestartingDaemon))) => {
-            state.status_text.set(Some(
-                "Update verified. Restarting Safe Your Eyes...".to_owned(),
-            ));
+            state
+                .status_msg
+                .set(Some(UpdateStatusMessage::RestartingDaemon));
             state.is_error.set(false);
             state.available.set(None);
             state.busy.set(false);
@@ -1154,19 +1238,18 @@ fn poll_update_worker(
             }
         }
         Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::UpdatedStandalone))) => {
-            state.status_text.set(Some(
-                "Update installed and verified. Restart Safe Your Eyes to use the new version."
-                    .to_owned(),
-            ));
+            state
+                .status_msg
+                .set(Some(UpdateStatusMessage::UpdatedStandalone));
             state.is_error.set(false);
             state.available.set(None);
             state.busy.set(false);
             state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Err(err))) => {
-            state.status_text.set(Some(format!(
-                "Self-update failed: {err}. Use Download Page instead."
-            )));
+            state
+                .status_msg
+                .set(Some(UpdateStatusMessage::SelfUpdateFailed(err)));
             state.is_error.set(true);
             state.busy.set(false);
             state.applying.set(false);
@@ -1178,8 +1261,8 @@ fn poll_update_worker(
         }
         Err(mpsc::TryRecvError::Disconnected) => {
             state
-                .status_text
-                .set(Some("Update task stopped unexpectedly.".to_owned()));
+                .status_msg
+                .set(Some(UpdateStatusMessage::WorkerDisconnected));
             state.is_error.set(true);
             state.busy.set(false);
             state.applying.set(false);
@@ -1204,10 +1287,11 @@ fn start_apply_update(
     update_ui.busy.set(true);
     update_ui.applying.set(true);
     update_ui.is_error.set(false);
-    update_ui.status_text.set(Some(format!(
-        "Downloading and verifying v{}...",
-        info.latest_version
-    )));
+    update_ui
+        .status_msg
+        .set(Some(UpdateStatusMessage::Downloading(
+            info.latest_version.clone(),
+        )));
     let (tx, rx) = mpsc::channel();
     let version = info.latest_version;
     let _ = std::thread::Builder::new()
@@ -1251,28 +1335,31 @@ fn trigger_update_badge_action(
         match open_cb(&info.download_url) {
             Ok(()) => {
                 let message = match update_ui.strategy {
-                    UpdateStrategy::HomebrewCask => {
-                        format!("Opened download page. Or run: {HOMEBREW_UPGRADE_COMMAND}")
-                    }
+                    UpdateStrategy::HomebrewCask => UpdateStatusMessage::OpenedDownloadPageHomebrew,
                     UpdateStrategy::SelfUpdate { .. } | UpdateStrategy::ManualDownload => {
-                        "Opened download page.".to_owned()
+                        UpdateStatusMessage::OpenedDownloadPage
                     }
                 };
                 update_ui.is_error.set(false);
-                update_ui.status_text.set(Some(message));
+                update_ui.status_msg.set(Some(message));
             }
             Err(err) => {
                 update_ui.is_error.set(true);
                 update_ui
-                    .status_text
-                    .set(Some(format!("Failed to open download page: {err}")));
+                    .status_msg
+                    .set(Some(UpdateStatusMessage::OpenDownloadFailed(err)));
             }
         }
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "About section wires update callbacks, active locale, and animation state"
+)]
 fn about_section(
     vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
     update_ui: UpdateUiState,
     on_check_now: Option<CheckUpdatesCallback>,
@@ -1295,48 +1382,51 @@ fn about_section(
                     0,
                     animate,
                     section_header(
-                        "Updates",
-                        "Checks GitHub Releases for newer versions and verifies SHA-256 before installing.",
+                        move || ui_text(active_locale.get()).updates_title,
+                        move || ui_text(active_locale.get()).updates_caption,
                     ),
                 ))
                 .child(stagger_item(
                     1,
                     animate,
                     text(move || {
-                        if let Some(info) = update_ui.available.get() {
-                            format!(
-                                "Current: v{}  ->  Latest: v{}",
-                                env!("CARGO_PKG_VERSION"),
-                                info.latest_version
-                            )
-                        } else {
-                            format!("Current version: v{}", env!("CARGO_PKG_VERSION"))
-                        }
+                        let latest = update_ui.available.get().map(|info| info.latest_version);
+                        format_version_summary(
+                            env!("CARGO_PKG_VERSION"),
+                            latest.as_deref(),
+                            active_locale.get(),
+                        )
                     })
                     .text_sm()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(colors::TEXT_PRIMARY),
                 ))
                 .child(when(
-                    move || update_ui.status_text.get().is_some() && !update_ui.is_error.get(),
+                    move || update_ui.status_msg.get().is_some() && !update_ui.is_error.get(),
                     move || {
                         status_banner(false, move || {
-                            update_ui.status_text.get().unwrap_or_default()
+                            update_ui
+                                .status_msg
+                                .get()
+                                .map_or_else(String::new, |msg| msg.format(active_locale.get()))
                         })
                     },
                 ))
                 .child(when(
-                    move || update_ui.status_text.get().is_some() && update_ui.is_error.get(),
+                    move || update_ui.status_msg.get().is_some() && update_ui.is_error.get(),
                     move || {
                         status_banner(true, move || {
-                            update_ui.status_text.get().unwrap_or_default()
+                            update_ui
+                                .status_msg
+                                .get()
+                                .map_or_else(String::new, |msg| msg.format(active_locale.get()))
                         })
                     },
                 ))
                 .child(when(
                     move || is_homebrew && update_ui.available.get().is_some(),
-                    || {
-                        text(format!("Homebrew upgrade: {HOMEBREW_UPGRADE_COMMAND}"))
+                    move || {
+                        text(move || format_homebrew_upgrade_hint(active_locale.get()))
                             .text_xs()
                             .text_color(colors::TEXT_SECONDARY)
                     },
@@ -1345,9 +1435,13 @@ fn about_section(
                     2,
                     animate,
                     cozy_switch(
-                        "Check for updates automatically",
+                        move || ui_text(active_locale.get()).check_updates_auto,
                         move || vm.with(|m| m.config.check_for_updates),
-                        move |v| update_and_autosave(vm, &outcome_sink, |m| m.config.check_for_updates = v),
+                        move |v| {
+                            update_and_autosave(vm, &outcome_sink, |m| {
+                                m.config.check_for_updates = v;
+                            });
+                        },
                     ),
                 ))
                 .child(stagger_item(
@@ -1363,19 +1457,17 @@ fn about_section(
                                 let apply = apply_cb.clone();
                                 primary_button_with_disabled(
                                     move || {
+                                        let copy = ui_text(active_locale.get());
                                         if update_ui.applying.get() {
-                                            "Updating..."
+                                            copy.updating_button
                                         } else {
-                                            "Update & Restart"
+                                            copy.update_and_restart
                                         }
                                     },
                                     || false,
                                     move || {
-                                        let _ = start_apply_update(
-                                            update_ui,
-                                            &apply,
-                                            quit_on_restart,
-                                        );
+                                        let _ =
+                                            start_apply_update(update_ui, &apply, quit_on_restart);
                                     },
                                 )
                             },
@@ -1383,20 +1475,27 @@ fn about_section(
                         .child(when(
                             move || update_ui.available.get().is_some(),
                             move || {
-                                let label = if can_self_update {
-                                    "Download Page"
-                                } else {
-                                    "Download Update"
-                                };
-                                external_link_button(label, DOWNLOAD_PAGE_URL, !can_self_update)
+                                external_link_button(
+                                    move || {
+                                        let copy = ui_text(active_locale.get());
+                                        if can_self_update {
+                                            copy.download_page
+                                        } else {
+                                            copy.download_update
+                                        }
+                                    },
+                                    DOWNLOAD_PAGE_URL,
+                                    !can_self_update,
+                                )
                             },
                         ))
                         .child(secondary_button(
                             move || {
+                                let copy = ui_text(active_locale.get());
                                 if update_ui.busy.get() && !update_ui.applying.get() {
-                                    "Checking..."
+                                    copy.checking_button
                                 } else {
-                                    "Check for Updates"
+                                    copy.check_for_updates
                                 }
                             },
                             move || {
@@ -1409,8 +1508,8 @@ fn about_section(
                                 update_ui.busy.set(true);
                                 update_ui.is_error.set(false);
                                 update_ui
-                                    .status_text
-                                    .set(Some("Checking for updates...".to_owned()));
+                                    .status_msg
+                                    .set(Some(UpdateStatusMessage::Checking));
                                 let (tx, rx) = mpsc::channel();
                                 let _ = std::thread::Builder::new()
                                     .name("sye-settings-check-update".to_owned())
@@ -1440,24 +1539,32 @@ fn about_section(
                             5,
                             animate,
                             section_header(
-                                "Support Safe Your Eyes",
-                                "Built in Rust with Native Shell (nsh) and the Cozy Design System for minimal footprint.",
+                                move || ui_text(active_locale.get()).support_title,
+                                move || ui_text(active_locale.get()).support_caption,
                             ),
                         ))
                         .child(stagger_item(
                             6,
                             animate,
-                            text(format!("Support link: {SUPPORT_URL}"))
-                                .text_xs()
-                                .text_color(colors::TEXT_SECONDARY),
+                            text(move || {
+                                format_support_link_caption(SUPPORT_URL, active_locale.get())
+                            })
+                            .text_xs()
+                            .text_color(colors::TEXT_SECONDARY),
                         ))
                         .child(stagger_item(
                             7,
                             animate,
-                            view().flex_row().child(support_link("Buy Me a Coffee")),
+                            view().flex_row().child(support_link(move || {
+                                ui_text(active_locale.get()).support_button
+                            })),
                         )),
                 )
-                .child(stagger_item(8, animate, support_qr_card())),
+                .child(stagger_item(
+                    8,
+                    animate,
+                    support_qr_card(move || ui_text(active_locale.get()).support_qr_caption),
+                )),
         )
 }
 
@@ -1613,6 +1720,7 @@ pub(crate) fn build_settings_view(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn build_settings_view_with_hooks(
     initial_vm: SettingsViewModel,
     outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
@@ -1621,6 +1729,32 @@ pub(crate) fn build_settings_view_with_hooks(
     theme_hooks: ThemeTransitionHooks,
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
+) -> impl IntoElement {
+    build_settings_view_inner(
+        initial_vm,
+        outcome_sink,
+        quit_on_finish,
+        on_autostart_change,
+        theme_hooks,
+        update_config,
+        status_config,
+        None,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Internal builder wiring all Settings view hooks and optional window locale signal"
+)]
+fn build_settings_view_inner(
+    initial_vm: SettingsViewModel,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    quit_on_finish: bool,
+    on_autostart_change: Option<AutostartHook>,
+    theme_hooks: ThemeTransitionHooks,
+    update_config: SettingsUpdateConfig,
+    status_config: SettingsStatusConfig,
+    window_locale: Option<Signal<Locale>>,
 ) -> impl IntoElement {
     if quit_on_finish {
         let main_win = current_window();
@@ -1642,6 +1776,16 @@ pub(crate) fn build_settings_view_with_hooks(
     let reveal_epoch = signal(0_u32);
     let native_reveal = NativeRevealState::default();
     let queued_theme: QueuedTheme = Rc::new(Cell::new((0, None)));
+
+    let active_locale = computed(move || vm.with(SettingsViewModel::active_locale));
+    if let Some(win_locale) = window_locale {
+        effect(move || {
+            let next = active_locale.get();
+            if win_locale.get_untracked() != next {
+                win_locale.set(next);
+            }
+        });
+    }
 
     let poll_immediately = status_config.initial_status.is_none();
     let live_status = signal(status_config.initial_status);
@@ -1683,14 +1827,16 @@ pub(crate) fn build_settings_view_with_hooks(
             }
         });
     }
-    let countdown_pill =
-        computed(move || live_status.with(|snap| snap.as_ref().and_then(format_countdown_pill)));
+    let countdown_pill = computed(move || {
+        let locale = active_locale.get();
+        live_status.with(|snap| snap.as_ref().and_then(|s| format_countdown_pill(s, locale)))
+    });
 
     let update_ui = UpdateUiState {
         available: signal(update_config.initial_update),
         busy: signal(false),
         applying: signal(false),
-        status_text: signal(None),
+        status_msg: signal(None),
         is_error: signal(false),
         strategy: update_config
             .strategy
@@ -1751,6 +1897,7 @@ pub(crate) fn build_settings_view_with_hooks(
         }
     });
 
+    let lang_sink = Arc::clone(&outcome_sink);
     let theme_sink = Arc::clone(&outcome_sink);
     let timing_sink = Arc::clone(&outcome_sink);
     let policies_sink = Arc::clone(&outcome_sink);
@@ -1771,7 +1918,7 @@ pub(crate) fn build_settings_view_with_hooks(
         .child(sidebar_nav_indicator(tab_index));
     for tab in SettingsTab::ALL {
         sidebar_nav = sidebar_nav.child(sidebar_nav_item(
-            tab.label(),
+            move || tab.label(active_locale.get()),
             move || active_tab.get() == tab,
             move || {
                 vm.update(|m| {
@@ -1823,7 +1970,7 @@ pub(crate) fn build_settings_view_with_hooks(
                                         .text_color(colors::SIDEBAR_TEXT),
                                 )
                                 .child(
-                                    text("Cozy Eye Care")
+                                    text(move || ui_text(active_locale.get()).sidebar_subtitle)
                                         .text_xs()
                                         .text_color(colors::SIDEBAR_TEXT_MUTED),
                                 ),
@@ -1874,38 +2021,58 @@ pub(crate) fn build_settings_view_with_hooks(
     let kpi_row = view()
         .flex_row()
         .gap_3()
-        .child(pastel_kpi_card(KpiTone::Sage, "Short Break", move || {
-            vm.with(|m| {
-                format!(
-                    "{}m / {}s",
-                    m.config.short_break_interval_secs / 60,
-                    m.config.short_break_duration_secs
-                )
-            })
-        }))
-        .child(pastel_kpi_card(KpiTone::Peach, "Long Break", move || {
-            vm.with(|m| {
-                format!(
-                    "{}m / {}s",
-                    m.config.long_break_interval_secs / 60,
-                    m.config.long_break_duration_secs
-                )
-            })
-        }))
-        .child(pastel_kpi_card(KpiTone::Butter, "Exercises", move || {
-            vm.with(|m| (m.config.short_breaks.len() + m.config.long_breaks.len()).to_string())
-        }))
-        .child(pastel_kpi_card(KpiTone::Mist, "Skip Limit", move || {
-            vm.with(|m| {
-                if m.config.strict_break {
-                    "Strict".to_owned()
-                } else if m.config.limit_consecutive_skips.enabled {
-                    format!("{} max", m.config.limit_consecutive_skips.max_skips)
-                } else {
-                    "Off".to_owned()
-                }
-            })
-        }));
+        .child(pastel_kpi_card(
+            KpiTone::Sage,
+            move || ui_text(active_locale.get()).kpi_short_break,
+            move || {
+                let locale = active_locale.get();
+                vm.with(|m| {
+                    format_kpi_cadence(
+                        m.config.short_break_interval_secs,
+                        m.config.short_break_duration_secs,
+                        locale,
+                    )
+                })
+            },
+        ))
+        .child(pastel_kpi_card(
+            KpiTone::Peach,
+            move || ui_text(active_locale.get()).kpi_long_break,
+            move || {
+                let locale = active_locale.get();
+                vm.with(|m| {
+                    format_kpi_cadence(
+                        m.config.long_break_interval_secs,
+                        m.config.long_break_duration_secs,
+                        locale,
+                    )
+                })
+            },
+        ))
+        .child(pastel_kpi_card(
+            KpiTone::Butter,
+            move || ui_text(active_locale.get()).kpi_exercises,
+            move || {
+                vm.with(|m| (m.config.short_breaks.len() + m.config.long_breaks.len()).to_string())
+            },
+        ))
+        .child(pastel_kpi_card(
+            KpiTone::Mist,
+            move || ui_text(active_locale.get()).kpi_skip_limit,
+            move || {
+                let locale = active_locale.get();
+                let copy = ui_text(locale);
+                vm.with(|m| {
+                    if m.config.strict_break {
+                        copy.kpi_strict.to_owned()
+                    } else if m.config.limit_consecutive_skips.enabled {
+                        format_kpi_max_skips(m.config.limit_consecutive_skips.max_skips, locale)
+                    } else {
+                        copy.kpi_off.to_owned()
+                    }
+                })
+            },
+        ));
 
     let toggle_theme_hooks = theme_hooks.clone();
     let toggle_reveal = native_reveal.clone();
@@ -1925,7 +2092,7 @@ pub(crate) fn build_settings_view_with_hooks(
                 .gap_3()
                 .window_drag(true)
                 .child(page_heading(
-                    move || active_tab.get().label(),
+                    move || active_tab.get().label(active_locale.get()),
                     &highlight_scale,
                 ))
                 .child(
@@ -1965,8 +2132,28 @@ pub(crate) fn build_settings_view_with_hooks(
                                 )
                             },
                         ))
+                        .child(language_toggle_button(
+                            move || vm.with(|m| m.config.language),
+                            move || active_locale.get(),
+                            move || {
+                                let next_lang = vm.with_untracked(|m| m.config.language.next());
+                                let mut saved = false;
+                                vm.update(|m| {
+                                    m.config.language = next_lang;
+                                    if m.autosave().is_ok() {
+                                        saved = true;
+                                    } else {
+                                        let _ = m.persist_language();
+                                    }
+                                });
+                                if saved {
+                                    crate::store_outcome(&lang_sink, SettingsOutcome::Saved);
+                                }
+                            },
+                        ))
                         .child(theme_toggle_button(
                             move || theme_mode_for_appearance(appearance.get()),
+                            move || active_locale.get(),
                             measured_theme_btn_center,
                             move |origin| {
                                 let resolved_origin = origin.unwrap_or_else(|| {
@@ -2041,6 +2228,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || {
                         timing_section(
                             vm,
+                            active_locale,
                             Arc::clone(&timing_sink),
                             timing_hook.as_ref().map(Arc::clone),
                             has_switched_tab.get_untracked(),
@@ -2052,6 +2240,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || {
                         policies_section(
                             vm,
+                            active_locale,
                             Arc::clone(&policies_sink),
                             has_switched_tab.get_untracked(),
                         )
@@ -2062,6 +2251,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || {
                         exercises_section(
                             vm,
+                            active_locale,
                             Arc::clone(&exercises_sink),
                             has_switched_tab.get_untracked(),
                         )
@@ -2072,6 +2262,7 @@ pub(crate) fn build_settings_view_with_hooks(
                     move || {
                         about_section(
                             vm,
+                            active_locale,
                             Arc::clone(&about_sink),
                             update_ui,
                             on_check_now.clone(),
@@ -2094,12 +2285,12 @@ pub(crate) fn build_settings_view_with_hooks(
         .border_t_1()
         .border_color(colors::BORDER)
         .child(
-            text("Changes are saved automatically")
+            text(move || ui_text(active_locale.get()).autosave_note)
                 .text_xs()
                 .text_color(colors::TEXT_SECONDARY),
         )
         .child(primary_button_with_disabled(
-            "Reset to defaults",
+            move || ui_text(active_locale.get()).reset_to_defaults,
             move || !is_modified.get(),
             move || {
                 let default_mode = ThemeMode::default();
@@ -2217,14 +2408,21 @@ pub(crate) fn build_settings_view_with_hooks(
 #[component]
 fn SettingsRoot() -> impl IntoElement {
     set_quit_mode(QuitMode::LastWindowClosed);
-    let launch_slot = Rc::new(RefCell::new(
-        SETTINGS_LAUNCH.lock().ok().and_then(|mut g| g.take()),
-    ));
+    let initial_launch = SETTINGS_LAUNCH.lock().ok().and_then(|mut g| g.take());
+    let initial_locale = initial_launch
+        .as_ref()
+        .map_or(Locale::En, |launch| launch.vm.active_locale());
+    let window_locale = signal(initial_locale);
+    let launch_slot = Rc::new(RefCell::new(initial_launch));
     let opts = settings_main_window_options();
     nsh_core::element::desktop::window()
         .id("settings")
         .kind(WindowKind::Normal)
-        .title("Safe Your Eyes — Settings")
+        .title(move || {
+            ui_text(window_locale.get())
+                .settings_window_title
+                .to_owned()
+        })
         .default_size(size(px(920.0), px(680.0)))
         .default_position(WindowPosition::Center)
         .attributes(opts.attributes)
@@ -2241,7 +2439,7 @@ fn SettingsRoot() -> impl IntoElement {
                         on_window_ready();
                     }));
                 }
-                build_settings_view_with_hooks(
+                build_settings_view_inner(
                     launch.vm,
                     launch.outcome_sink,
                     true,
@@ -2249,6 +2447,7 @@ fn SettingsRoot() -> impl IntoElement {
                     launch.theme_hooks,
                     launch.update_config,
                     launch.status_config,
+                    Some(window_locale),
                 )
                 .into_element()
             }
@@ -2257,7 +2456,10 @@ fn SettingsRoot() -> impl IntoElement {
                 .bg(colors::BACKGROUND_BODY)
                 .items_center()
                 .justify_center()
-                .child(text("Safe Your Eyes — Settings").text_color(colors::TEXT_PRIMARY))
+                .child(
+                    text(move || ui_text(window_locale.get()).settings_window_title)
+                        .text_color(colors::TEXT_PRIMARY),
+                )
                 .into_element(),
         })
 }
@@ -2279,9 +2481,14 @@ pub fn run_settings_with_autostart(
         SettingsUpdateConfig::default(),
         SettingsStatusConfig::default(),
         None,
+        Locale::En,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Entry point connecting all OS hooks and resolved system locale into the Settings window"
+)]
 pub fn run_settings_with_hooks(
     config_path: PathBuf,
     system_autostart: Option<bool>,
@@ -2290,9 +2497,11 @@ pub fn run_settings_with_hooks(
     update_config: SettingsUpdateConfig,
     status_config: SettingsStatusConfig,
     on_window_ready: Option<WindowReadyCallback>,
+    system_locale: Locale,
 ) -> Result<SettingsOutcome, UiError> {
-    let vm = load_settings_vm(config_path, system_autostart);
+    let vm = load_settings_vm(config_path, system_autostart, system_locale);
     let initial_appearance = appearance_for_theme_mode(vm.config.theme);
+    let initial_title = ui_text(vm.active_locale()).settings_window_title.to_owned();
     let outcome_sink = Arc::new(Mutex::new(None));
     let on_autostart_change: Option<AutostartHook> = on_autostart_change.map(Arc::from);
 
@@ -2320,7 +2529,7 @@ pub fn run_settings_with_hooks(
         let _ = platform::run_app(
             platform::AppSource::Rust(root),
             platform::AppOptions {
-                title: "Safe Your Eyes — Settings".to_owned(),
+                title: initial_title,
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.settings".to_owned(),
                 size: (920, 680),
@@ -2342,6 +2551,8 @@ pub fn run_settings_with_hooks(
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use sye_core::HOMEBREW_UPGRADE_COMMAND;
 
     use super::*;
 
@@ -2846,13 +3057,31 @@ mod tests {
         let dir = RepoTempDir::new("persist-theme-autostart")?;
         let path = dir.file("theme-autostart.toml");
 
-        let mut vm = load_settings_vm(path.clone(), Some(false));
+        let mut vm = load_settings_vm(path.clone(), Some(false), Locale::En);
         vm.config.short_break_interval_secs = 123;
         vm.config.theme = ThemeMode::Dark;
         vm.persist_theme()?;
 
         let saved = Config::load_from_path(&path)?;
         assert_eq!(saved.theme, ThemeMode::Dark);
+        assert!(!saved.autostart);
+        assert_eq!(saved.short_break_interval_secs, 900);
+        Ok(())
+    }
+
+    #[test]
+    fn persist_language_preserves_system_autostart_baseline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = RepoTempDir::new("persist-lang-autostart")?;
+        let path = dir.file("lang-autostart.toml");
+
+        let mut vm = load_settings_vm(path.clone(), Some(false), Locale::En);
+        vm.config.short_break_interval_secs = 123;
+        vm.config.language = sye_core::LanguageMode::Vi;
+        vm.persist_language()?;
+
+        let saved = Config::load_from_path(&path)?;
+        assert_eq!(saved.language, sye_core::LanguageMode::Vi);
         assert!(!saved.autostart);
         assert_eq!(saved.short_break_interval_secs, 900);
         Ok(())
@@ -3064,10 +3293,10 @@ mod tests {
         };
         cfg.save_to_path(&path)?;
 
-        let unchanged = load_settings_vm(path.clone(), None);
+        let unchanged = load_settings_vm(path.clone(), None, Locale::En);
         assert!(!unchanged.config.autostart);
 
-        let overridden_true = load_settings_vm(path.clone(), Some(true));
+        let overridden_true = load_settings_vm(path.clone(), Some(true), Locale::En);
         assert!(overridden_true.config.autostart);
 
         let cfg_true = Config {
@@ -3075,7 +3304,7 @@ mod tests {
             ..Config::default()
         };
         cfg_true.save_to_path(&path)?;
-        let overridden_false = load_settings_vm(path, Some(false));
+        let overridden_false = load_settings_vm(path, Some(false), Locale::En);
         assert!(!overridden_false.config.autostart);
         Ok(())
     }
@@ -3104,7 +3333,7 @@ mod tests {
                 .ok()
                 .and_then(|mut g| g.take())
                 .unwrap_or_default();
-            let vm = load_settings_vm(path, Some(false));
+            let vm = load_settings_vm(path, Some(false), Locale::En);
             let sink = Arc::new(Mutex::new(None));
             let hook: AutostartHook = Arc::new(|enabled| {
                 if let Ok(mut guard) = AUTOSTART_EVENTS.lock() {
@@ -3229,7 +3458,7 @@ mod tests {
                 .ok()
                 .and_then(|mut g| g.take())
                 .unwrap_or_default();
-            let vm = load_settings_vm(path, Some(false));
+            let vm = load_settings_vm(path, Some(false), Locale::En);
             let sink = Arc::new(Mutex::new(None));
             let hook: AutostartHook = Arc::new(|enabled| {
                 if let Ok(mut guard) = AUTOSAVE_EVENTS.lock() {
@@ -4117,7 +4346,7 @@ mod tests {
             consecutive_skips: 0,
         };
         assert_eq!(
-            format_countdown_pill(&base),
+            format_countdown_pill(&base, Locale::En),
             Some(CountdownPillState {
                 tone: CountdownTone::Active,
                 label: "Short".to_owned(),
@@ -4126,11 +4355,23 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                next_break_type: Some(BreakType::Long),
-                seconds_until_next_break: 4500,
-                ..base.clone()
-            }),
+            format_countdown_pill(&base, Locale::Vi),
+            Some(CountdownPillState {
+                tone: CountdownTone::Active,
+                label: "Nghỉ ngắn".to_owned(),
+                time: Some("14:32".to_owned()),
+                accessible_label: "Nghỉ ngắn tiếp theo sau 15 phút".to_owned(),
+            })
+        );
+        assert_eq!(
+            format_countdown_pill(
+                &StatusSnapshot {
+                    next_break_type: Some(BreakType::Long),
+                    seconds_until_next_break: 4500,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Active,
                 label: "Long".to_owned(),
@@ -4139,11 +4380,14 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                next_break_type: None,
-                seconds_until_next_break: 65,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    next_break_type: None,
+                    seconds_until_next_break: 65,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Active,
                 label: "Next".to_owned(),
@@ -4152,11 +4396,14 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::PreBreak,
-                seconds_until_next_break: 8,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::PreBreak,
+                    seconds_until_next_break: 8,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Warning,
                 label: "Starting".to_owned(),
@@ -4165,10 +4412,13 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::Break,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::Break,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Break,
                 label: "Break active".to_owned(),
@@ -4177,10 +4427,13 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::Resting,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::Resting,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Paused,
                 label: "Paused (idle)".to_owned(),
@@ -4189,11 +4442,14 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::Stopped,
-                enabled: false,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::Stopped,
+                    enabled: false,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Disabled,
                 label: "Disabled".to_owned(),
@@ -4202,10 +4458,13 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                enabled: false,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    enabled: false,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Disabled,
                 label: "Disabled".to_owned(),
@@ -4214,10 +4473,13 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::Start,
-                ..base.clone()
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::Start,
+                    ..base.clone()
+                },
+                Locale::En,
+            ),
             Some(CountdownPillState {
                 tone: CountdownTone::Disabled,
                 label: "Initializing".to_owned(),
@@ -4226,10 +4488,13 @@ mod tests {
             })
         );
         assert_eq!(
-            format_countdown_pill(&StatusSnapshot {
-                state: SchedulerState::Quit,
-                ..base
-            }),
+            format_countdown_pill(
+                &StatusSnapshot {
+                    state: SchedulerState::Quit,
+                    ..base
+                },
+                Locale::En,
+            ),
             None
         );
     }
@@ -4450,6 +4715,86 @@ mod tests {
         assert!(
             app.quit(),
             "Closing the Settings window must quit the settings subprocess"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_language_switcher_translates_live_persists_and_resets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-language-switch")?;
+        let path = dir.file("lang.toml");
+        let mut initial_cfg = Config::default();
+        initial_cfg
+            .short_breaks
+            .push(BreakSpec::new("Uống trà xanh"));
+        initial_cfg.save_to_path(&path)?;
+
+        static LANG_TEST_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+        {
+            let mut guard = LANG_TEST_PATH.lock().map_err(|e| e.to_string())?;
+            *guard = Some(path.clone());
+        }
+
+        #[component]
+        fn TestLanguageSettings() -> impl IntoElement {
+            let cfg_path = LANG_TEST_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load_with_locale(cfg_path, Locale::En);
+            let sink = Arc::new(Mutex::new(None));
+            build_settings_view(vm, sink, false)
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(960.0), Points(720.0)),
+            ..EngineConfig::new(Root::of::<TestLanguageSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+
+        // Initial mode is System resolved against Locale::En -> "Auto" + English labels.
+        app.wait_for("Auto")?;
+        app.wait_for("Break Schedule")?;
+        app.wait_for("Theme: System")?;
+
+        // Cycle System -> En.
+        app.press("Auto")?;
+        app.wait_for("EN")?;
+        assert_eq!(
+            Config::load_from_path(&path)?.language,
+            sye_core::LanguageMode::En
+        );
+
+        // Cycle En -> Vi and verify instant live Vietnamese UI translation.
+        app.press("EN")?;
+        app.wait_for("VI")?;
+        app.wait_for("Lịch nghỉ")?;
+        app.wait_for("Giao diện: Hệ thống")?;
+        app.wait_for("Mọi thay đổi được tự động lưu")?;
+        assert_eq!(
+            Config::load_from_path(&path)?.language,
+            sye_core::LanguageMode::Vi
+        );
+
+        // Switch to Exercises tab and verify default exercises translate while custom stays verbatim.
+        app.press("Bài tập")?;
+        app.wait_for("Bài tập nghỉ ngắn")?;
+        app.wait_for("Nhẹ nhàng nhắm mắt lại")?;
+        app.wait_for("Uống trà xanh")?;
+
+        // Reset to defaults restores LanguageMode::System (resolved to Locale::En).
+        app.press("Khôi phục mặc định")?;
+        app.wait_for("Auto")?;
+        app.wait_for("Short Break Exercises")?;
+        app.wait_for("Gently close your eyes")?;
+        assert_eq!(
+            Config::load_from_path(&path)?.language,
+            sye_core::LanguageMode::System
         );
         Ok(())
     }

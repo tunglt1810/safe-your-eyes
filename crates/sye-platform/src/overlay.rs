@@ -266,6 +266,7 @@ mod tests {
             shortcut_disable_secs: 2,
             fade_in_ms: 1500,
             status_note: None,
+            locale: sye_core::Locale::En,
         }
     }
 

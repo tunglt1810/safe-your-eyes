@@ -374,16 +374,32 @@ impl SkipLimitPolicy {
 
     #[must_use]
     pub fn status_label(&self, cfg: &SkipLimitConfig) -> Option<String> {
+        self.status_label_localized(cfg, crate::i18n::Locale::En)
+    }
+
+    #[must_use]
+    pub fn status_label_localized(
+        &self,
+        cfg: &SkipLimitConfig,
+        locale: crate::i18n::Locale,
+    ) -> Option<String> {
         if !cfg.enabled {
             return None;
         }
         if self.consecutive_skips == 0 && cfg.max_skips > 0 {
             return None;
         }
-        Some(format!(
-            "Skipped or postponed {}/{} breaks in a row",
-            self.consecutive_skips, cfg.max_skips
-        ))
+        let text = match locale {
+            crate::i18n::Locale::En => format!(
+                "Skipped or postponed {}/{} breaks in a row",
+                self.consecutive_skips, cfg.max_skips
+            ),
+            crate::i18n::Locale::Vi => format!(
+                "Đã bỏ qua hoặc hoãn {}/{} lần nghỉ liên tiếp",
+                self.consecutive_skips, cfg.max_skips
+            ),
+        };
+        Some(text)
     }
 }
 

@@ -11,9 +11,11 @@ use nsh_core::desktop::{
 use nsh_core::element::desktop::{current_window, displays, quit, set_quit_mode};
 use nsh_core::prelude::*;
 use sye_core::config::BreakType;
+use sye_core::localize_exercise_name;
 use sye_core::scheduler::{OverlayOutcome, OverlayRequest};
 
 use crate::UiError;
+use crate::i18n::{format_overlay_unlock_hint, ui_text};
 use crate::theme::{colors, radii};
 use crate::ui::app_icon;
 
@@ -395,11 +397,13 @@ fn build_overlay_card(
     entrance: &Entrance,
     finish_if_ready: impl Fn() + Clone + 'static,
 ) -> impl IntoElement {
+    let locale = vm.with(|m| m.request().locale);
+    let copy = ui_text(locale);
     let break_label: &'static str = vm.with(|m| match m.request().break_type {
-        BreakType::Short => "SHORT BREAK",
-        BreakType::Long => "LONG BREAK",
+        BreakType::Short => copy.overlay_short_badge,
+        BreakType::Long => copy.overlay_long_badge,
     });
-    let exercise_title = vm.with(|m| m.request().title.clone());
+    let exercise_title = vm.with(|m| localize_exercise_name(&m.request().title, locale).to_owned());
     let status_note = vm.with(|m| m.status_note().map(str::to_owned));
     let show_skip = vm.with(OverlayViewModel::show_skip_button);
     let show_postpone = vm.with(OverlayViewModel::show_postpone_button);
@@ -433,7 +437,7 @@ fn build_overlay_card(
                 .active(|s| s.opacity(0.8))
                 .disabled_style(|s| s.opacity(0.4))
                 .child(
-                    text("Postpone (Space)")
+                    text(copy.overlay_postpone_button)
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(colors::OVERLAY_TEXT),
@@ -465,7 +469,7 @@ fn build_overlay_card(
                 .active(|s| s.opacity(0.8))
                 .disabled_style(|s| s.opacity(0.4))
                 .child(
-                    text("Skip (Esc)")
+                    text(copy.overlay_skip_button)
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(colors::OVERLAY_TEXT),
@@ -524,7 +528,7 @@ fn build_overlay_card(
                         .overflow_hidden()
                         .accessible(true)
                         .role(AccessibilityRole::Progressbar)
-                        .label("Break time remaining")
+                        .label(copy.overlay_progress_a11y)
                         .accessibility_value(move || {
                             vm.with(|m| {
                                 Some(nsh_core::AccessibilityValue {
@@ -563,11 +567,11 @@ fn build_overlay_card(
         text(move || {
             vm.with(|m| {
                 if m.is_shortcut_locked() {
-                    format!("Controls unlock in {}s", m.lock_remaining_secs())
+                    format_overlay_unlock_hint(m.lock_remaining_secs(), locale)
                 } else if m.request().strict_break && !m.request().allow_postpone {
-                    "Strict break active — rest your eyes".to_owned()
+                    copy.overlay_strict_hint.to_owned()
                 } else {
-                    "Relax your gaze until the timer completes".to_owned()
+                    copy.overlay_relax_hint.to_owned()
                 }
             })
         })
@@ -661,10 +665,11 @@ pub(crate) fn build_overlay_view(
         .iter()
         .find(|d| d.primary)
         .or_else(|| initial_displays.first());
+    let overlay_title = ui_text(vm.with(|m| m.request().locale)).overlay_window_title;
     let mut primary_win_el = nsh_core::element::desktop::window()
         .id("overlay-primary")
         .kind(WindowKind::Normal)
-        .title("Safe Your Eyes — Break")
+        .title(overlay_title)
         .attributes(primary_opts.attributes)
         .on_open_change(|e| {
             if !e.open {
@@ -848,6 +853,7 @@ pub fn run_overlay_with_hook(
     on_outcome: Option<OverlayOutcomeCallback>,
 ) -> Result<OverlayOutcome, UiError> {
     let outcome_sink = Arc::new(Mutex::new(None));
+    let overlay_title = ui_text(request.locale).overlay_window_title.to_owned();
     let Ok(mut guard) = OVERLAY_LAUNCH.lock() else {
         return Err(UiError::WindowInit(
             "overlay launch state lock poisoned".to_owned(),
@@ -876,7 +882,7 @@ pub fn run_overlay_with_hook(
         let _ = platform::run_app(
             platform::AppSource::Rust(root),
             platform::AppOptions {
-                title: "Safe Your Eyes — Break".to_owned(),
+                title: overlay_title,
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 app_id: "io.github.tunglt1810.safeyoureyes.overlay".to_owned(),
                 size: initial_size,
@@ -913,6 +919,7 @@ mod tests {
             shortcut_disable_secs: 2,
             fade_in_ms: 1500,
             status_note: Some("  Take a deep breath  ".to_owned()),
+            locale: sye_core::Locale::En,
         }
     }
 
@@ -1400,6 +1407,35 @@ mod tests {
             primary_focused,
             "Primary overlay window must request focus on launch"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_overlay_renders_vietnamese_locale_and_default_exercise()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        #[component]
+        fn ViOverlayHost() -> impl IntoElement {
+            let mut req = sample_request();
+            req.locale = sye_core::Locale::Vi;
+            req.shortcut_disable_secs = 0;
+            req.status_note = Some("Đã bỏ qua hoặc hoãn 1/2 lần nghỉ liên tiếp".to_owned());
+            build_overlay_view(req, Arc::new(Mutex::new(None)), false, None, None)
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(1024.0), Points(640.0)),
+            ..EngineConfig::new(Root::of::<ViOverlayHost>())
+        })
+        .map_err(|e| e.to_string())?;
+
+        app.wait_for("NGHỈ NGẮN")?;
+        app.wait_for("Nhìn tập trung vào một điểm ở xa")?;
+        app.wait_for("Đã bỏ qua hoặc hoãn 1/2 lần nghỉ liên tiếp")?;
+        app.wait_for("Hoãn (Space)")?;
+        app.wait_for("Bỏ qua (Esc)")?;
         Ok(())
     }
 }

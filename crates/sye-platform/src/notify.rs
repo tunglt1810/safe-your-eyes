@@ -1,16 +1,31 @@
 #[cfg(all(unix, not(target_os = "macos")))]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::sync::{Arc, Mutex, PoisonError};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use notify_rust::{Hint, Notification, Timeout};
-use sye_core::{BreakType, Notifier, PlatformError};
+use sye_core::{BreakType, Locale, Notifier, PlatformError, localize_exercise_name};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 const APP_NAME: &str = "Safe Your Eyes";
 #[cfg(all(unix, not(target_os = "macos")))]
 const APP_ICON: &str = "safe-your-eyes";
+
+const fn encode_locale(locale: Locale) -> u8 {
+    match locale {
+        Locale::En => 0,
+        Locale::Vi => 1,
+    }
+}
+
+const fn decode_locale(raw: u8) -> Locale {
+    match raw {
+        1 => Locale::Vi,
+        _ => Locale::En,
+    }
+}
 
 #[cfg(any(target_os = "macos", windows, test))]
 const PRE_BREAK_URGENT_SECS: u64 = 3;
@@ -69,6 +84,7 @@ impl PreBreakCountdown {
 
 pub struct OsNotifier {
     enabled: bool,
+    locale: AtomicU8,
     #[cfg(all(unix, not(target_os = "macos")))]
     active: Mutex<Option<LinuxActive>>,
 }
@@ -101,6 +117,7 @@ impl std::fmt::Debug for OsNotifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OsNotifier")
             .field("enabled", &self.enabled)
+            .field("locale", &self.locale())
             .finish_non_exhaustive()
     }
 }
@@ -108,8 +125,14 @@ impl std::fmt::Debug for OsNotifier {
 impl OsNotifier {
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_locale(Locale::En)
+    }
+
+    #[must_use]
+    pub const fn with_locale(locale: Locale) -> Self {
         Self {
             enabled: true,
+            locale: AtomicU8::new(encode_locale(locale)),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
@@ -119,9 +142,19 @@ impl OsNotifier {
     pub const fn noop() -> Self {
         Self {
             enabled: false,
+            locale: AtomicU8::new(encode_locale(Locale::En)),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
+    }
+
+    pub fn set_locale(&self, locale: Locale) {
+        self.locale.store(encode_locale(locale), Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn locale(&self) -> Locale {
+        decode_locale(self.locale.load(Ordering::Acquire))
     }
 
     pub fn show_notice(&self, summary: &str, body: &str) -> Result<(), PlatformError> {
@@ -170,16 +203,34 @@ pub fn format_pre_break_notification(
     title: &str,
     warning_secs: u64,
 ) -> (String, String) {
-    let kind_label = match break_type {
-        BreakType::Short => "Short break",
-        BreakType::Long => "Long break",
+    format_pre_break_notification_localized(break_type, title, warning_secs, Locale::En)
+}
+
+#[must_use]
+pub fn format_pre_break_notification_localized(
+    break_type: BreakType,
+    title: &str,
+    warning_secs: u64,
+    locale: Locale,
+) -> (String, String) {
+    let kind_label = match (locale, break_type) {
+        (Locale::En, BreakType::Short) => "Short break",
+        (Locale::En, BreakType::Long) => "Long break",
+        (Locale::Vi, BreakType::Short) => "Nghỉ ngắn",
+        (Locale::Vi, BreakType::Long) => "Nghỉ dài",
     };
-    let summary = format!("Safe Your Eyes — {kind_label} in {warning_secs}s");
+    let summary = match locale {
+        Locale::En => format!("Safe Your Eyes — {kind_label} in {warning_secs}s"),
+        Locale::Vi => format!("Safe Your Eyes — {kind_label} sau {warning_secs} giây"),
+    };
     let trimmed = title.trim();
     let body = if trimmed.is_empty() {
-        "Prepare to rest your eyes.".to_owned()
+        match locale {
+            Locale::En => "Prepare to rest your eyes.".to_owned(),
+            Locale::Vi => "Chuẩn bị cho mắt nghỉ ngơi.".to_owned(),
+        }
     } else {
-        trimmed.to_owned()
+        localize_exercise_name(trimmed, locale).to_owned()
     };
     (summary, body)
 }
@@ -203,18 +254,36 @@ pub(crate) fn format_pre_break_banner_copy(
     break_type: BreakType,
     title: &str,
 ) -> (String, String, String) {
-    let kind_label = match break_type {
-        BreakType::Short => "Short break",
-        BreakType::Long => "Long break",
+    format_pre_break_banner_copy_localized(break_type, title, Locale::En)
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+#[must_use]
+pub(crate) fn format_pre_break_banner_copy_localized(
+    break_type: BreakType,
+    title: &str,
+    locale: Locale,
+) -> (String, String, String) {
+    let kind_label = match (locale, break_type) {
+        (Locale::En, BreakType::Short) => "Short break",
+        (Locale::En, BreakType::Long) => "Long break",
+        (Locale::Vi, BreakType::Short) => "Nghỉ ngắn",
+        (Locale::Vi, BreakType::Long) => "Nghỉ dài",
     };
     let trimmed = title.trim();
     let body = if trimmed.is_empty() {
-        "Prepare to rest your eyes.".to_owned()
+        match locale {
+            Locale::En => "Prepare to rest your eyes.".to_owned(),
+            Locale::Vi => "Chuẩn bị cho mắt nghỉ ngơi.".to_owned(),
+        }
     } else {
-        trimmed.to_owned()
+        localize_exercise_name(trimmed, locale).to_owned()
     };
     // The label is set once per banner, so it must not carry a countdown number that goes stale.
-    let accessible = format!("Safe Your Eyes: {kind_label} starting soon. {body}");
+    let accessible = match locale {
+        Locale::En => format!("Safe Your Eyes: {kind_label} starting soon. {body}"),
+        Locale::Vi => format!("Safe Your Eyes: {kind_label} sắp bắt đầu. {body}"),
+    };
     (kind_label.to_owned(), body, accessible)
 }
 
@@ -270,6 +339,7 @@ impl Notifier for OsNotifier {
             return Ok(());
         }
 
+        let locale = self.locale();
         let countdown = PreBreakCountdown {
             remaining_secs: warning_secs,
             total_secs: total_secs.max(warning_secs).max(1),
@@ -277,19 +347,22 @@ impl Notifier for OsNotifier {
 
         #[cfg(target_os = "macos")]
         {
-            let (banner_title, body, accessible) = format_pre_break_banner_copy(break_type, title);
+            let (banner_title, body, accessible) =
+                format_pre_break_banner_copy_localized(break_type, title, locale);
             macos_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
         }
 
         #[cfg(windows)]
         {
-            let (banner_title, body, accessible) = format_pre_break_banner_copy(break_type, title);
+            let (banner_title, body, accessible) =
+                format_pre_break_banner_copy_localized(break_type, title, locale);
             windows_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
         }
 
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let (summary, body) = format_pre_break_notification(break_type, title, warning_secs);
+            let (summary, body) =
+                format_pre_break_notification_localized(break_type, title, warning_secs, locale);
             let timeout_ms = u32::try_from(warning_secs.saturating_mul(1000)).unwrap_or(u32::MAX);
             let progress_pct = countdown.progress_percent();
 
@@ -1645,6 +1718,41 @@ mod tests {
             long_a11y,
             "Safe Your Eyes: Long break starting soon. Prepare to rest your eyes."
         );
+    }
+
+    #[test]
+    fn format_pre_break_localized_translates_vietnamese_and_preserves_custom_title() {
+        let (summary, body) = format_pre_break_notification_localized(
+            BreakType::Short,
+            "Gently close your eyes",
+            10,
+            Locale::Vi,
+        );
+        assert_eq!(summary, "Safe Your Eyes — Nghỉ ngắn sau 10 giây");
+        assert_eq!(body, "Nhẹ nhàng nhắm mắt lại");
+
+        let (custom_summary, custom_body) = format_pre_break_notification_localized(
+            BreakType::Long,
+            "Uống trà nóng",
+            15,
+            Locale::Vi,
+        );
+        assert_eq!(custom_summary, "Safe Your Eyes — Nghỉ dài sau 15 giây");
+        assert_eq!(custom_body, "Uống trà nóng");
+
+        let (title, body, a11y) =
+            format_pre_break_banner_copy_localized(BreakType::Short, "Have some water", Locale::Vi);
+        assert_eq!(title, "Nghỉ ngắn");
+        assert_eq!(body, "Uống một ngụm nước");
+        assert_eq!(
+            a11y,
+            "Safe Your Eyes: Nghỉ ngắn sắp bắt đầu. Uống một ngụm nước"
+        );
+
+        let notifier = OsNotifier::with_locale(Locale::Vi);
+        assert_eq!(notifier.locale(), Locale::Vi);
+        notifier.set_locale(Locale::En);
+        assert_eq!(notifier.locale(), Locale::En);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 pub mod chime;
 pub mod config;
+pub mod i18n;
 pub mod ipc;
 pub mod policies;
 pub mod queue;
@@ -17,6 +18,7 @@ pub use config::{
     DEFAULT_LONG_BREAK_NAMES, DEFAULT_SHORT_BREAK_NAMES, DoNotDisturbConfig, SkipLimitConfig,
     SmartPauseConfig, ThemeMode, ValidationError,
 };
+pub use i18n::{LanguageMode, Locale, localize_exercise_name};
 pub use ipc::{
     IpcCodecError, IpcCommand, IpcErrorCode, IpcResponse, MAX_IPC_LINE_BYTES, decode_command,
     decode_response, encode_line,

@@ -12,7 +12,7 @@ use sye_core::scheduler::{
 use sye_core::session::SessionState;
 use sye_core::traits::{DndProvider, DndQueryOptions, IdleProvider, Notifier, OverlayLauncher};
 use sye_core::{
-    HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, UPDATE_CHECK_INTERVAL_SECS,
+    HOMEBREW_UPGRADE_COMMAND, Locale, PUBLIC_DOWNLOAD_URL, UPDATE_CHECK_INTERVAL_SECS,
     UPDATE_INITIAL_DELAY_SECS, UpdateCacheState, UpdateInfo, UpdateStrategy,
 };
 use sye_platform::{
@@ -36,6 +36,7 @@ enum LoopControl {
 
 struct DaemonHost<'a> {
     headless: bool,
+    locale: Locale,
     config_file: &'a Path,
     session_file: &'a Path,
     socket_path: &'a Path,
@@ -162,6 +163,17 @@ impl DaemonHost<'_> {
         }
     }
 
+    fn set_locale(&mut self, locale: Locale) {
+        if self.locale == locale {
+            return;
+        }
+        self.locale = locale;
+        self.notifier.set_locale(locale);
+        if let Some(handle) = self.tray.as_mut() {
+            handle.set_locale(locale);
+        }
+    }
+
     fn show_update_notice(&mut self, summary: &str, body: &str) {
         if self.notifier.show_notice(summary, body).is_ok() {
             self.update_notice_dismiss_at = Some(Instant::now() + UPDATE_NOTICE_DURATION);
@@ -197,10 +209,17 @@ impl DaemonHost<'_> {
             UpdateStrategy::SelfUpdate { asset_name } => {
                 self.update_in_progress = true;
                 self.sync_tray_update();
-                self.show_update_notice(
-                    "Safe Your Eyes — Updating",
-                    &format!("Downloading and verifying v{}...", info.latest_version),
-                );
+                let (summary, body) = match self.locale {
+                    Locale::En => (
+                        "Safe Your Eyes — Updating",
+                        format!("Downloading and verifying v{}...", info.latest_version),
+                    ),
+                    Locale::Vi => (
+                        "Safe Your Eyes — Đang cập nhật",
+                        format!("Đang tải và xác minh v{}...", info.latest_version),
+                    ),
+                };
+                self.show_update_notice(summary, &body);
                 let (tx, rx) = mpsc::channel();
                 let version = info.latest_version;
                 let spawned = std::thread::Builder::new()
@@ -222,10 +241,17 @@ impl DaemonHost<'_> {
                 }
             }
             UpdateStrategy::HomebrewCask => {
-                self.show_update_notice(
-                    &format!("Safe Your Eyes v{} available", info.latest_version),
-                    &format!("Run: {HOMEBREW_UPGRADE_COMMAND}"),
-                );
+                let (summary, body) = match self.locale {
+                    Locale::En => (
+                        format!("Safe Your Eyes v{} available", info.latest_version),
+                        format!("Run: {HOMEBREW_UPGRADE_COMMAND}"),
+                    ),
+                    Locale::Vi => (
+                        format!("Đã có Safe Your Eyes v{}", info.latest_version),
+                        format!("Chạy: {HOMEBREW_UPGRADE_COMMAND}"),
+                    ),
+                };
+                self.show_update_notice(&summary, &body);
                 if let Err(err) = sye_platform::open_url(&info.download_url) {
                     eprintln!("Warning: failed to open download page: {err}");
                 }
@@ -253,10 +279,17 @@ impl DaemonHost<'_> {
                 self.update_in_progress = false;
                 self.sync_tray_update();
                 eprintln!("Warning: self-update failed: {err}");
-                self.show_update_notice(
-                    "Safe Your Eyes — Update failed",
-                    "Opening the download page instead.",
-                );
+                let (summary, body) = match self.locale {
+                    Locale::En => (
+                        "Safe Your Eyes — Update failed",
+                        "Opening the download page instead.",
+                    ),
+                    Locale::Vi => (
+                        "Safe Your Eyes — Cập nhật thất bại",
+                        "Đang mở trang tải xuống thay thế.",
+                    ),
+                };
+                self.show_update_notice(summary, body);
                 let url = self
                     .available_update
                     .as_ref()
@@ -498,7 +531,10 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     }
 
     let persist_state = config.persist_state;
+    let system_locale = sye_platform::detect_system_locale();
     let mut scheduler = Scheduler::new(config, SystemClock::new(), rng_seed_from_clock());
+    scheduler.set_system_locale(system_locale);
+    let active_locale = scheduler.active_locale();
     if persist_state {
         let (session, session_err) = SessionState::load_or_default(&paths.session_file);
         if let Some(err) = session_err {
@@ -515,7 +551,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let tray = if headless {
         None
     } else {
-        match TrayHandle::try_new(&scheduler.tray_snapshot(), tray_tx) {
+        match TrayHandle::try_new_with_locale(&scheduler.tray_snapshot(), active_locale, tray_tx) {
             Ok(handle) => Some(handle),
             Err(err) => {
                 eprintln!("Warning: system tray unavailable: {err}");
@@ -526,7 +562,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let notifier = if headless {
         OsNotifier::noop()
     } else {
-        OsNotifier::new()
+        OsNotifier::with_locale(active_locale)
     };
     if !headless {
         sye_platform::cleanup_current_stale_old_executable();
@@ -544,6 +580,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
 
     let mut host = DaemonHost {
         headless,
+        locale: active_locale,
         config_file: &paths.config_file,
         session_file: &paths.session_file,
         socket_path: &paths.socket_path,
@@ -624,6 +661,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 eprintln!("Warning: failed to synchronize autostart entry: {err}");
             }
             host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
+            host.set_locale(scheduler.active_locale());
         }
 
         if !headless {

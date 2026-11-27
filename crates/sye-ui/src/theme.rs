@@ -32,14 +32,6 @@ pub(crate) const fn next_theme_mode(mode: ThemeMode) -> ThemeMode {
     }
 }
 
-pub(crate) const fn theme_mode_label(mode: ThemeMode) -> &'static str {
-    match mode {
-        ThemeMode::System => "Theme: System",
-        ThemeMode::Light => "Theme: Light",
-        ThemeMode::Dark => "Theme: Dark",
-    }
-}
-
 const fn tone(light: Rgba, dark: Rgba) -> AdaptiveColor {
     AdaptiveColor {
         light: light.to_hsla(),
@@ -264,9 +256,30 @@ mod tests {
             assert_eq!(theme_mode_for_appearance(appearance), mode);
         }
 
-        assert_eq!(theme_mode_label(ThemeMode::System), "Theme: System");
-        assert_eq!(theme_mode_label(ThemeMode::Light), "Theme: Light");
-        assert_eq!(theme_mode_label(ThemeMode::Dark), "Theme: Dark");
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::System, sye_core::Locale::En),
+            "Theme: System"
+        );
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::Light, sye_core::Locale::En),
+            "Theme: Light"
+        );
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::Dark, sye_core::Locale::En),
+            "Theme: Dark"
+        );
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::System, sye_core::Locale::Vi),
+            "Giao diện: Hệ thống"
+        );
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::Light, sye_core::Locale::Vi),
+            "Giao diện: Sáng"
+        );
+        assert_eq!(
+            crate::i18n::theme_mode_label_localized(ThemeMode::Dark, sye_core::Locale::Vi),
+            "Giao diện: Tối"
+        );
     }
 
     #[test]

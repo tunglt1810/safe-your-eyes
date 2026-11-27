@@ -614,10 +614,10 @@ impl Notifier for OsNotifier {
 )]
 mod macos_impl {
     use std::cell::RefCell;
+    use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
-    use block2::RcBlock;
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
     use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -649,6 +649,11 @@ mod macos_impl {
     const BANNER_WIDTH: f64 = 368.0;
     const MIN_NOTICE_HEIGHT: f64 = 68.0;
     const CORNER_RADIUS: f64 = 16.0;
+    const SHADOW_PAD_X: f64 = 16.0;
+    const SHADOW_PAD_TOP: f64 = 12.0;
+    const SHADOW_PAD_BOTTOM: f64 = 24.0;
+    const SHADOW_RADIUS: f64 = 8.0;
+    const SHADOW_OFFSET_Y: f64 = -4.0;
     const PAD_X: f64 = 16.0;
     const PAD_Y: f64 = 12.0;
     const ICON_SIZE: f64 = 36.0;
@@ -682,11 +687,15 @@ mod macos_impl {
         NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
     }
 
-    fn srgb_color(hex: u32) -> Retained<NSColor> {
+    fn srgb_color_alpha(hex: u32, alpha: f64) -> Retained<NSColor> {
         let r = f64::from((hex >> 16) & 0xFF) / 255.0;
         let g = f64::from((hex >> 8) & 0xFF) / 255.0;
         let b = f64::from(hex & 0xFF) / 255.0;
-        NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
+        NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, alpha)
+    }
+
+    fn srgb_color(hex: u32) -> Retained<NSColor> {
+        srgb_color_alpha(hex, 1.0)
     }
 
     fn cozy_ease_out() -> Retained<CAMediaTimingFunction> {
@@ -723,6 +732,42 @@ mod macos_impl {
         }
     }
 
+    fn clear_view_background(view: &NSView) {
+        if let Some(layer) = view.layer() {
+            // SAFETY: null `CGColorRef` clears the layer background so transparent areas stay clear.
+            unsafe {
+                let clear_cg: *const AnyObject = ptr::null();
+                let (): () = msg_send![&*layer, setBackgroundColor: clear_cg];
+            }
+        }
+    }
+
+    fn set_view_border_only(view: &NSView, border: &NSColor) {
+        if let Some(layer) = view.layer() {
+            // SAFETY: null background keeps the masked layer clear while `CALayer` retains `borderColor`.
+            unsafe {
+                let clear_cg: *const AnyObject = ptr::null();
+                let (): () = msg_send![&*layer, setBackgroundColor: clear_cg];
+                let border_cg: *const AnyObject = msg_send![border, CGColor];
+                let (): () = msg_send![&*layer, setBorderColor: border_cg];
+                layer.setBorderWidth(1.0);
+            }
+        }
+    }
+
+    fn set_view_shadow(view: &NSView, shadow: &NSColor) {
+        if let Some(layer) = view.layer() {
+            // SAFETY: `NSColor.CGColor` returns a valid `CGColorRef` retained by `CALayer`.
+            unsafe {
+                let shadow_cg: *const AnyObject = msg_send![shadow, CGColor];
+                let (): () = msg_send![&*layer, setShadowColor: shadow_cg];
+            }
+            layer.setShadowOpacity(1.0);
+            layer.setShadowRadius(SHADOW_RADIUS);
+            layer.setShadowOffset(CGSize::new(0.0, SHADOW_OFFSET_Y));
+        }
+    }
+
     define_class!(
         #[unsafe(super(NSView, NSResponder, NSObject))]
         #[thread_kind = MainThreadOnly]
@@ -747,6 +792,8 @@ mod macos_impl {
 
     struct PreBreakBanner {
         panel: Retained<NSPanel>,
+        root_view: Retained<NSView>,
+        shadow_view: Retained<NSView>,
         card_view: Retained<NSView>,
         icon_view: Option<Retained<NSImageView>>,
         title_label: Retained<NSTextField>,
@@ -756,6 +803,7 @@ mod macos_impl {
         progress_track: Retained<NSView>,
         progress_fill_layer: Retained<CALayer>,
         click_shield: Retained<BannerClickView>,
+        card_size: NSSize,
         last_summary: String,
         last_body: String,
         last_has_countdown: bool,
@@ -767,13 +815,16 @@ mod macos_impl {
 
     impl PreBreakBanner {
         fn new(mtm: MainThreadMarker) -> Self {
-            let initial_rect = NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(BANNER_WIDTH, MIN_NOTICE_HEIGHT),
+            let initial_card_size = NSSize::new(BANNER_WIDTH, MIN_NOTICE_HEIGHT);
+            let initial_card_rect = NSRect::new(NSPoint::new(0.0, 0.0), initial_card_size);
+            let initial_panel_size = NSSize::new(
+                BANNER_WIDTH + SHADOW_PAD_X * 2.0,
+                MIN_NOTICE_HEIGHT + SHADOW_PAD_TOP + SHADOW_PAD_BOTTOM,
             );
+            let initial_panel_rect = NSRect::new(NSPoint::new(0.0, 0.0), initial_panel_size);
             let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
                 NSPanel::alloc(mtm),
-                initial_rect,
+                initial_panel_rect,
                 NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
                 NSBackingStoreType::Buffered,
                 false,
@@ -788,7 +839,9 @@ mod macos_impl {
             panel.setWorksWhenModal(true);
             panel.setOpaque(false);
             panel.setBackgroundColor(Some(&NSColor::clearColor()));
-            panel.setHasShadow(true);
+            // Borderless `NSPanel` window shadows follow the rectangular frame on a layer-backed
+            // content view, leaving faint corner halos; draw the rounded Cozy shadow in `shadow_view`.
+            panel.setHasShadow(false);
             panel.setAnimationBehavior(NSWindowAnimationBehavior::None);
             panel.setLevel(NSStatusWindowLevel);
             panel.setCollectionBehavior(
@@ -798,7 +851,31 @@ mod macos_impl {
                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
             );
 
-            let card_view = NSView::initWithFrame(NSView::alloc(mtm), initial_rect);
+            let root_view = NSView::initWithFrame(NSView::alloc(mtm), initial_panel_rect);
+            panel.setContentView(Some(&root_view));
+            root_view.setWantsLayer(true);
+            if let Some(layer) = root_view.layer() {
+                layer.setMasksToBounds(false);
+            }
+            clear_view_background(&root_view);
+
+            let shadow_view = NSView::initWithFrame(
+                NSView::alloc(mtm),
+                NSRect::new(
+                    NSPoint::new(SHADOW_PAD_X, SHADOW_PAD_BOTTOM),
+                    initial_card_size,
+                ),
+            );
+            shadow_view.setWantsLayer(true);
+            if let Some(layer) = shadow_view.layer() {
+                layer.setCornerRadius(CORNER_RADIUS);
+                // SAFETY: `kCACornerCurveContinuous` is an immutable QuartzCore constant.
+                layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
+                layer.setMasksToBounds(false);
+            }
+            root_view.addSubview(&shadow_view);
+
+            let card_view = NSView::initWithFrame(NSView::alloc(mtm), initial_card_rect);
             card_view.setWantsLayer(true);
             if let Some(layer) = card_view.layer() {
                 layer.setCornerRadius(CORNER_RADIUS);
@@ -806,6 +883,7 @@ mod macos_impl {
                 layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
                 layer.setMasksToBounds(true);
             }
+            shadow_view.addSubview(&card_view);
 
             let icon_data = NSData::with_bytes(APP_ICON_PNG);
             let icon_view = NSImage::initWithData(NSImage::alloc(), &icon_data).map(|image| {
@@ -881,12 +959,13 @@ mod macos_impl {
 
             // SAFETY: `BannerClickView` inherits `-[NSView initWithFrame:]` with no custom ivars.
             let click_shield: Retained<BannerClickView> =
-                unsafe { msg_send![BannerClickView::alloc(mtm), initWithFrame: initial_rect] };
+                unsafe { msg_send![BannerClickView::alloc(mtm), initWithFrame: initial_card_rect] };
             card_view.addSubview(&click_shield);
-            panel.setContentView(Some(&card_view));
 
             Self {
                 panel,
+                root_view,
+                shadow_view,
                 card_view,
                 icon_view,
                 title_label,
@@ -896,6 +975,7 @@ mod macos_impl {
                 progress_track,
                 progress_fill_layer,
                 click_shield,
+                card_size: initial_card_size,
                 last_summary: String::new(),
                 last_body: String::new(),
                 last_has_countdown: false,
@@ -920,6 +1000,11 @@ mod macos_impl {
 
             let surface = srgb_color(palette.surface);
             let border = srgb_color(palette.border);
+            let shadow = if dark {
+                srgb_color_alpha(0x000000, 0.48)
+            } else {
+                srgb_color_alpha(0x6E4A2A, 0.22)
+            };
             let title = srgb_color(palette.title);
             let body = srgb_color(palette.body);
             let track = srgb_color(palette.track);
@@ -928,7 +1013,10 @@ mod macos_impl {
             self.title_label.setTextColor(Some(&title));
             self.body_label.setTextColor(Some(&body));
             quiet_ca(|| {
-                set_view_colors(&self.card_view, &surface, Some(&border));
+                clear_view_background(&self.root_view);
+                set_view_colors(&self.shadow_view, &surface, None);
+                set_view_shadow(&self.shadow_view, &shadow);
+                set_view_border_only(&self.card_view, &border);
                 set_view_colors(&self.progress_track, &track, None);
                 set_ca_layer_colors(&self.progress_fill_layer, &fill, None);
             });
@@ -977,7 +1065,7 @@ mod macos_impl {
         }
 
         fn play_entrance_animation(&self) {
-            let Some(layer) = self.card_view.layer() else {
+            let Some(layer) = self.root_view.layer() else {
                 return;
             };
             quiet_ca(|| {
@@ -995,16 +1083,7 @@ mod macos_impl {
                 fade.setToValue(Some(to_num.as_ref()));
             }
             let ca_animation: &CAAnimation = &fade;
-            // AppKit computes the panel shadow from the transparent first frame of the fade.
-            let panel = self.panel.clone();
-            let completion = RcBlock::new(move || panel.invalidateShadow());
-            CATransaction::begin();
-            // SAFETY: `CATransaction` copies the block and runs it on the main thread.
-            unsafe {
-                CATransaction::setCompletionBlock(Some(&completion));
-            }
             layer.addAnimation_forKey(ca_animation, Some(ns_string!("cozyBannerEnter")));
-            CATransaction::commit();
         }
 
         fn animate_layer_color(
@@ -1163,7 +1242,6 @@ mod macos_impl {
             })?;
             let prev_frame = self.panel.frame();
             let needs_layout = !was_visible || body_changed || mode_changed;
-            let mut banner_size = prev_frame.size;
             if needs_layout {
                 self.last_has_countdown = has_countdown;
                 let text_width = if has_countdown {
@@ -1193,12 +1271,23 @@ mod macos_impl {
                     let h = (PAD_Y + row_h + PAD_Y).max(MIN_NOTICE_HEIGHT).ceil();
                     (h, (h - row_h) * 0.5)
                 };
-                banner_size = NSSize::new(BANNER_WIDTH, banner_h);
+                let card_size = NSSize::new(BANNER_WIDTH, banner_h);
+                self.card_size = card_size;
+                let panel_size = NSSize::new(
+                    BANNER_WIDTH + SHADOW_PAD_X * 2.0,
+                    banner_h + SHADOW_PAD_TOP + SHADOW_PAD_BOTTOM,
+                );
 
+                self.root_view
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), panel_size));
+                self.shadow_view.setFrame(NSRect::new(
+                    NSPoint::new(SHADOW_PAD_X, SHADOW_PAD_BOTTOM),
+                    card_size,
+                ));
                 self.card_view
-                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), card_size));
                 self.click_shield
-                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
+                    .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), card_size));
                 if let Some(icon_view) = &self.icon_view {
                     let icon_y = (row_bottom + (row_h - ICON_SIZE) * 0.5).round();
                     icon_view.setFrame(NSRect::new(
@@ -1255,13 +1344,19 @@ mod macos_impl {
             }
             self.last_reduce_motion = reduce_motion;
 
-            let (ox, oy) =
-                compute_macos_banner_origin(visible, (banner_size.width, banner_size.height));
+            let (card_x, card_y) =
+                compute_macos_banner_origin(visible, (self.card_size.width, self.card_size.height));
+            let ox = card_x - SHADOW_PAD_X;
+            let oy = card_y - SHADOW_PAD_BOTTOM;
+            let panel_size = NSSize::new(
+                self.card_size.width + SHADOW_PAD_X * 2.0,
+                self.card_size.height + SHADOW_PAD_TOP + SHADOW_PAD_BOTTOM,
+            );
             let origin_changed =
                 (prev_frame.origin.x - ox).abs() > 0.5 || (prev_frame.origin.y - oy).abs() > 0.5;
             if needs_layout || origin_changed {
                 self.panel
-                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), banner_size), was_visible);
+                    .setFrame_display(NSRect::new(NSPoint::new(ox, oy), panel_size), was_visible);
             }
             if !was_visible {
                 self.panel.orderFrontRegardless();

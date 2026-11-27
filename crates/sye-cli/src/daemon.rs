@@ -462,6 +462,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
 
     let is_first_run = !paths.config_file.exists();
     let (mut config, load_err) = Config::load_or_default(&paths.config_file);
+    let config_loaded = load_err.is_none();
     if let Some(err) = load_err {
         eprintln!("Warning: falling back to default config ({err})");
     }
@@ -469,7 +470,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         let sys_autostart = (!is_first_run)
             .then(|| sye_platform::query_system_autostart(Some(&paths.config_file)))
             .flatten();
-        match plan_startup_autostart(is_first_run, config.autostart, sys_autostart) {
+        match plan_startup_autostart(is_first_run, config_loaded, config.autostart, sys_autostart) {
             StartupAutostartPlan::RegisterAndPersist(enabled) => {
                 if let Err(err) =
                     sye_platform::sync_system_autostart(enabled, Some(&paths.config_file))
@@ -490,6 +491,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                     eprintln!("Warning: failed to synchronize autostart entry: {err}");
                 }
             }
+            StartupAutostartPlan::KeepSystem => {}
         }
     }
 
@@ -896,10 +898,12 @@ enum StartupAutostartPlan {
     RegisterAndPersist(bool),
     AdoptSystem(bool),
     SyncFromConfig(bool),
+    KeepSystem,
 }
 
 const fn plan_startup_autostart(
     is_first_run: bool,
+    config_loaded: bool,
     config_autostart: bool,
     system_autostart: Option<bool>,
 ) -> StartupAutostartPlan {
@@ -907,8 +911,11 @@ const fn plan_startup_autostart(
         StartupAutostartPlan::RegisterAndPersist(config_autostart)
     } else if let Some(sys) = system_autostart {
         StartupAutostartPlan::AdoptSystem(sys)
-    } else {
+    } else if config_loaded {
         StartupAutostartPlan::SyncFromConfig(config_autostart)
+    } else {
+        // A broken `config.toml` falls back to defaults, which must not overwrite the login item.
+        StartupAutostartPlan::KeepSystem
     }
 }
 
@@ -1009,28 +1016,32 @@ mod tests {
     #[test]
     fn startup_autostart_plan_registers_first_run_and_respects_os_thereafter() {
         assert_eq!(
-            plan_startup_autostart(true, true, Some(false)),
+            plan_startup_autostart(true, true, true, Some(false)),
             StartupAutostartPlan::RegisterAndPersist(true)
         );
         assert_eq!(
-            plan_startup_autostart(true, true, None),
+            plan_startup_autostart(true, true, true, None),
             StartupAutostartPlan::RegisterAndPersist(true)
         );
         assert_eq!(
-            plan_startup_autostart(false, true, Some(false)),
+            plan_startup_autostart(false, true, true, Some(false)),
             StartupAutostartPlan::AdoptSystem(false)
         );
         assert_eq!(
-            plan_startup_autostart(false, false, Some(true)),
+            plan_startup_autostart(false, true, false, Some(true)),
             StartupAutostartPlan::AdoptSystem(true)
         );
         assert_eq!(
-            plan_startup_autostart(false, true, None),
+            plan_startup_autostart(false, true, true, None),
             StartupAutostartPlan::SyncFromConfig(true)
         );
         assert_eq!(
-            plan_startup_autostart(false, false, None),
+            plan_startup_autostart(false, true, false, None),
             StartupAutostartPlan::SyncFromConfig(false)
+        );
+        assert_eq!(
+            plan_startup_autostart(false, false, true, None),
+            StartupAutostartPlan::KeepSystem
         );
     }
 

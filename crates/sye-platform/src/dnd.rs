@@ -189,13 +189,13 @@ fn is_macos_game_category(category: &str) -> bool {
 
 #[cfg(any(target_os = "windows", test))]
 const fn classify_windows_notification_state(raw_state: i32) -> (bool, bool, bool) {
+    const QUNS_BUSY: i32 = 2;
+    const QUNS_RUNNING_D3D_FULL_SCREEN: i32 = 3;
+    const QUNS_PRESENTATION_MODE: i32 = 4;
     match raw_state {
-        // QUNS_BUSY
-        2 => (true, false, false),
-        // QUNS_RUNNING_D3D_FULL_SCREEN
-        3 => (true, false, true),
-        // QUNS_PRESENTATION_MODE
-        4 => (false, true, false),
+        QUNS_BUSY => (true, false, false),
+        QUNS_RUNNING_D3D_FULL_SCREEN => (true, false, true),
+        QUNS_PRESENTATION_MODE => (false, true, false),
         _ => (false, false, false),
     }
 }
@@ -455,6 +455,18 @@ mod linux_impl {
         let Ok(conn) = zbus::blocking::Connection::session() else {
             return false;
         };
+        // A direct method call would D-Bus-activate `gamemoded` on hosts that install it but
+        // do not run it.
+        let Ok(proxy) = zbus::blocking::fdo::DBusProxy::new(&conn) else {
+            return false;
+        };
+        let Ok(name) = zbus::names::BusName::from_static_str("com.feralinteractive.GameMode")
+        else {
+            return false;
+        };
+        if !proxy.name_has_owner(name).unwrap_or(false) {
+            return false;
+        }
         let Ok(msg) = conn.call_method(
             Some("com.feralinteractive.GameMode"),
             "/com/feralinteractive/GameMode",
@@ -476,7 +488,7 @@ mod macos_impl {
     use objc2_app_kit::{NSRunningApplication, NSWorkspace};
     use objc2_core_graphics::{CGDisplayIsCaptured, CGMainDisplayID};
     use objc2_foundation::{NSBundle, NSString, ns_string};
-    use sye_core::{DndContext, DndQueryOptions, is_gaming_candidate};
+    use sye_core::{DndContext, DndQueryOptions, is_excluded_game_process, is_gaming_candidate};
 
     use super::{
         extract_executable_file_name, is_macos_game_category, parse_macos_frontmost_output,
@@ -519,14 +531,15 @@ end tell
             .as_deref()
             .and_then(extract_executable_file_name)
             .or_else(|| localized_name.clone());
-        let is_game_category = app
-            .bundleURL()
-            .and_then(|url| NSBundle::bundleWithURL(&url))
-            .and_then(|bundle| {
-                bundle.objectForInfoDictionaryKey(ns_string!("LSApplicationCategoryType"))
-            })
-            .and_then(|value| value.downcast::<NSString>().ok())
-            .is_some_and(|category| is_macos_game_category(&category.to_string()));
+        let is_game_category = !is_excluded_game_process(process_name.as_deref())
+            && app
+                .bundleURL()
+                .and_then(|url| NSBundle::bundleWithURL(&url))
+                .and_then(|bundle| {
+                    bundle.objectForInfoDictionaryKey(ns_string!("LSApplicationCategoryType"))
+                })
+                .and_then(|value| value.downcast::<NSString>().ok())
+                .is_some_and(|category| is_macos_game_category(&category.to_string()));
 
         AppMetadata {
             localized_name,

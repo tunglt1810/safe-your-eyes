@@ -406,7 +406,8 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
     base.mkdir(parents=True, exist_ok=True)
     cfg = base / "config.toml"
     # Idle CI runners report system idle > 300s, which puts SmartPause into
-    # `resting` and freezes the countdown. Disable SmartPause and autostart for this check.
+    # `resting` and freezes the countdown. Disable SmartPause for this check.
+    # A first non-headless run registers a login item unless the config turns autostart off.
     cfg.write_text("autostart = false\n\n[smart_pause]\nenabled = false\n", encoding="utf-8")
     sock = base / "sye.sock"
     log_path = base / "daemon.stderr.log"

@@ -129,12 +129,15 @@ impl DndDecision {
 
 const EXCLUDED_GAME_PROCESSES: &[&str] = &[
     "steam",
+    "steam_osx",
     "steamwebhelper",
     "epicgameslauncher",
+    "epicgameslauncher-mac-shipping",
     "riotclientservices",
     "riotclientux",
     "battle.net",
     "goggalaxy",
+    "gog galaxy",
     "upc",
     "eadesktop",
     "unity",
@@ -205,15 +208,12 @@ pub fn is_gaming_candidate(
     process_name: Option<&str>,
     executable_path: Option<&str>,
 ) -> bool {
+    if is_excluded_game_process(process_name) {
+        return false;
+    }
     let process_stem = process_name
         .map(normalize_process_stem)
         .filter(|s| !s.is_empty());
-
-    if let Some(ref stem) = process_stem
-        && EXCLUDED_GAME_PROCESSES.contains(&stem.as_str())
-    {
-        return false;
-    }
 
     if let Some(path) = executable_path {
         let normalized_path = path.trim().replace('\\', "/").to_lowercase();
@@ -235,6 +235,13 @@ pub fn is_gaming_candidate(
     process_stem
         .as_deref()
         .is_some_and(|stem| KNOWN_GAME_PROCESSES.contains(&stem))
+}
+
+#[must_use]
+pub fn is_excluded_game_process(process_name: Option<&str>) -> bool {
+    process_name
+        .map(normalize_process_stem)
+        .is_some_and(|stem| EXCLUDED_GAME_PROCESSES.contains(&stem.as_str()))
 }
 
 #[must_use]
@@ -655,6 +662,11 @@ mod tests {
             ..DndContext::default()
         };
         assert!(!is_gaming_context(&unity_editor));
+
+        assert!(is_excluded_game_process(Some("steam_osx")));
+        assert!(is_excluded_game_process(Some("EpicGamesLauncher.exe")));
+        assert!(!is_excluded_game_process(Some("Hades2.exe")));
+        assert!(!is_excluded_game_process(None));
 
         let linux_steam_class = DndContext {
             active_window_class: Some("steam_app_1091500".to_owned()),

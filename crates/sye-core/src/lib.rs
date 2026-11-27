@@ -23,7 +23,8 @@ pub use ipc::{
 };
 pub use policies::{
     ACTIVE_POSTPONE_SECS, DndContext, DndDecision, DndReason, DoNotDisturbPolicy, SkipLimitPolicy,
-    SmartPauseDecision, SmartPausePolicy, is_gaming_candidate, is_gaming_context,
+    SmartPauseDecision, SmartPausePolicy, is_excluded_game_process, is_gaming_candidate,
+    is_gaming_context,
 };
 pub use queue::{BreakQueue, QueuedBreak, ResolvedBreak};
 pub use scheduler::{

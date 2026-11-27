@@ -26,6 +26,19 @@ M8 21h8 M12 17v4";
 const DOWNLOAD_ICON_SVG: &str = "\
 M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4 \
 M7 10l5 5 5-5 M12 15V3";
+const CLOCK_ICON_SVG: &str = "\
+M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z \
+M12 6v6l4 2";
+const ALERT_ICON_SVG: &str = "\
+M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z \
+M12 8v4 M12 16h.01";
+const EYE_ICON_SVG: &str = "\
+M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z \
+M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z";
+const PAUSE_ICON_SVG: &str = "M9 5v14 M15 5v14";
+const DISABLED_ICON_SVG: &str = "\
+M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z \
+M4.93 4.93l14.14 14.14";
 
 const APP_ICON_RGBA_LEN: usize = (APP_ICON_SIZE as usize) * (APP_ICON_SIZE as usize) * 4;
 
@@ -218,46 +231,144 @@ pub(crate) enum CountdownTone {
 }
 
 impl CountdownTone {
-    const fn dot_color(self) -> AdaptiveColor {
+    const fn bg_color(self) -> AdaptiveColor {
         match self {
-            Self::Active => crate::theme::kpi::SAGE_ACCENT,
-            Self::Warning => colors::WARNING,
-            Self::Break => colors::ACCENT,
-            Self::Paused => crate::theme::kpi::MIST_ACCENT,
-            Self::Disabled => colors::TEXT_DISABLED,
+            Self::Active => crate::theme::badge::GREEN_BG,
+            Self::Warning => crate::theme::badge::YELLOW_BG,
+            Self::Break => crate::theme::badge::ORANGE_BG,
+            Self::Paused => crate::theme::badge::BLUE_BG,
+            Self::Disabled => crate::theme::badge::GRAY_BG,
+        }
+    }
+
+    const fn border_color(self) -> AdaptiveColor {
+        match self {
+            Self::Active => crate::theme::badge::GREEN_BORDER,
+            Self::Warning => crate::theme::badge::YELLOW_BORDER,
+            Self::Break => crate::theme::badge::ORANGE_BORDER,
+            Self::Paused => crate::theme::badge::BLUE_BORDER,
+            Self::Disabled => crate::theme::badge::GRAY_BORDER,
+        }
+    }
+
+    const fn icon_color(self) -> AdaptiveColor {
+        match self {
+            Self::Active => crate::theme::badge::GREEN_ICON,
+            Self::Warning => crate::theme::badge::YELLOW_ICON,
+            Self::Break => crate::theme::badge::ORANGE_ICON,
+            Self::Paused => crate::theme::badge::BLUE_ICON,
+            Self::Disabled => crate::theme::badge::GRAY_ICON,
+        }
+    }
+
+    const fn text_color(self) -> AdaptiveColor {
+        match self {
+            Self::Active => crate::theme::badge::GREEN_TEXT,
+            Self::Warning => crate::theme::badge::YELLOW_TEXT,
+            Self::Break => crate::theme::badge::ORANGE_TEXT,
+            Self::Paused => crate::theme::badge::BLUE_TEXT,
+            Self::Disabled => crate::theme::badge::GRAY_TEXT,
+        }
+    }
+
+    const fn time_chip_bg(self) -> AdaptiveColor {
+        match self {
+            Self::Active => crate::theme::badge::GREEN_CHIP_BG,
+            Self::Warning => crate::theme::badge::YELLOW_CHIP_BG,
+            Self::Break => crate::theme::badge::ORANGE_BG,
+            Self::Paused => crate::theme::badge::BLUE_BG,
+            Self::Disabled => crate::theme::badge::GRAY_BG,
+        }
+    }
+
+    const fn icon_svg(self) -> &'static str {
+        match self {
+            Self::Active => CLOCK_ICON_SVG,
+            Self::Warning => ALERT_ICON_SVG,
+            Self::Break => EYE_ICON_SVG,
+            Self::Paused => PAUSE_ICON_SVG,
+            Self::Disabled => DISABLED_ICON_SVG,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CountdownPillState {
+    pub(crate) tone: CountdownTone,
+    pub(crate) label: String,
+    pub(crate) time: Option<String>,
+    pub(crate) accessible_label: String,
+}
+
+impl Default for CountdownPillState {
+    fn default() -> Self {
+        Self {
+            tone: CountdownTone::Disabled,
+            label: String::new(),
+            time: None,
+            accessible_label: String::new(),
         }
     }
 }
 
 pub(crate) fn countdown_status_pill(
-    tone: impl Fn() -> CountdownTone + 'static,
-    label: impl IntoReactive<SharedString>,
+    state: impl Fn() -> CountdownPillState + Copy + 'static,
 ) -> impl IntoElement {
+    let icon = canvas(move || {
+        let tone = state().tone;
+        let stroke = color(tone.icon_color());
+        Painter::new()
+            .scale(14.0_f32 / 24.0_f32, 14.0_f32 / 24.0_f32)
+            .stroke_color(stroke)
+            .line_width(2.0_f32)
+            .line_cap(LineCap::Round)
+            .line_join(LineJoin::Round)
+            .stroke_svg(tone.icon_svg())
+    })
+    .w(px(14.0))
+    .h(px(14.0))
+    .flex_shrink_0();
+
     view()
+        .accessible(true)
+        .role(AccessibilityRole::Timer)
+        .label(move || state().accessible_label)
         .h(px(36.0))
         .px_3()
         .flex_row()
         .items_center()
         .gap_2()
         .rounded(radii::PILL)
-        .bg(colors::BACKGROUND_SURFACE)
+        .bg(move || state().tone.bg_color())
         .border_1()
-        .border_color(colors::BORDER_EMPHASIZED)
+        .border_color(move || state().tone.border_color())
+        .transition_colors()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
+        .child(icon)
         .child(
-            view()
-                .w(px(8.0))
-                .h(px(8.0))
-                .rounded(radii::PILL)
-                .flex_shrink_0()
-                .bg(move || tone().dot_color()),
-        )
-        .child(
-            text(label)
-                .text_sm()
+            text(move || state().label)
+                .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_PRIMARY)
-                .tabular_nums(),
+                .text_color(move || state().tone.text_color()),
         )
+        .child(when(
+            move || state().time.is_some(),
+            move || {
+                view()
+                    .px_2()
+                    .py(px(2.0))
+                    .rounded(radii::PILL)
+                    .bg(move || state().tone.time_chip_bg())
+                    .child(
+                        text(move || state().time.unwrap_or_default())
+                            .text_sm()
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(move || state().tone.text_color())
+                            .tabular_nums(),
+                    )
+            },
+        ))
 }
 
 pub(crate) fn section_header(title: &'static str, caption: &'static str) -> impl IntoElement {

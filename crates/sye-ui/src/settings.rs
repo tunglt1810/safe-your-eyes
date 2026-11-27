@@ -20,11 +20,12 @@ use crate::theme::{
     radii, theme_mode_for_appearance,
 };
 use crate::ui::{
-    CountdownTone, KpiTone, app_icon, countdown_status_pill, cozy_input, cozy_input_with_disabled,
-    cozy_switch, cozy_switch_with_disabled, destructive_button, external_link_button, page_heading,
-    pastel_kpi_card, primary_button_with_disabled, secondary_button, section_divider,
-    section_header, sidebar_nav_indicator, sidebar_nav_item, stagger_item, status_banner,
-    support_link, support_qr_card, theme_toggle_button, version_update_badge,
+    CountdownPillState, CountdownTone, KpiTone, app_icon, countdown_status_pill, cozy_input,
+    cozy_input_with_disabled, cozy_switch, cozy_switch_with_disabled, destructive_button,
+    external_link_button, page_heading, pastel_kpi_card, primary_button_with_disabled,
+    secondary_button, section_divider, section_header, sidebar_nav_indicator, sidebar_nav_item,
+    stagger_item, status_banner, support_link, support_qr_card, theme_toggle_button,
+    version_update_badge,
 };
 
 #[cfg(target_os = "linux")]
@@ -398,35 +399,74 @@ pub struct SettingsStatusConfig {
     pub on_poll_status: Option<StatusPollCallback>,
 }
 
-fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<(CountdownTone, String)> {
+fn format_spoken_duration(total_secs: u64) -> String {
+    let mins = total_secs / 60;
+    let secs = total_secs % 60;
+    let min_unit = if mins == 1 { "minute" } else { "minutes" };
+    let sec_unit = if secs == 1 { "second" } else { "seconds" };
+    match (mins, secs) {
+        (0, s) => format!("{s} {sec_unit}"),
+        (m, 0) => format!("{m} {min_unit}"),
+        (m, s) => format!("{m} {min_unit} {s} {sec_unit}"),
+    }
+}
+
+fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<CountdownPillState> {
     match snapshot.state {
         SchedulerState::Quit => None,
-        _ if !snapshot.enabled => Some((CountdownTone::Disabled, "Disabled".to_owned())),
-        SchedulerState::Stopped => Some((CountdownTone::Disabled, "Disabled".to_owned())),
+        _ if !snapshot.enabled => Some(CountdownPillState {
+            tone: CountdownTone::Disabled,
+            label: "Disabled".to_owned(),
+            time: None,
+            accessible_label: "Break timer disabled".to_owned(),
+        }),
+        SchedulerState::Stopped => Some(CountdownPillState {
+            tone: CountdownTone::Disabled,
+            label: "Disabled".to_owned(),
+            time: None,
+            accessible_label: "Break timer disabled".to_owned(),
+        }),
         SchedulerState::Waiting => {
-            let kind = match snapshot.next_break_type {
-                Some(BreakType::Short) => "Short",
-                Some(BreakType::Long) => "Long",
-                None => "Next",
+            let (kind, spoken_kind) = match snapshot.next_break_type {
+                Some(BreakType::Short) => ("Short", "Next short break"),
+                Some(BreakType::Long) => ("Long", "Next long break"),
+                None => ("Next", "Next break"),
             };
-            Some((
-                CountdownTone::Active,
-                format!(
-                    "{kind} · {}",
-                    format_mm_ss(snapshot.seconds_until_next_break)
-                ),
-            ))
+            let spoken_time = format_spoken_duration(snapshot.seconds_until_next_break);
+            Some(CountdownPillState {
+                tone: CountdownTone::Active,
+                label: kind.to_owned(),
+                time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
+                accessible_label: format!("{spoken_kind} in {spoken_time}"),
+            })
         }
-        SchedulerState::PreBreak => Some((
-            CountdownTone::Warning,
-            format!(
-                "Starting · {}",
-                format_mm_ss(snapshot.seconds_until_next_break)
-            ),
-        )),
-        SchedulerState::Break => Some((CountdownTone::Break, "Break active".to_owned())),
-        SchedulerState::Resting => Some((CountdownTone::Paused, "Paused (idle)".to_owned())),
-        SchedulerState::Start => Some((CountdownTone::Disabled, "Initializing".to_owned())),
+        SchedulerState::PreBreak => {
+            let spoken_time = format_spoken_duration(snapshot.seconds_until_next_break);
+            Some(CountdownPillState {
+                tone: CountdownTone::Warning,
+                label: "Starting".to_owned(),
+                time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
+                accessible_label: format!("Break starting in {spoken_time}"),
+            })
+        }
+        SchedulerState::Break => Some(CountdownPillState {
+            tone: CountdownTone::Break,
+            label: "Break active".to_owned(),
+            time: None,
+            accessible_label: "Break active".to_owned(),
+        }),
+        SchedulerState::Resting => Some(CountdownPillState {
+            tone: CountdownTone::Paused,
+            label: "Paused (idle)".to_owned(),
+            time: None,
+            accessible_label: "Break timer paused while idle".to_owned(),
+        }),
+        SchedulerState::Start => Some(CountdownPillState {
+            tone: CountdownTone::Disabled,
+            label: "Initializing".to_owned(),
+            time: None,
+            accessible_label: "Break timer initializing".to_owned(),
+        }),
     }
 }
 
@@ -1901,21 +1941,9 @@ pub(crate) fn build_settings_view_with_hooks(
                         .child(when(
                             move || countdown_pill.with(Option::is_some),
                             move || {
-                                countdown_status_pill(
-                                    move || {
-                                        countdown_pill.with(|pill| {
-                                            pill.as_ref()
-                                                .map_or(CountdownTone::Disabled, |(tone, _)| *tone)
-                                        })
-                                    },
-                                    move || {
-                                        countdown_pill.with(|pill| {
-                                            pill.as_ref().map_or_else(String::new, |(_, label)| {
-                                                label.clone()
-                                            })
-                                        })
-                                    },
-                                )
+                                countdown_status_pill(move || {
+                                    countdown_pill.with(|pill| pill.clone().unwrap_or_default())
+                                })
                             },
                         ))
                         .child(theme_toggle_button(
@@ -4071,7 +4099,12 @@ mod tests {
         };
         assert_eq!(
             format_countdown_pill(&base),
-            Some((CountdownTone::Active, "Short · 14:32".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Active,
+                label: "Short".to_owned(),
+                time: Some("14:32".to_owned()),
+                accessible_label: "Next short break in 14 minutes 32 seconds".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
@@ -4079,7 +4112,12 @@ mod tests {
                 seconds_until_next_break: 4500,
                 ..base.clone()
             }),
-            Some((CountdownTone::Active, "Long · 75:00".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Active,
+                label: "Long".to_owned(),
+                time: Some("75:00".to_owned()),
+                accessible_label: "Next long break in 75 minutes".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
@@ -4087,7 +4125,12 @@ mod tests {
                 seconds_until_next_break: 65,
                 ..base.clone()
             }),
-            Some((CountdownTone::Active, "Next · 01:05".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Active,
+                label: "Next".to_owned(),
+                time: Some("01:05".to_owned()),
+                accessible_label: "Next break in 1 minute 5 seconds".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
@@ -4095,21 +4138,36 @@ mod tests {
                 seconds_until_next_break: 8,
                 ..base.clone()
             }),
-            Some((CountdownTone::Warning, "Starting · 00:08".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Warning,
+                label: "Starting".to_owned(),
+                time: Some("00:08".to_owned()),
+                accessible_label: "Break starting in 8 seconds".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
                 state: SchedulerState::Break,
                 ..base.clone()
             }),
-            Some((CountdownTone::Break, "Break active".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Break,
+                label: "Break active".to_owned(),
+                time: None,
+                accessible_label: "Break active".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
                 state: SchedulerState::Resting,
                 ..base.clone()
             }),
-            Some((CountdownTone::Paused, "Paused (idle)".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Paused,
+                label: "Paused (idle)".to_owned(),
+                time: None,
+                accessible_label: "Break timer paused while idle".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
@@ -4117,21 +4175,36 @@ mod tests {
                 enabled: false,
                 ..base.clone()
             }),
-            Some((CountdownTone::Disabled, "Disabled".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Disabled,
+                label: "Disabled".to_owned(),
+                time: None,
+                accessible_label: "Break timer disabled".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
                 enabled: false,
                 ..base.clone()
             }),
-            Some((CountdownTone::Disabled, "Disabled".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Disabled,
+                label: "Disabled".to_owned(),
+                time: None,
+                accessible_label: "Break timer disabled".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
                 state: SchedulerState::Start,
                 ..base.clone()
             }),
-            Some((CountdownTone::Disabled, "Initializing".to_owned()))
+            Some(CountdownPillState {
+                tone: CountdownTone::Disabled,
+                label: "Initializing".to_owned(),
+                time: None,
+                accessible_label: "Break timer initializing".to_owned(),
+            })
         );
         assert_eq!(
             format_countdown_pill(&StatusSnapshot {
@@ -4212,18 +4285,38 @@ mod tests {
             ..EngineConfig::new(Root::of::<TestCountdownSettings>())
         })
         .map_err(|e| e.to_string())?;
-        app.wait_for("Short · 14:32")?;
+        app.wait_for("14:32")?;
+        assert!(app.shows("Short"));
         assert!(app.shows("Theme: System"));
 
+        let timer_label = |screen: &nsh_testing::Screen| -> Result<Option<String>, String> {
+            let Some(tree) = screen.accessibility(None)? else {
+                return Ok(None);
+            };
+            let mut stack = vec![&tree];
+            while let Some(node) = stack.pop() {
+                if node.role == Some(AccessibilityRole::Timer) {
+                    return Ok(node.label.clone());
+                }
+                stack.extend(node.children.iter());
+            }
+            Ok(None)
+        };
+
+        assert_eq!(
+            timer_label(app.screen())?,
+            Some("Next short break in 14 minutes 32 seconds".to_owned())
+        );
+
         let nodes = app.screen().layout_nodes();
-        let pill_node = nodes
+        let pill_time_node = nodes
             .iter()
             .find(|n| {
                 n.text
                     .as_ref()
-                    .is_some_and(|t| t.text.visible_text() == "Short · 14:32")
+                    .is_some_and(|t| t.text.visible_text() == "14:32")
             })
-            .ok_or("expected countdown pill text node")?;
+            .ok_or("expected countdown pill time text node")?;
         let theme_node = nodes
             .iter()
             .find(|n| {
@@ -4233,21 +4326,21 @@ mod tests {
             })
             .ok_or("expected theme toggle text node")?;
         assert!(
-            pill_node.bounds.origin.x.0 < theme_node.bounds.origin.x.0,
+            pill_time_node.bounds.origin.x.0 < theme_node.bounds.origin.x.0,
             "Countdown pill must sit to the left of Theme toggle, got pill={:?}, theme={:?}",
-            pill_node.bounds,
+            pill_time_node.bounds,
             theme_node.bounds
         );
         assert!(
-            (pill_node.bounds.origin.y.0 - theme_node.bounds.origin.y.0).abs() < 2.0,
+            (pill_time_node.bounds.origin.y.0 - theme_node.bounds.origin.y.0).abs() < 2.0,
             "Countdown pill must align vertically with Theme toggle, got pill={:?}, theme={:?}",
-            pill_node.bounds,
+            pill_time_node.bounds,
             theme_node.bounds
         );
 
         app.press("Policies")?;
         app.wait_for("Break Enforcement")?;
-        app.wait_for("Short · 14:31")?;
+        app.wait_for("14:31")?;
 
         if let Ok(mut guard) = polled_snapshot.lock() {
             *guard = Some(StatusSnapshot {
@@ -4256,6 +4349,10 @@ mod tests {
             });
         }
         app.wait_for("Paused (idle)")?;
+        assert_eq!(
+            timer_label(app.screen())?,
+            Some("Break timer paused while idle".to_owned())
+        );
 
         if let Ok(mut guard) = polled_snapshot.lock() {
             *guard = None;

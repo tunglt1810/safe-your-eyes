@@ -108,6 +108,37 @@ pub(crate) mod kpi {
     pub(crate) const MIST_ACCENT: AdaptiveColor = tone(rgb(0xA2B3C1), rgb(0x6D8296));
 }
 
+pub(crate) mod badge {
+    use super::{AdaptiveColor, rgb, rgba, tone};
+
+    pub(crate) const GREEN_BG: AdaptiveColor = tone(rgb(0xE2DEC4), rgb(0x31392C));
+    pub(crate) const GREEN_BORDER: AdaptiveColor = tone(rgb(0xB8C4A6), rgb(0x5E8C7A));
+    pub(crate) const GREEN_ICON: AdaptiveColor = tone(rgb(0x3C6E58), rgb(0x8EC2AC));
+    pub(crate) const GREEN_TEXT: AdaptiveColor = tone(rgb(0x234930), rgb(0xC3E6CC));
+    pub(crate) const GREEN_CHIP_BG: AdaptiveColor = tone(rgba(0x23493018), rgba(0xC3E6CC1F));
+
+    pub(crate) const YELLOW_BG: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
+    pub(crate) const YELLOW_BORDER: AdaptiveColor = tone(rgb(0xE5C27D), rgb(0xC99A44));
+    pub(crate) const YELLOW_ICON: AdaptiveColor = tone(rgb(0x8A5406), rgb(0xF5C96B));
+    pub(crate) const YELLOW_TEXT: AdaptiveColor = tone(rgb(0x5E3904), rgb(0xFCE09B));
+    pub(crate) const YELLOW_CHIP_BG: AdaptiveColor = tone(rgba(0x5E390418), rgba(0xFCE09B1F));
+
+    pub(crate) const ORANGE_BG: AdaptiveColor = tone(rgb(0xFBCBB4), rgb(0x432F28));
+    pub(crate) const ORANGE_BORDER: AdaptiveColor = tone(rgb(0xEDA98B), rgb(0xD97B56));
+    pub(crate) const ORANGE_ICON: AdaptiveColor = tone(rgb(0xB5542B), rgb(0xF2A57E));
+    pub(crate) const ORANGE_TEXT: AdaptiveColor = tone(rgb(0x6B2B11), rgb(0xFAD1BC));
+
+    pub(crate) const BLUE_BG: AdaptiveColor = tone(rgb(0xD2D7DA), rgb(0x2B333D));
+    pub(crate) const BLUE_BORDER: AdaptiveColor = tone(rgb(0xA2B3C1), rgb(0x5C7388));
+    pub(crate) const BLUE_ICON: AdaptiveColor = tone(rgb(0x2F5B84), rgb(0x9BC5EA));
+    pub(crate) const BLUE_TEXT: AdaptiveColor = tone(rgb(0x1F3F5C), rgb(0xC5DEF5));
+
+    pub(crate) const GRAY_BG: AdaptiveColor = tone(rgb(0xEDE0CE), rgb(0x2E2720));
+    pub(crate) const GRAY_BORDER: AdaptiveColor = tone(rgb(0xDFCBB5), rgb(0x473E35));
+    pub(crate) const GRAY_ICON: AdaptiveColor = tone(rgb(0x5B4C3B), rgb(0xC2B7B1));
+    pub(crate) const GRAY_TEXT: AdaptiveColor = tone(rgb(0x3B2A1C), rgb(0xE8DFD5));
+}
+
 pub(crate) mod radii {
     use super::{Points, px};
 

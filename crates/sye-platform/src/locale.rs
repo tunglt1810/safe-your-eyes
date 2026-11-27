@@ -43,8 +43,17 @@ pub(crate) fn detect_locale_from_unix_env(
     lc_messages: Option<&str>,
     lang: Option<&str>,
 ) -> Locale {
-    if let Some(val) = lc_all.map(str::trim).filter(|s| !s.is_empty()) {
-        return Locale::from_tag(val).unwrap_or(Locale::En);
+    // Same precedence as gettext: LANGUAGE wins unless the effective message locale is C/POSIX.
+    let effective = [lc_all, lc_messages, lang]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty());
+    if let Some(val) = effective {
+        let base = val.split(['.', '@']).next().unwrap_or(val);
+        if base == "C" || base == "POSIX" {
+            return Locale::En;
+        }
     }
 
     if let Some(list) = language.map(str::trim).filter(|s| !s.is_empty()) {
@@ -55,16 +64,7 @@ pub(crate) fn detect_locale_from_unix_env(
         }
     }
 
-    for candidate in [lc_messages, lang].into_iter().flatten() {
-        let trimmed = candidate.trim();
-        if !trimmed.is_empty()
-            && let Some(locale) = Locale::from_tag(trimmed)
-        {
-            return locale;
-        }
-    }
-
-    Locale::En
+    effective.and_then(Locale::from_tag).unwrap_or(Locale::En)
 }
 
 #[cfg(any(windows, test))]
@@ -176,10 +176,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unix_env_precedence_respects_lc_all_language_lc_messages_lang() {
+    fn unix_env_precedence_matches_gettext() {
         assert_eq!(
-            detect_locale_from_unix_env(Some("vi_VN.UTF-8"), Some("en_US"), None, Some("en_US")),
+            detect_locale_from_unix_env(Some("vi_VN.UTF-8"), None, None, Some("en_US")),
             Locale::Vi
+        );
+        assert_eq!(
+            detect_locale_from_unix_env(Some("en_US.UTF-8"), Some("vi:en"), None, None),
+            Locale::Vi
+        );
+        assert_eq!(
+            detect_locale_from_unix_env(None, Some("fr_FR"), None, Some("vi_VN.UTF-8")),
+            Locale::Vi
+        );
+        assert_eq!(
+            detect_locale_from_unix_env(None, Some("vi"), None, Some("C.UTF-8")),
+            Locale::En
         );
         assert_eq!(
             detect_locale_from_unix_env(Some("C"), Some("vi_VN"), Some("vi_VN"), Some("vi_VN")),

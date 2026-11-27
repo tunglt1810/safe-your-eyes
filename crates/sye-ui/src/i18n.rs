@@ -1,4 +1,4 @@
-use sye_core::config::{BreakType, ThemeMode};
+use sye_core::config::{BreakType, ConfigError, ThemeMode};
 use sye_core::{HOMEBREW_UPGRADE_COMMAND, LanguageMode, Locale};
 
 #[derive(Debug, Clone, Copy)]
@@ -577,5 +577,41 @@ impl UpdateStatusMessage {
                 format!("Không thể mở trang tải xuống: {err}")
             }
         }
+    }
+}
+
+// `sye-core` keeps `ConfigError` text in English because the CLI and E2E tests read it.
+#[must_use]
+pub(crate) fn format_config_error(err: &ConfigError, locale: Locale) -> String {
+    if locale == Locale::En {
+        return err.to_string();
+    }
+    match err {
+        ConfigError::Io { message } => format!("Lỗi đọc/ghi cấu hình: {message}"),
+        ConfigError::Parse { message } => format!("Lỗi phân tích cấu hình: {message}"),
+        ConfigError::Serialize { message } => format!("Lỗi tuần tự hóa cấu hình: {message}"),
+        ConfigError::UnsupportedSchemaVersion { found, supported } => {
+            format!("Không hỗ trợ schema_version {found} của cấu hình; cần {supported}")
+        }
+        ConfigError::Validation(errors) => {
+            let details: Vec<String> = errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, validation_message_vi(&e.message)))
+                .collect();
+            format!("Cấu hình không hợp lệ: {}", details.join(", "))
+        }
+    }
+}
+
+fn validation_message_vi(message: &str) -> &str {
+    match message {
+        "must be at least 1" => "phải lớn hơn hoặc bằng 1",
+        "must be less than short_break_interval_secs" => "phải nhỏ hơn short_break_interval_secs",
+        "must be between 0 and 100" => "phải nằm trong khoảng 0 đến 100",
+        "must be at least 1 when limit_consecutive_skips is enabled" => {
+            "phải lớn hơn hoặc bằng 1 khi bật limit_consecutive_skips"
+        }
+        "must not be empty" => "không được để trống",
+        other => other,
     }
 }

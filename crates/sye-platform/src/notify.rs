@@ -198,15 +198,6 @@ impl Default for OsNotifier {
 }
 
 #[must_use]
-pub fn format_pre_break_notification(
-    break_type: BreakType,
-    title: &str,
-    warning_secs: u64,
-) -> (String, String) {
-    format_pre_break_notification_localized(break_type, title, warning_secs, Locale::En)
-}
-
-#[must_use]
 pub fn format_pre_break_notification_localized(
     break_type: BreakType,
     title: &str,
@@ -246,15 +237,6 @@ pub(crate) fn format_notice_accessibility_label(summary: &str, body: &str) -> St
         (true, false) => body.to_owned(),
         (true, true) => String::new(),
     }
-}
-
-#[cfg(any(target_os = "macos", windows, test))]
-#[must_use]
-pub(crate) fn format_pre_break_banner_copy(
-    break_type: BreakType,
-    title: &str,
-) -> (String, String, String) {
-    format_pre_break_banner_copy_localized(break_type, title, Locale::En)
 }
 
 #[cfg(any(target_os = "macos", windows, test))]
@@ -1694,24 +1676,27 @@ mod tests {
 
     #[test]
     fn format_pre_break_notification_handles_short_long_and_empty_title() {
-        let (summary, body) = format_pre_break_notification(BreakType::Short, "Blink", 10);
+        let (summary, body) =
+            format_pre_break_notification_localized(BreakType::Short, "Blink", 10, Locale::En);
         assert_eq!(summary, "Safe Your Eyes — Short break in 10s");
         assert_eq!(body, "Blink");
 
-        let (long_summary, long_body) = format_pre_break_notification(BreakType::Long, "   ", 15);
+        let (long_summary, long_body) =
+            format_pre_break_notification_localized(BreakType::Long, "   ", 15, Locale::En);
         assert_eq!(long_summary, "Safe Your Eyes — Long break in 15s");
         assert_eq!(long_body, "Prepare to rest your eyes.");
     }
 
     #[test]
     fn format_pre_break_banner_copy_formats_title_body_and_accessibility_label() {
-        let (title, body, a11y) = format_pre_break_banner_copy(BreakType::Short, "Blink");
+        let (title, body, a11y) =
+            format_pre_break_banner_copy_localized(BreakType::Short, "Blink", Locale::En);
         assert_eq!(title, "Short break");
         assert_eq!(body, "Blink");
         assert_eq!(a11y, "Safe Your Eyes: Short break starting soon. Blink");
 
         let (long_title, long_body, long_a11y) =
-            format_pre_break_banner_copy(BreakType::Long, "  ");
+            format_pre_break_banner_copy_localized(BreakType::Long, "  ", Locale::En);
         assert_eq!(long_title, "Long break");
         assert_eq!(long_body, "Prepare to rest your eyes.");
         assert_eq!(

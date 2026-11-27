@@ -125,10 +125,6 @@ impl fmt::Debug for TrayHandle {
 }
 
 impl TrayHandle {
-    pub fn try_new(initial: &TraySnapshot, tx: Sender<TrayEvent>) -> Result<Self, PlatformError> {
-        Self::try_new_with_locale(initial, Locale::En, tx)
-    }
-
     pub fn try_new_with_locale(
         initial: &TraySnapshot,
         locale: Locale,
@@ -987,11 +983,6 @@ pub fn map_menu_id_to_event(id: &str) -> Option<TrayEvent> {
 }
 
 #[must_use]
-pub fn format_update_menu_label(version: &str, updating: bool) -> String {
-    format_update_menu_label_localized(version, updating, Locale::En)
-}
-
-#[must_use]
 pub fn format_update_menu_label_localized(version: &str, updating: bool, locale: Locale) -> String {
     let clean = version.trim().trim_start_matches('v');
     match (locale, updating) {
@@ -1000,11 +991,6 @@ pub fn format_update_menu_label_localized(version: &str, updating: bool, locale:
         (Locale::Vi, true) => format!("Đang cập nhật lên v{clean}..."),
         (Locale::Vi, false) => format!("Có bản cập nhật (v{clean})"),
     }
-}
-
-#[must_use]
-pub fn format_status_label(snapshot: &TraySnapshot) -> String {
-    format_status_label_localized(snapshot, Locale::En)
 }
 
 #[must_use]
@@ -1079,11 +1065,6 @@ pub fn format_status_label_localized(snapshot: &TraySnapshot, locale: Locale) ->
 }
 
 #[must_use]
-pub fn format_tooltip(snapshot: &TraySnapshot) -> String {
-    format_tooltip_localized(snapshot, Locale::En)
-}
-
-#[must_use]
 pub fn format_tooltip_localized(snapshot: &TraySnapshot, locale: Locale) -> String {
     format!(
         "Safe Your Eyes — {}",
@@ -1094,11 +1075,6 @@ pub fn format_tooltip_localized(snapshot: &TraySnapshot, locale: Locale) -> Stri
 #[must_use]
 pub fn tray_tooltip_localized(snapshot: &TraySnapshot, locale: Locale) -> Option<String> {
     tray_tooltip_for_platform_localized(snapshot, cfg!(target_os = "macos"), locale)
-}
-
-#[must_use]
-pub fn tray_tooltip_for_platform(snapshot: &TraySnapshot, is_macos: bool) -> Option<String> {
-    tray_tooltip_for_platform_localized(snapshot, is_macos, Locale::En)
 }
 
 #[must_use]
@@ -1267,11 +1243,11 @@ mod tests {
         assert_eq!(map_menu_id_to_event(MENU_ID_STATUS), None);
         assert_eq!(map_menu_id_to_event("unknown"), None);
         assert_eq!(
-            format_update_menu_label("0.2.0", false),
+            format_update_menu_label_localized("0.2.0", false, Locale::En),
             "Update available (v0.2.0)"
         );
         assert_eq!(
-            format_update_menu_label("v0.2.0", true),
+            format_update_menu_label_localized("v0.2.0", true, Locale::En),
             "Updating to v0.2.0..."
         );
     }
@@ -1280,33 +1256,51 @@ mod tests {
     fn status_and_tooltip_format_all_scheduler_states() {
         let waiting = sample_snapshot(SchedulerState::Waiting, true);
         assert_eq!(
-            format_tooltip(&waiting),
+            format_tooltip_localized(&waiting, Locale::En),
             "Safe Your Eyes — Next short break in 14:50"
         );
-        assert_eq!(tray_tooltip_for_platform(&waiting, true), None);
         assert_eq!(
-            tray_tooltip_for_platform(&waiting, false).as_deref(),
+            tray_tooltip_for_platform_localized(&waiting, true, Locale::En),
+            None
+        );
+        assert_eq!(
+            tray_tooltip_for_platform_localized(&waiting, false, Locale::En).as_deref(),
             Some("Safe Your Eyes — Next short break in 14:50")
         );
         assert_eq!(icon_state_for_snapshot(&waiting), TrayIconState::Enabled);
 
         let mut pre = sample_snapshot(SchedulerState::PreBreak, true);
         pre.seconds_until_next_break = 10;
-        assert_eq!(format_status_label(&pre), "Break starting in 00:10");
+        assert_eq!(
+            format_status_label_localized(&pre, Locale::En),
+            "Break starting in 00:10"
+        );
         assert_eq!(icon_state_for_snapshot(&pre), TrayIconState::PreBreak);
 
         let resting = sample_snapshot(SchedulerState::Resting, true);
-        assert_eq!(format_status_label(&resting), "Paused (idle/resting)");
+        assert_eq!(
+            format_status_label_localized(&resting, Locale::En),
+            "Paused (idle/resting)"
+        );
 
         let mut stopped = sample_snapshot(SchedulerState::Stopped, false);
-        assert_eq!(format_status_label(&stopped), "Disabled until restart");
+        assert_eq!(
+            format_status_label_localized(&stopped, Locale::En),
+            "Disabled until restart"
+        );
         assert_eq!(icon_state_for_snapshot(&stopped), TrayIconState::Disabled);
 
         stopped.disabled_until_unix_secs = Some(1_800_000_000);
-        assert_eq!(format_status_label(&stopped), "Disabled (timed)");
+        assert_eq!(
+            format_status_label_localized(&stopped, Locale::En),
+            "Disabled (timed)"
+        );
 
         stopped.has_breaks = false;
-        assert_eq!(format_status_label(&stopped), "No breaks configured");
+        assert_eq!(
+            format_status_label_localized(&stopped, Locale::En),
+            "No breaks configured"
+        );
     }
 
     #[test]
@@ -1374,7 +1368,7 @@ mod tests {
     fn try_new_degrades_cleanly_in_headless_env() {
         let (tx, _rx) = mpsc::channel();
         let snap = sample_snapshot(SchedulerState::Waiting, true);
-        let res = TrayHandle::try_new(&snap, tx);
+        let res = TrayHandle::try_new_with_locale(&snap, Locale::En, tx);
         assert!(matches!(res, Ok(_) | Err(PlatformError::Unavailable(_))));
     }
 
@@ -1387,18 +1381,24 @@ mod tests {
 
         let next_sec = advance_snapshot_countdown(&waiting, 1);
         assert_eq!(next_sec.seconds_until_next_break, 889);
-        assert_eq!(format_status_label(&next_sec), "Next short break in 14:49");
+        assert_eq!(
+            format_status_label_localized(&next_sec, Locale::En),
+            "Next short break in 14:49"
+        );
         assert!(should_apply_snapshot(&mut last, &next_sec));
         assert!(!should_apply_snapshot(&mut last, &next_sec));
 
         let saturated = advance_snapshot_countdown(&waiting, 5_000);
         assert_eq!(saturated.seconds_until_next_break, 0);
-        assert_eq!(format_status_label(&saturated), "Next short break in 00:00");
+        assert_eq!(
+            format_status_label_localized(&saturated, Locale::En),
+            "Next short break in 00:00"
+        );
 
         let mut pre = sample_snapshot(SchedulerState::PreBreak, true);
         pre.seconds_until_next_break = 5;
         assert_eq!(
-            format_status_label(&advance_snapshot_countdown(&pre, 2)),
+            format_status_label_localized(&advance_snapshot_countdown(&pre, 2), Locale::En),
             "Break starting in 00:03"
         );
 

@@ -193,9 +193,10 @@ When `config.toml` is missing or invalid, `Config::load_or_default` returns `Con
 When `config.toml` omits `theme`, `Config` defaults `theme` to `system` without increasing `schema_version`.
 `Config` stores `language` (`system`, `en`, or `vi`, with `auto` accepted as an alias for `system`) with default `system`.
 When `config.toml` omits `language`, `Config` defaults `language` to `system` without increasing `schema_version`.
-When `language` is `system`, `sye-platform` detects the operating system locale (`AppleLanguages` on macOS, `GetUserPreferredUILanguages` and `GetUserDefaultLocaleName` on Windows, and `LC_ALL`, `LANGUAGE`, `LC_MESSAGES`, and `LANG` on Linux) and falls back to `En` for unsupported locales.
+When `language` is `system`, `sye-platform` detects the operating system locale (`AppleLanguages` on macOS, `GetUserPreferredUILanguages` and `GetUserDefaultLocaleName` on Windows, and `LANGUAGE`, `LC_ALL`, `LC_MESSAGES`, and `LANG` on Linux with gettext precedence, where a `C` or `POSIX` message locale ignores `LANGUAGE`) and falls back to `En` for unsupported locales.
 `sye-core` translates the 13 default short exercise names and 6 default long exercise names dynamically according to the active `Locale` while keeping custom or edited exercise names unchanged.
 CLI output remains in English to preserve script and E2E compatibility.
+The Settings window shows `ConfigError` messages in the active `Locale`.
 When `persist_state` is `true`, the daemon writes `SessionState` to `session.toml` using `BreakQueue::persisted_short_index()` and `BreakQueue::persisted_long_index()` so restarts resume at the staged break.
 `Config.autostart` defaults to `true`.
 On the first non-headless launch (when `config.toml` does not exist yet), the daemon registers the login item with `sync_system_autostart` and saves the initial `config.toml` so later launches keep respecting operating system startup changes.

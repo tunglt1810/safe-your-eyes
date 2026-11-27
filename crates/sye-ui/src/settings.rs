@@ -15,9 +15,10 @@ use sye_core::{Locale, UpdateInfo, UpdateStrategy, localize_exercise_name};
 
 use crate::UiError;
 use crate::i18n::{
-    UpdateStatusMessage, format_exercise_index_oob, format_homebrew_upgrade_hint,
-    format_kpi_cadence, format_kpi_max_skips, format_support_link_caption, format_version_summary,
-    format_waiting_a11y, format_window_index_oob, format_window_pattern_empty, ui_text,
+    UpdateStatusMessage, format_config_error, format_exercise_index_oob,
+    format_homebrew_upgrade_hint, format_kpi_cadence, format_kpi_max_skips,
+    format_support_link_caption, format_version_summary, format_waiting_a11y,
+    format_window_index_oob, format_window_pattern_empty, ui_text,
 };
 use crate::overlay::format_mm_ss;
 use crate::theme::{
@@ -96,12 +97,13 @@ impl SettingsViewModel {
         if config.strict_break {
             config.limit_consecutive_skips.enabled = false;
         }
+        let locale = config.language.resolve(system_locale);
         Self {
+            load_warning: load_err.map(|err| format_config_error(&err, locale)),
             config_path,
             config,
             system_locale,
             active_tab: SettingsTab::Timing,
-            load_warning: load_err.map(|err| err.to_string()),
             validation_error: None,
             outcome: None,
             draft_short_exercise: String::new(),
@@ -233,7 +235,8 @@ impl SettingsViewModel {
 
     pub fn validate(&mut self) -> Result<(), String> {
         if let Err(err) = self.config.validate() {
-            return self.fail_validation(err.to_string());
+            let msg = format_config_error(&err, self.active_locale());
+            return self.fail_validation(msg);
         }
         if self.config.short_breaks.is_empty() && self.config.long_breaks.is_empty() {
             let msg = ui_text(self.active_locale()).err_exercise_none_configured;
@@ -270,7 +273,8 @@ impl SettingsViewModel {
         }
         self.validate()?;
         if let Err(err) = self.config.save_to_path(&self.config_path) {
-            return self.fail_validation(err.to_string());
+            let msg = format_config_error(&err, self.active_locale());
+            return self.fail_validation(msg);
         }
         self.system_autostart = Some(self.config.autostart);
         self.validation_error = None;
@@ -3066,6 +3070,36 @@ mod tests {
         assert_eq!(saved.theme, ThemeMode::Dark);
         assert!(!saved.autostart);
         assert_eq!(saved.short_break_interval_secs, 900);
+        Ok(())
+    }
+
+    #[test]
+    fn config_validation_errors_are_translated_to_vietnamese()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let cfg = Config {
+            short_break_interval_secs: 10,
+            short_break_duration_secs: 0,
+            pre_break_warning_secs: 10,
+            audible_alert: sye_core::config::AudibleAlertConfig {
+                volume: 101,
+                ..Config::default().audible_alert
+            },
+            smart_pause: sye_core::config::SmartPauseConfig {
+                idle_threshold_secs: 0,
+                ..Config::default().smart_pause
+            },
+            limit_consecutive_skips: sye_core::config::SkipLimitConfig {
+                enabled: true,
+                max_skips: 0,
+            },
+            short_breaks: vec![BreakSpec::new("  ")],
+            ..Config::default()
+        };
+        let err = cfg.validate().err().ok_or("config must be invalid")?;
+        let vi = format_config_error(&err, Locale::Vi);
+        assert!(vi.starts_with("Cấu hình không hợp lệ: "), "{vi}");
+        assert!(!vi.contains("must"), "untranslated core message: {vi}");
+        assert_eq!(format_config_error(&err, Locale::En), err.to_string());
         Ok(())
     }
 

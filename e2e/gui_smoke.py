@@ -7,6 +7,8 @@ macOS, Win32 on Windows) that:
    and exits cleanly when closed.
 2. `--internal-overlay` emits `{"kind":"shown"}`, opens visible overlay
    window(s) covering every active display, and exits with a completed outcome.
+3. On Linux and Windows, closing the daemon's startup Settings window keeps
+   the daemon running and preserves its active countdown.
 """
 
 from __future__ import annotations
@@ -47,7 +49,9 @@ def _linux_active_display_count() -> int:
         timeout=5,
     )
     count = sum(1 for line in out.splitlines() if re.match(r"^\s*\d+:", line))
-    return max(count, 1)
+    if count < 1:
+        raise RuntimeError(f"xrandr reported no active monitors: {out!r}")
+    return count
 
 
 def _linux_visible_windows(pid: int) -> list[VisibleWindow]:
@@ -102,22 +106,22 @@ def _linux_close_window(handle: int) -> None:
 
 
 def _macos_active_display_count() -> int:
-    try:
-        cg = ctypes.CDLL(
-            "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+    cg = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+    )
+    count = ctypes.c_uint32(0)
+    cg.CGGetActiveDisplayList.argtypes = [
+        ctypes.c_uint32,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_uint32),
+    ]
+    cg.CGGetActiveDisplayList.restype = ctypes.c_int32
+    err = cg.CGGetActiveDisplayList(0, None, ctypes.byref(count))
+    if err != 0 or count.value < 1:
+        raise RuntimeError(
+            f"CGGetActiveDisplayList failed (err={err}, count={count.value})"
         )
-        count = ctypes.c_uint32(0)
-        cg.CGGetActiveDisplayList.argtypes = [
-            ctypes.c_uint32,
-            ctypes.c_void_p,
-            ctypes.POINTER(ctypes.c_uint32),
-        ]
-        cg.CGGetActiveDisplayList.restype = ctypes.c_int32
-        if cg.CGGetActiveDisplayList(0, None, ctypes.byref(count)) == 0:
-            return max(count.value, 1)
-    except Exception:
-        pass
-    return 1
+    return int(count.value)
 
 
 MACOS_PROBE = TMP_BASE / "macos_windows"
@@ -319,7 +323,11 @@ def wait_for_windows(
 def windows_titled(title: str) -> list[VisibleWindow]:
     sys_name = platform.system()
     if sys_name == "Linux":
-        return [w for w in _linux_search_windows(["--name", "Settings"]) if w.title == title]
+        return [
+            w
+            for w in _linux_search_windows(["--name", re.escape(title)])
+            if w.title == title
+        ]
     if sys_name == "Windows":
         return _windows_visible_windows(None, title)
     return []
@@ -397,6 +405,9 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
     base = TMP_BASE / "daemon"
     base.mkdir(parents=True, exist_ok=True)
     cfg = base / "config.toml"
+    # Idle CI runners report system idle > 300s, which puts SmartPause into
+    # `resting` and freezes the countdown. Disable SmartPause for this check.
+    cfg.write_text("[smart_pause]\nenabled = false\n", encoding="utf-8")
     sock = base / "sye.sock"
     log_path = base / "daemon.stderr.log"
     log = log_path.open("w", encoding="utf-8")
@@ -418,9 +429,25 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
             time.sleep(0.2)
         if not wins:
             raise AssertionError("Daemon never opened the startup Settings window")
-        # Let the countdown run so a restart on close shows as a larger value.
-        time.sleep(3.0)
-        before = daemon_status(binary, cfg, sock)
+        # Wait until the countdown drops at least 5s below its 900s start so a
+        # restart on close cannot be masked by the 1s post-close wait.
+        before: dict[str, object] = {}
+        tick_deadline = time.monotonic() + 12.0
+        while time.monotonic() < tick_deadline:
+            before = daemon_status(binary, cfg, sock)
+            if (
+                before.get("state") == "waiting"
+                and int(before["seconds_until_next_break"]) <= 895  # type: ignore[arg-type]
+            ):
+                break
+            time.sleep(0.3)
+        if (
+            before.get("state") != "waiting"
+            or int(before["seconds_until_next_break"]) > 895  # type: ignore[arg-type]
+        ):
+            raise AssertionError(
+                f"Expected waiting countdown <= 895s before closing Settings, got {before}"
+            )
 
         close_window(wins[0].handle)
         deadline = time.monotonic() + 10.0
@@ -428,7 +455,7 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
             time.sleep(0.2)
         if windows_titled(SETTINGS_TITLE):
             raise AssertionError("Settings window did not close")
-        time.sleep(2.0)
+        time.sleep(1.0)
 
         if daemon.poll() is not None:
             raise AssertionError(
@@ -436,7 +463,7 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
                 f"{_read_log(log_path)}"
             )
         after = daemon_status(binary, cfg, sock)
-        if after["state"] != before["state"] or int(
+        if after.get("state") != "waiting" or int(
             after["seconds_until_next_break"]  # type: ignore[arg-type]
         ) >= int(before["seconds_until_next_break"]):  # type: ignore[arg-type]
             raise AssertionError(

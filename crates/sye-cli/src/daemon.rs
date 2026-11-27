@@ -560,11 +560,8 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let launched_at_login = app_loop
         .as_ref()
         .is_some_and(PlatformEventLoop::was_launched_as_login_item);
-    let mut restart_on_settings_close =
-        should_open_settings_on_startup(headless, background, launched_at_login);
-    if restart_on_settings_close {
+    if should_open_settings_on_startup(headless, background, launched_at_login) {
         host.open_settings();
-        restart_on_settings_close = host.settings_child.is_some();
     }
 
     loop {
@@ -580,14 +577,6 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             break;
         }
 
-        if restart_on_settings_close
-            && !matches!(
-                scheduler.state(),
-                SchedulerState::Waiting | SchedulerState::Resting
-            )
-        {
-            restart_on_settings_close = false;
-        }
         let settings_exited = host.take_settings_exited();
         let mut config_changed = false;
         if settings_exited
@@ -613,9 +602,6 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 eprintln!("Warning: failed to synchronize autostart entry: {err}");
             }
             host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
-        }
-        if settings_exited && std::mem::take(&mut restart_on_settings_close) {
-            host.execute(scheduler.handle_event(SchedulerEvent::RestartCountdown));
         }
 
         if !headless {

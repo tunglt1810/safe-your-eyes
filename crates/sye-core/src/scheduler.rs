@@ -89,7 +89,6 @@ pub enum SchedulerEvent {
     DeferBreak { delay_secs: u64 },
     CancelCurrentBreak,
     ReloadConfig(Config),
-    RestartCountdown,
     Quit,
 }
 
@@ -314,13 +313,6 @@ impl<C: Clock> Scheduler<C> {
             SchedulerEvent::DeferBreak { delay_secs } => self.handle_defer_break(delay_secs),
             SchedulerEvent::CancelCurrentBreak => self.handle_cancel_current_break(),
             SchedulerEvent::ReloadConfig(new_cfg) => self.handle_reload_config(new_cfg),
-            SchedulerEvent::RestartCountdown => {
-                if self.state == SchedulerState::Waiting {
-                    self.enter_waiting_fresh()
-                } else {
-                    Vec::new()
-                }
-            }
             SchedulerEvent::Quit => self.handle_quit(),
         }
     }
@@ -1449,26 +1441,6 @@ mod tests {
         clock.advance_secs(30);
         let _ = sched.handle_event(SchedulerEvent::IdleObserved(Duration::ZERO));
         assert_eq!(sched.status_snapshot().seconds_until_next_break, 900);
-    }
-
-    #[test]
-    fn restart_countdown_restarts_only_while_waiting() {
-        let clock = FakeClock::default();
-        let mut sched = Scheduler::new(test_config(), &clock, 1);
-        let _ = sched.handle_event(SchedulerEvent::Start);
-
-        clock.advance_secs(180);
-        assert_eq!(sched.status_snapshot().seconds_until_next_break, 720);
-        let _ = sched.handle_event(SchedulerEvent::RestartCountdown);
-        assert_eq!(sched.status_snapshot().seconds_until_next_break, 900);
-
-        let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
-        assert!(
-            sched
-                .handle_event(SchedulerEvent::RestartCountdown)
-                .is_empty()
-        );
-        assert_eq!(sched.state(), SchedulerState::Break);
     }
 
     #[test]

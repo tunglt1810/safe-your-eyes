@@ -29,6 +29,7 @@ from typing import NamedTuple
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TMP_BASE = REPO_ROOT / ".tmp" / f"gui-smoke-{os.getpid()}"
 SM_CMONITORS = 80
+SETTINGS_TITLE = "Safe Your Eyes — Settings"
 
 
 class VisibleWindow(NamedTuple):
@@ -50,8 +51,12 @@ def _linux_active_display_count() -> int:
 
 
 def _linux_visible_windows(pid: int) -> list[VisibleWindow]:
+    return _linux_search_windows(["--pid", str(pid)])
+
+
+def _linux_search_windows(search_args: list[str]) -> list[VisibleWindow]:
     proc = subprocess.run(
-        ["xdotool", "search", "--pid", str(pid), "--onlyvisible"],
+        ["xdotool", "search", "--onlyvisible", *search_args],
         text=True,
         capture_output=True,
         timeout=5,
@@ -192,7 +197,9 @@ def _windows_active_display_count() -> int:
     return max(int(user32.GetSystemMetrics(SM_CMONITORS)), 1)
 
 
-def _windows_visible_windows(pid: int) -> list[VisibleWindow]:
+def _windows_visible_windows(
+    pid: int | None, title: str | None = None
+) -> list[VisibleWindow]:
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 
     class RECT(ctypes.Structure):
@@ -227,7 +234,7 @@ def _windows_visible_windows(pid: int) -> list[VisibleWindow]:
             return True
         owner_pid = ctypes.c_ulong(0)
         user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
-        if owner_pid.value != pid:
+        if pid is not None and owner_pid.value != pid:
             return True
         rect = RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
@@ -239,6 +246,8 @@ def _windows_visible_windows(pid: int) -> list[VisibleWindow]:
         length = user32.GetWindowTextLengthW(hwnd)
         buf = ctypes.create_unicode_buffer(length + 1)
         user32.GetWindowTextW(hwnd, buf, length + 1)
+        if title is not None and buf.value != title:
+            return True
         windows.append(VisibleWindow(int(hwnd), buf.value, int(width), int(height)))
         return True
 
@@ -307,6 +316,22 @@ def wait_for_windows(
     )
 
 
+def windows_titled(title: str) -> list[VisibleWindow]:
+    sys_name = platform.system()
+    if sys_name == "Linux":
+        return [w for w in _linux_search_windows(["--name", "Settings"]) if w.title == title]
+    if sys_name == "Windows":
+        return _windows_visible_windows(None, title)
+    return []
+
+
+def close_window(handle: int) -> None:
+    if platform.system() == "Linux":
+        _linux_close_window(handle)
+    else:
+        _windows_close_window(handle)
+
+
 def _read_log(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
@@ -352,6 +377,84 @@ def verify_settings_window(binary: Path) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait(timeout=5.0)
+        log.close()
+
+
+def daemon_status(binary: Path, cfg: Path, sock: Path) -> dict[str, object]:
+    out = subprocess.run(
+        [str(binary), "--status", "--json", "--config", str(cfg), "--socket", str(sock)],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=True,
+    ).stdout
+    status = json.loads(out)
+    assert isinstance(status, dict), out
+    return status
+
+
+def verify_daemon_survives_settings_close(binary: Path) -> None:
+    base = TMP_BASE / "daemon"
+    base.mkdir(parents=True, exist_ok=True)
+    cfg = base / "config.toml"
+    sock = base / "sye.sock"
+    log_path = base / "daemon.stderr.log"
+    log = log_path.open("w", encoding="utf-8")
+    daemon = subprocess.Popen(
+        [str(binary), "--config", str(cfg), "--socket", str(sock)],
+        stdout=subprocess.DEVNULL,
+        stderr=log,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 20.0
+        wins: list[VisibleWindow] = []
+        while time.monotonic() < deadline and not wins:
+            if daemon.poll() is not None:
+                raise AssertionError(
+                    f"Daemon exited early ({daemon.returncode}): {_read_log(log_path)}"
+                )
+            wins = windows_titled(SETTINGS_TITLE)
+            time.sleep(0.2)
+        if not wins:
+            raise AssertionError("Daemon never opened the startup Settings window")
+        # Let the countdown run so a restart on close shows as a larger value.
+        time.sleep(3.0)
+        before = daemon_status(binary, cfg, sock)
+
+        close_window(wins[0].handle)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and windows_titled(SETTINGS_TITLE):
+            time.sleep(0.2)
+        if windows_titled(SETTINGS_TITLE):
+            raise AssertionError("Settings window did not close")
+        time.sleep(2.0)
+
+        if daemon.poll() is not None:
+            raise AssertionError(
+                f"Closing Settings stopped the daemon ({daemon.returncode}): "
+                f"{_read_log(log_path)}"
+            )
+        after = daemon_status(binary, cfg, sock)
+        if after["state"] != before["state"] or int(
+            after["seconds_until_next_break"]  # type: ignore[arg-type]
+        ) >= int(before["seconds_until_next_break"]):  # type: ignore[arg-type]
+            raise AssertionError(
+                f"Closing Settings changed the countdown: before={before} after={after}"
+            )
+        print(f"PASS daemon survives Settings close, countdown kept: {before} -> {after}")
+    finally:
+        subprocess.run(
+            [str(binary), "--quit", "--config", str(cfg), "--socket", str(sock)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        try:
+            daemon.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait(timeout=5.0)
         log.close()
 
 
@@ -458,6 +561,8 @@ def main() -> int:
             _macos_build_probe()
         verify_settings_window(binary)
         verify_overlay_windows(binary)
+        if platform.system() in ("Linux", "Windows"):
+            verify_daemon_survives_settings_close(binary)
     finally:
         shutil.rmtree(TMP_BASE, ignore_errors=True)
     return 0

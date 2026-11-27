@@ -10,7 +10,7 @@ use sye_core::scheduler::{
     OverlayOutcome, Scheduler, SchedulerAction, SchedulerEvent, SchedulerState,
 };
 use sye_core::session::SessionState;
-use sye_core::traits::{DndProvider, IdleProvider, Notifier, OverlayLauncher};
+use sye_core::traits::{DndProvider, DndQueryOptions, IdleProvider, Notifier, OverlayLauncher};
 use sye_core::{
     HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, UPDATE_CHECK_INTERVAL_SECS,
     UPDATE_INITIAL_DELAY_SECS, UpdateCacheState, UpdateInfo, UpdateStrategy,
@@ -460,18 +460,36 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         return ExitCode::FAILURE;
     }
 
+    let is_first_run = !paths.config_file.exists();
     let (mut config, load_err) = Config::load_or_default(&paths.config_file);
     if let Some(err) = load_err {
         eprintln!("Warning: falling back to default config ({err})");
     }
     if !headless {
-        if let Some(sys_autostart) = sye_platform::query_system_autostart(Some(&paths.config_file))
-        {
-            config.autostart = sys_autostart;
-        } else if let Err(err) =
-            sye_platform::sync_system_autostart(config.autostart, Some(&paths.config_file))
-        {
-            eprintln!("Warning: failed to synchronize autostart entry: {err}");
+        let sys_autostart = (!is_first_run)
+            .then(|| sye_platform::query_system_autostart(Some(&paths.config_file)))
+            .flatten();
+        match plan_startup_autostart(is_first_run, config.autostart, sys_autostart) {
+            StartupAutostartPlan::RegisterAndPersist(enabled) => {
+                if let Err(err) =
+                    sye_platform::sync_system_autostart(enabled, Some(&paths.config_file))
+                {
+                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
+                }
+                if let Err(err) = config.save_to_path(&paths.config_file) {
+                    eprintln!("Warning: failed to write initial config: {err}");
+                }
+            }
+            StartupAutostartPlan::AdoptSystem(sys) => {
+                config.autostart = sys;
+            }
+            StartupAutostartPlan::SyncFromConfig(enabled) => {
+                if let Err(err) =
+                    sye_platform::sync_system_autostart(enabled, Some(&paths.config_file))
+                {
+                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
+                }
+            }
         }
     }
 
@@ -690,8 +708,14 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
 
         let tick_actions = if !headless && scheduler.needs_policy_check() {
             let current_idle = idle_provider.idle_duration().ok();
-            let dnd_ctx = if scheduler.config().do_not_disturb.enabled {
-                dnd_provider.query_dnd_context().ok()
+            let dnd_cfg = &scheduler.config().do_not_disturb;
+            let dnd_ctx = if dnd_cfg.needs_query() {
+                dnd_provider
+                    .query_dnd_context_with(DndQueryOptions {
+                        check_fullscreen: dnd_cfg.enabled,
+                        check_gaming: dnd_cfg.while_gaming,
+                    })
+                    .ok()
             } else {
                 None
             };
@@ -867,6 +891,27 @@ const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
     !menu_locked && !matches!(state, SchedulerState::PreBreak | SchedulerState::Break)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupAutostartPlan {
+    RegisterAndPersist(bool),
+    AdoptSystem(bool),
+    SyncFromConfig(bool),
+}
+
+const fn plan_startup_autostart(
+    is_first_run: bool,
+    config_autostart: bool,
+    system_autostart: Option<bool>,
+) -> StartupAutostartPlan {
+    if is_first_run {
+        StartupAutostartPlan::RegisterAndPersist(config_autostart)
+    } else if let Some(sys) = system_autostart {
+        StartupAutostartPlan::AdoptSystem(sys)
+    } else {
+        StartupAutostartPlan::SyncFromConfig(config_autostart)
+    }
+}
+
 fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().unwrap_or(exe);
@@ -959,6 +1004,34 @@ mod tests {
         assert!(!can_open_settings(SchedulerState::PreBreak, false));
         assert!(!can_open_settings(SchedulerState::Break, false));
         assert!(!can_open_settings(SchedulerState::Waiting, true));
+    }
+
+    #[test]
+    fn startup_autostart_plan_registers_first_run_and_respects_os_thereafter() {
+        assert_eq!(
+            plan_startup_autostart(true, true, Some(false)),
+            StartupAutostartPlan::RegisterAndPersist(true)
+        );
+        assert_eq!(
+            plan_startup_autostart(true, true, None),
+            StartupAutostartPlan::RegisterAndPersist(true)
+        );
+        assert_eq!(
+            plan_startup_autostart(false, true, Some(false)),
+            StartupAutostartPlan::AdoptSystem(false)
+        );
+        assert_eq!(
+            plan_startup_autostart(false, false, Some(true)),
+            StartupAutostartPlan::AdoptSystem(true)
+        );
+        assert_eq!(
+            plan_startup_autostart(false, true, None),
+            StartupAutostartPlan::SyncFromConfig(true)
+        );
+        assert_eq!(
+            plan_startup_autostart(false, false, None),
+            StartupAutostartPlan::SyncFromConfig(false)
+        );
     }
 
     #[test]

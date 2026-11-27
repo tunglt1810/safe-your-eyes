@@ -145,16 +145,25 @@ Every event handler runs synchronously and returns a list of `SchedulerAction` v
 
 `Scheduler` evaluates `DoNotDisturbPolicy` before entering `PreBreak` and again before entering `Break`.
 When `DoNotDisturbPolicy` blocks a break, `Scheduler` skips the current break, dismisses any active pre-break notification, advances `BreakQueue`, and starts the next wait cycle.
+`do_not_disturb.while_gaming` defaults to `true` and remains active even when `do_not_disturb.enabled` is `false`.
 
 `DoNotDisturbPolicy` evaluates rules in fixed priority order:
 
-1. If `enabled` is `false`, return `Allow`.
-2. If `while_on_battery` is `true` and the battery is discharging, block with `OnBattery`.
-3. If the active window matches `skip_break_windows` (case-insensitive), block with `SkipWindow`.
-4. If the active window matches `take_break_windows`, return `Allow` even in fullscreen mode.
-5. If the active window is fullscreen, block with `Fullscreen`.
-6. If the operating system reports Do Not Disturb (`system_inhibited`), block with `SystemInhibited`.
-7. Otherwise, return `Allow`.
+1. If both `enabled` and `while_gaming` are `false`, return `Allow`.
+2. If `enabled` is `true`, `while_on_battery` is `true`, and the battery is discharging, block with `OnBattery`.
+3. If `enabled` is `true` and the active window class or process name matches `skip_break_windows` (case-insensitive), block with `SkipWindow`.
+4. If the active window class or process name matches `take_break_windows` (case-insensitive), return `Allow` even in fullscreen or gaming mode.
+5. If `enabled` is `true` and the active window is fullscreen, block with `Fullscreen`.
+6. If `while_gaming` is `true` and gaming detection matches (`is_gaming_context`), block with `Gaming`.
+7. If `enabled` is `true` and the operating system reports Do Not Disturb (`system_inhibited`), block with `SystemInhibited`.
+8. Otherwise, return `Allow`.
+
+Gaming detection (`is_gaming_context`) combines zero-permission operating system signals with foreground and background process checks while excluding game launchers and game editors:
+
+- On Windows, `SystemDndProvider` checks `SHQueryUserNotificationState` (`QUNS_RUNNING_D3D_FULL_SCREEN` sets `game_detected` and `is_fullscreen`, `QUNS_BUSY` sets `is_fullscreen`, `QUNS_PRESENTATION_MODE` sets `system_inhibited`), reads the foreground executable path with `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` and `QueryFullProcessImageNameW`, and scans visible windows with `EnumWindows` for background games.
+- On macOS, `SystemDndProvider` reads `NSWorkspace.sharedWorkspace.frontmostApplication` and `runningApplications` metadata (`localizedName`, `executableURL`, and `Info.plist` `LSApplicationCategoryType` for game categories) and checks `CGDisplayIsCaptured(CGMainDisplayID())` without Accessibility or Automation permissions. System Events AppleScript runs only when fullscreen DND (`do_not_disturb.enabled`) is enabled.
+- On Linux, `SystemDndProvider` checks Feral GameMode (`com.feralinteractive.GameMode.ClientCount > 0` over session D-Bus for both X11 and Wayland), reads `_NET_WM_PID` `/proc/<pid>/{exe,comm,environ}`, and scans user processes in `/proc` for Steam, Proton, Lutris, Heroic, or known game executables.
+- `sye-core` (`is_gaming_candidate`) matches common game library executable paths, game engine window classes (`steam_app_*`, `UnrealWindow`, `UnityWndClass`, `RiotWindowClass`, `Valve001`, `CryENGINE`, `gamescope`, `retroarch`, `lwjgl`), and known standalone game executable names.
 
 ### 7.3 `LimitConsecutiveSkipping`
 
@@ -181,6 +190,8 @@ When `config.toml` is missing or invalid, `Config::load_or_default` returns `Con
 `Config` stores `theme` (`system`, `light`, or `dark`) with default `system`.
 When `config.toml` omits `theme`, `Config` defaults `theme` to `system` without increasing `schema_version`.
 When `persist_state` is `true`, the daemon writes `SessionState` to `session.toml` using `BreakQueue::persisted_short_index()` and `BreakQueue::persisted_long_index()` so restarts resume at the staged break.
+`Config.autostart` defaults to `true`.
+On the first non-headless launch (when `config.toml` does not exist yet), the daemon registers the login item with `sync_system_autostart` and saves the initial `config.toml` so later launches keep respecting operating system startup changes.
 When `autostart` is `true`, `sye-platform` registers a per-user operating system login item:
 
 - On macOS `.app` bundles with the default configuration path, `sye-platform` registers `SMAppService.mainApp` (`ServiceManagement.framework`). In this mode, `sye-platform` also deletes any legacy `~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist` file.

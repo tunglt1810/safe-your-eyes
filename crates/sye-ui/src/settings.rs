@@ -711,7 +711,8 @@ fn policies_section(
     let s8 = Arc::clone(&outcome_sink);
     let s9 = Arc::clone(&outcome_sink);
     let s10 = Arc::clone(&outcome_sink);
-    let s11 = outcome_sink;
+    let s11 = Arc::clone(&outcome_sink);
+    let s12 = outcome_sink;
 
     view()
         .gap_5()
@@ -788,7 +789,7 @@ fn policies_section(
                     animate,
                     section_header(
                         "Smart Pause & Do Not Disturb",
-                        "Automatically pause timers while idle, on battery, or in fullscreen apps.",
+                        "Automatically pause timers while idle, gaming, on battery, or in fullscreen apps.",
                     ),
                 ))
                 .child(stagger_item(
@@ -829,22 +830,35 @@ fn policies_section(
                     10,
                     animate,
                     cozy_switch(
+                        "Pause while gaming (auto-detect)",
+                        move || vm.with(|m| m.config.do_not_disturb.while_gaming),
+                        move |v| {
+                            update_and_autosave(vm, &s8, |m| {
+                                m.config.do_not_disturb.while_gaming = v;
+                            });
+                        },
+                    ),
+                ))
+                .child(stagger_item(
+                    11,
+                    animate,
+                    cozy_switch(
                         "Pause while on battery",
                         move || vm.with(|m| m.config.do_not_disturb.while_on_battery),
                         move |v| {
-                            update_and_autosave(vm, &s8, |m| {
+                            update_and_autosave(vm, &s9, |m| {
                                 m.config.do_not_disturb.while_on_battery = v;
                             });
                         },
                     ),
                 )),
         )
-        .child(stagger_item(11, animate, section_divider()))
+        .child(stagger_item(12, animate, section_divider()))
         .child(
             view()
                 .gap_3()
                 .child(stagger_item(
-                    12,
+                    13,
                     animate,
                     section_header(
                         "Audible Chime",
@@ -852,38 +866,38 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    13,
+                    14,
                     animate,
                     cozy_switch(
                         "Pre-break chime",
                         move || vm.with(|m| m.config.audible_alert.pre_break),
                         move |v| {
-                            update_and_autosave(vm, &s9, |m| m.config.audible_alert.pre_break = v);
-                        },
-                    ),
-                ))
-                .child(stagger_item(
-                    14,
-                    animate,
-                    cozy_switch(
-                        "Post-break chime",
-                        move || vm.with(|m| m.config.audible_alert.post_break),
-                        move |v| {
-                            update_and_autosave(vm, &s10, |m| {
-                                m.config.audible_alert.post_break = v;
-                            });
+                            update_and_autosave(vm, &s10, |m| m.config.audible_alert.pre_break = v);
                         },
                     ),
                 ))
                 .child(stagger_item(
                     15,
                     animate,
+                    cozy_switch(
+                        "Post-break chime",
+                        move || vm.with(|m| m.config.audible_alert.post_break),
+                        move |v| {
+                            update_and_autosave(vm, &s11, |m| {
+                                m.config.audible_alert.post_break = v;
+                            });
+                        },
+                    ),
+                ))
+                .child(stagger_item(
+                    16,
+                    animate,
                     number_field_row(
                         "Chime volume",
                         "0–100",
                         move || u64::from(vm.with(|m| m.config.audible_alert.volume)),
                         move |v| {
-                            update_and_autosave(vm, &s11, |m| {
+                            update_and_autosave(vm, &s12, |m| {
                                 m.config.audible_alert.volume =
                                     u8::try_from(v.min(100)).unwrap_or(100);
                             });
@@ -2347,11 +2361,12 @@ mod tests {
         vm.config.shortcut_disable_secs = 3;
         vm.config.fade_in_ms = 800;
         vm.config.persist_state = true;
-        vm.config.autostart = true;
+        vm.config.autostart = false;
         vm.config.smart_pause.enabled = false;
         vm.config.smart_pause.idle_threshold_secs = 30;
         vm.config.smart_pause.postpone_if_active = true;
         vm.config.do_not_disturb.enabled = false;
+        vm.config.do_not_disturb.while_gaming = false;
         vm.config.do_not_disturb.while_on_battery = true;
         vm.add_skip_window("vlc")?;
         vm.add_take_window("firefox")?;
@@ -2769,14 +2784,14 @@ mod tests {
         let dir = RepoTempDir::new("persist-theme-autostart")?;
         let path = dir.file("theme-autostart.toml");
 
-        let mut vm = load_settings_vm(path.clone(), Some(true));
+        let mut vm = load_settings_vm(path.clone(), Some(false));
         vm.config.short_break_interval_secs = 123;
         vm.config.theme = ThemeMode::Dark;
         vm.persist_theme()?;
 
         let saved = Config::load_from_path(&path)?;
         assert_eq!(saved.theme, ThemeMode::Dark);
-        assert!(saved.autostart);
+        assert!(!saved.autostart);
         assert_eq!(saved.short_break_interval_secs, 900);
         Ok(())
     }
@@ -3012,7 +3027,7 @@ mod tests {
         let dir = RepoTempDir::new("headless-autostart")?;
         let path = dir.file("autostart.toml");
         let cfg = Config {
-            autostart: false,
+            autostart: true,
             ..Config::default()
         };
         cfg.save_to_path(&path)?;
@@ -3027,7 +3042,7 @@ mod tests {
                 .ok()
                 .and_then(|mut g| g.take())
                 .unwrap_or_default();
-            let vm = load_settings_vm(path, Some(true));
+            let vm = load_settings_vm(path, Some(false));
             let sink = Arc::new(Mutex::new(None));
             let hook: AutostartHook = Arc::new(|enabled| {
                 if let Ok(mut guard) = AUTOSTART_EVENTS.lock() {
@@ -3066,10 +3081,65 @@ mod tests {
         drop(app);
 
         let events = AUTOSTART_EVENTS.lock().map_err(|e| e.to_string())?.clone();
-        assert_eq!(events, vec![false, true, false, true]);
+        assert_eq!(events, vec![true, false, true, false]);
 
         let reloaded = Config::load_from_path(&path)?;
-        assert!(reloaded.autostart);
+        assert!(!reloaded.autostart);
+        Ok(())
+    }
+
+    #[test]
+    fn nsh_headless_policies_gaming_auto_detect_toggle_autosaves()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use nsh_engine::{EngineConfig, Points, Root, Size};
+        use nsh_testing::Headless;
+
+        let dir = RepoTempDir::new("headless-gaming-toggle")?;
+        let path = dir.file("gaming-toggle.toml");
+
+        static GAMING_PATH: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+        #[component]
+        fn TestGamingToggleSettings() -> impl IntoElement {
+            let path = GAMING_PATH
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take())
+                .unwrap_or_default();
+            let vm = SettingsViewModel::load(path);
+            let sink = Arc::new(Mutex::new(None));
+            build_settings_view_with_hooks(
+                vm,
+                sink,
+                false,
+                None,
+                ThemeTransitionHooks::default(),
+                SettingsUpdateConfig::default(),
+                SettingsStatusConfig::default(),
+            )
+        }
+
+        if let Ok(mut guard) = GAMING_PATH.lock() {
+            *guard = Some(path.clone());
+        }
+
+        let mut app = Headless::start(EngineConfig {
+            viewport: Size::new(Points(920.0), Points(680.0)),
+            ..EngineConfig::new(Root::of::<TestGamingToggleSettings>())
+        })
+        .map_err(|e| e.to_string())?;
+        app.wait_for("Policies")?;
+        app.press("Policies")?;
+        app.wait_for("Pause while gaming (auto-detect)")?;
+
+        app.press("Pause while gaming (auto-detect)")?;
+        let disabled = Config::load_from_path(&path)?;
+        assert!(!disabled.do_not_disturb.while_gaming);
+
+        app.press("Reset to defaults")?;
+        let restored = Config::load_from_path(&path)?;
+        assert!(restored.do_not_disturb.while_gaming);
+        drop(app);
         Ok(())
     }
 

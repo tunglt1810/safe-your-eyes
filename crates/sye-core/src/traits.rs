@@ -119,8 +119,30 @@ pub trait IdleProvider {
     fn idle_duration(&self) -> Result<Duration, PlatformError>;
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DndQueryOptions {
+    pub check_fullscreen: bool,
+    pub check_gaming: bool,
+}
+
+impl Default for DndQueryOptions {
+    fn default() -> Self {
+        Self {
+            check_fullscreen: true,
+            check_gaming: true,
+        }
+    }
+}
+
 pub trait DndProvider {
     fn query_dnd_context(&self) -> Result<DndContext, PlatformError>;
+
+    fn query_dnd_context_with(
+        &self,
+        _options: DndQueryOptions,
+    ) -> Result<DndContext, PlatformError> {
+        self.query_dnd_context()
+    }
 }
 
 pub trait Notifier {

@@ -98,8 +98,11 @@ impl SmartPausePolicy {
 pub struct DndContext {
     pub is_fullscreen: bool,
     pub active_window_class: Option<String>,
+    pub active_process_name: Option<String>,
+    pub active_executable_path: Option<String>,
     pub on_battery: bool,
     pub system_inhibited: bool,
+    pub game_detected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +110,7 @@ pub enum DndReason {
     OnBattery,
     SkipWindow,
     Fullscreen,
+    Gaming,
     SystemInhibited,
 }
 
@@ -123,40 +127,179 @@ impl DndDecision {
     }
 }
 
+const EXCLUDED_GAME_PROCESSES: &[&str] = &[
+    "steam",
+    "steamwebhelper",
+    "epicgameslauncher",
+    "riotclientservices",
+    "riotclientux",
+    "battle.net",
+    "goggalaxy",
+    "upc",
+    "eadesktop",
+    "unity",
+    "unity hub",
+    "unrealeditor",
+    "ue4editor",
+    "ue5editor",
+    "godot",
+];
+
+const GAME_PATH_SEGMENTS: &[&str] = &[
+    "/steamapps/common/",
+    "/epic games/",
+    "/riot games/",
+    "/battle.net/",
+    "/xboxgames/",
+    "/gog galaxy/games/",
+    "/gog games/",
+    "/ubisoft game launcher/games/",
+    "/ea games/",
+    "/origin games/",
+    "/heroic/games/",
+    "/lutris/",
+];
+
+const GAME_WINDOW_CLASSES: &[&str] = &[
+    "unrealwindow",
+    "unitywndclass",
+    "riotwindowclass",
+    "valve001",
+    "cryengine",
+    "gamescope",
+    "retroarch",
+    "lwjgl",
+];
+
+const KNOWN_GAME_PROCESSES: &[&str] = &[
+    "league of legends",
+    "valorant-win64-shipping",
+    "genshinimpact",
+    "starrail",
+    "zenlesszonezero",
+    "cs2",
+    "dota2",
+    "overwatch",
+    "r5apex",
+    "fortniteclient-win64-shipping",
+    "robloxplayerbeta",
+    "eldenring",
+    "baldursgate3",
+    "bg3",
+    "bg3_dx11",
+    "cyberpunk2077",
+    "gta5",
+    "hl2",
+    "wow",
+    "wowclassic",
+    "ffxiv_dx11",
+    "hearthstone",
+    "starcraft ii",
+    "diablo iv",
+    "minecraft.windows",
+];
+
+#[must_use]
+pub fn is_gaming_candidate(
+    window_class: Option<&str>,
+    process_name: Option<&str>,
+    executable_path: Option<&str>,
+) -> bool {
+    let process_stem = process_name
+        .map(normalize_process_stem)
+        .filter(|s| !s.is_empty());
+
+    if let Some(ref stem) = process_stem
+        && EXCLUDED_GAME_PROCESSES.contains(&stem.as_str())
+    {
+        return false;
+    }
+
+    if let Some(path) = executable_path {
+        let normalized_path = path.trim().replace('\\', "/").to_lowercase();
+        if GAME_PATH_SEGMENTS
+            .iter()
+            .any(|seg| normalized_path.contains(seg))
+        {
+            return true;
+        }
+    }
+
+    if let Some(window_class) = window_class {
+        let lower = window_class.trim().to_lowercase();
+        if lower.starts_with("steam_app_") || GAME_WINDOW_CLASSES.contains(&lower.as_str()) {
+            return true;
+        }
+    }
+
+    process_stem
+        .as_deref()
+        .is_some_and(|stem| KNOWN_GAME_PROCESSES.contains(&stem))
+}
+
+#[must_use]
+pub fn is_gaming_context(ctx: &DndContext) -> bool {
+    ctx.game_detected
+        || is_gaming_candidate(
+            ctx.active_window_class.as_deref(),
+            ctx.active_process_name.as_deref(),
+            ctx.active_executable_path.as_deref(),
+        )
+}
+
+fn normalize_process_stem(name: &str) -> String {
+    let trimmed = name.trim();
+    let lower = trimmed.to_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_owned()
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DoNotDisturbPolicy;
 
 impl DoNotDisturbPolicy {
     #[must_use]
     pub fn evaluate(cfg: &DoNotDisturbConfig, ctx: &DndContext) -> DndDecision {
-        if !cfg.enabled {
+        if !cfg.enabled && !cfg.while_gaming {
             return DndDecision::Allow;
         }
-        if cfg.while_on_battery && ctx.on_battery {
+        if cfg.enabled && cfg.while_on_battery && ctx.on_battery {
             return DndDecision::Suppress(DndReason::OnBattery);
         }
         let has_window_rules =
             !cfg.skip_break_windows.is_empty() || !cfg.take_break_windows.is_empty();
-        if has_window_rules
-            && let Some(window) = ctx.active_window_class.as_deref()
-            && !window.trim().is_empty()
-        {
-            let active_lower = window.to_lowercase();
-            if matches_any_window_lower(&active_lower, &cfg.skip_break_windows) {
+        if has_window_rules {
+            if cfg.enabled && matches_context_window(ctx, &cfg.skip_break_windows) {
                 return DndDecision::Suppress(DndReason::SkipWindow);
             }
-            if matches_any_window_lower(&active_lower, &cfg.take_break_windows) {
+            if matches_context_window(ctx, &cfg.take_break_windows) {
                 return DndDecision::Allow;
             }
         }
-        if ctx.is_fullscreen {
+        if cfg.enabled && ctx.is_fullscreen {
             return DndDecision::Suppress(DndReason::Fullscreen);
         }
-        if ctx.system_inhibited {
+        if cfg.while_gaming && is_gaming_context(ctx) {
+            return DndDecision::Suppress(DndReason::Gaming);
+        }
+        if cfg.enabled && ctx.system_inhibited {
             return DndDecision::Suppress(DndReason::SystemInhibited);
         }
         DndDecision::Allow
     }
+}
+
+fn matches_context_window(ctx: &DndContext, patterns: &[String]) -> bool {
+    if patterns.is_empty() {
+        return false;
+    }
+    [
+        ctx.active_window_class.as_deref(),
+        ctx.active_process_name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|candidate| !candidate.trim().is_empty())
+    .any(|candidate| matches_any_window_lower(&candidate.to_lowercase(), patterns))
 }
 
 fn matches_any_window_lower(active_lower: &str, patterns: &[String]) -> bool {
@@ -391,6 +534,7 @@ mod tests {
         let disabled = DoNotDisturbConfig {
             enabled: false,
             while_on_battery: true,
+            while_gaming: false,
             skip_break_windows: vec!["vlc".to_owned()],
             take_break_windows: Vec::new(),
         };
@@ -399,6 +543,8 @@ mod tests {
             active_window_class: Some("VLC Media Player".to_owned()),
             on_battery: true,
             system_inhibited: true,
+            game_detected: true,
+            ..DndContext::default()
         };
         assert_eq!(
             DoNotDisturbPolicy::evaluate(&disabled, &full_ctx),
@@ -408,6 +554,7 @@ mod tests {
         let cfg = DoNotDisturbConfig {
             enabled: true,
             while_on_battery: true,
+            while_gaming: true,
             skip_break_windows: vec!["vlc".to_owned(), String::new(), "   ".to_owned()],
             take_break_windows: vec!["vlc".to_owned(), "code".to_owned()],
         };
@@ -417,10 +564,8 @@ mod tests {
         );
 
         let both_lists = DndContext {
-            is_fullscreen: false,
             active_window_class: Some("VLC Media Player".to_owned()),
-            on_battery: false,
-            system_inhibited: false,
+            ..DndContext::default()
         };
         assert_eq!(
             DoNotDisturbPolicy::evaluate(&cfg, &both_lists),
@@ -430,8 +575,8 @@ mod tests {
         let allowed_fullscreen = DndContext {
             is_fullscreen: true,
             active_window_class: Some("Code-OSS".to_owned()),
-            on_battery: false,
             system_inhibited: true,
+            ..DndContext::default()
         };
         assert_eq!(
             DoNotDisturbPolicy::evaluate(&cfg, &allowed_fullscreen),
@@ -441,8 +586,7 @@ mod tests {
         let firefox_full = DndContext {
             is_fullscreen: true,
             active_window_class: Some("Firefox".to_owned()),
-            on_battery: false,
-            system_inhibited: false,
+            ..DndContext::default()
         };
         assert_eq!(
             DoNotDisturbPolicy::evaluate(&cfg, &firefox_full),
@@ -450,14 +594,109 @@ mod tests {
         );
 
         let inhibited = DndContext {
-            is_fullscreen: false,
-            active_window_class: None,
-            on_battery: false,
             system_inhibited: true,
+            ..DndContext::default()
         };
         assert_eq!(
             DoNotDisturbPolicy::evaluate(&cfg, &inhibited),
             DndDecision::Suppress(DndReason::SystemInhibited)
+        );
+    }
+
+    #[test]
+    fn gaming_auto_detection_handles_os_signals_paths_classes_and_overrides() {
+        let gaming_only = DoNotDisturbConfig {
+            enabled: false,
+            while_gaming: true,
+            while_on_battery: true,
+            skip_break_windows: Vec::new(),
+            take_break_windows: vec!["allowedgame".to_owned()],
+        };
+
+        let os_signal = DndContext {
+            game_detected: true,
+            ..DndContext::default()
+        };
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_only, &os_signal),
+            DndDecision::Suppress(DndReason::Gaming)
+        );
+
+        let steam_windowed = DndContext {
+            active_process_name: Some("Hades2.exe".to_owned()),
+            active_executable_path: Some(
+                r"C:\Program Files (x86)\Steam\steamapps\common\Hades II\Ship\Hades2.exe"
+                    .to_owned(),
+            ),
+            ..DndContext::default()
+        };
+        assert!(is_gaming_context(&steam_windowed));
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_only, &steam_windowed),
+            DndDecision::Suppress(DndReason::Gaming)
+        );
+
+        let steam_client = DndContext {
+            active_process_name: Some("steamwebhelper.exe".to_owned()),
+            active_executable_path: Some(
+                r"C:\Program Files (x86)\Steam\steamapps\common\steamwebhelper.exe".to_owned(),
+            ),
+            ..DndContext::default()
+        };
+        assert!(!is_gaming_context(&steam_client));
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_only, &steam_client),
+            DndDecision::Allow
+        );
+
+        let unity_editor = DndContext {
+            active_process_name: Some("Unity.exe".to_owned()),
+            active_window_class: Some("UnityWndClass".to_owned()),
+            ..DndContext::default()
+        };
+        assert!(!is_gaming_context(&unity_editor));
+
+        let linux_steam_class = DndContext {
+            active_window_class: Some("steam_app_1091500".to_owned()),
+            ..DndContext::default()
+        };
+        assert!(is_gaming_context(&linux_steam_class));
+
+        let known_exe = DndContext {
+            active_process_name: Some("VALORANT-Win64-Shipping.exe".to_owned()),
+            ..DndContext::default()
+        };
+        assert!(is_gaming_context(&known_exe));
+
+        let non_game_fullscreen = DndContext {
+            is_fullscreen: true,
+            active_process_name: Some("firefox".to_owned()),
+            on_battery: true,
+            ..DndContext::default()
+        };
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_only, &non_game_fullscreen),
+            DndDecision::Allow
+        );
+
+        let overridden_game = DndContext {
+            active_process_name: Some("AllowedGame.exe".to_owned()),
+            game_detected: true,
+            ..DndContext::default()
+        };
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_only, &overridden_game),
+            DndDecision::Allow
+        );
+
+        let gaming_disabled = DoNotDisturbConfig {
+            enabled: false,
+            while_gaming: false,
+            ..DoNotDisturbConfig::default()
+        };
+        assert_eq!(
+            DoNotDisturbPolicy::evaluate(&gaming_disabled, &os_signal),
+            DndDecision::Allow
         );
     }
 

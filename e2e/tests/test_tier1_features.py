@@ -45,7 +45,7 @@ def test_t1_cli_02_print_default_config(env: SyeTestEnv) -> None:
         "shortcut_disable_secs": 2,
         "fade_in_ms": 1500,
         "persist_state": False,
-        "autostart": False,
+        "autostart": True,
     }
     for key, expected in expected_scalars.items():
         assert key in cfg, f"Missing default config key: {key}"
@@ -53,6 +53,10 @@ def test_t1_cli_02_print_default_config(env: SyeTestEnv) -> None:
 
     for table in ("smart_pause", "do_not_disturb", "audible_alert", "limit_consecutive_skips"):
         assert isinstance(cfg.get(table), dict), f"Missing or invalid table [{table}]"
+
+    assert cfg["do_not_disturb"].get("while_gaming") is True, (
+        f"Expected do_not_disturb.while_gaming=True, got {cfg['do_not_disturb'].get('while_gaming')!r}"
+    )
 
     short_breaks = cfg.get("short_breaks")
     long_breaks = cfg.get("long_breaks")

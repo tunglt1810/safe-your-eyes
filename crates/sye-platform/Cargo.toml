@@ -54,6 +54,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSView",
     "NSVisualEffectView",
     "NSWindow",
+    "NSWorkspace",
     "objc2-core-foundation",
     "objc2-quartz-core",
 ] }
@@ -63,6 +64,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSAppleEventDescriptor",
     "NSAppleEventManager",
     "NSArray",
+    "NSBundle",
     "NSData",
     "NSDate",
     "NSEnumerator",
@@ -75,6 +77,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSRunLoop",
     "NSString",
     "NSTimer",
+    "NSURL",
     "NSUserDefaults",
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
@@ -87,8 +90,10 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
     "CGBitmapContext",
     "CGColorSpace",
     "CGContext",
+    "CGDirectDisplay",
     "CGImage",
     "CGPath",
+    "libc",
     "objc2",
 ] }
 objc2-quartz-core = { version = "0.3.2", default-features = false, features = [

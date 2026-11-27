@@ -23,7 +23,7 @@ pub use ipc::{
 };
 pub use policies::{
     ACTIVE_POSTPONE_SECS, DndContext, DndDecision, DndReason, DoNotDisturbPolicy, SkipLimitPolicy,
-    SmartPauseDecision, SmartPausePolicy,
+    SmartPauseDecision, SmartPausePolicy, is_gaming_candidate, is_gaming_context,
 };
 pub use queue::{BreakQueue, QueuedBreak, ResolvedBreak};
 pub use scheduler::{
@@ -32,8 +32,8 @@ pub use scheduler::{
 };
 pub use session::{SESSION_SCHEMA_VERSION, SessionError, SessionState};
 pub use traits::{
-    AudioPlayer, Clock, DndProvider, FakeClock, IdleProvider, Notifier, OverlayLauncher,
-    PlatformError,
+    AudioPlayer, Clock, DndProvider, DndQueryOptions, FakeClock, IdleProvider, Notifier,
+    OverlayLauncher, PlatformError,
 };
 pub use update::{
     GITHUB_RELEASE_DOWNLOAD_BASE, GITHUB_RELEASES_API_URL, GITHUB_RELEASES_LATEST_URL,

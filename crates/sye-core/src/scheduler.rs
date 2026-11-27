@@ -1355,6 +1355,7 @@ mod tests {
             skip_break_windows: vec!["vlc".to_owned()],
             take_break_windows: Vec::new(),
             while_on_battery: false,
+            while_gaming: true,
         };
         let mut sched = Scheduler::new(cfg, &clock, 1);
         let _ = sched.handle_event(SchedulerEvent::Start);
@@ -1382,8 +1383,7 @@ mod tests {
         let dnd = DndContext {
             is_fullscreen: true,
             active_window_class: Some("VLC".to_owned()),
-            on_battery: false,
-            system_inhibited: false,
+            ..DndContext::default()
         };
         let cancel_actions = sched.evaluate_pre_break_policies(None, Some(&dnd));
         assert_eq!(sched.state(), SchedulerState::Waiting);
@@ -1579,6 +1579,34 @@ mod tests {
             !actions
                 .iter()
                 .any(|a| matches!(a, SchedulerAction::DismissNotification))
+        );
+    }
+
+    #[test]
+    fn tick_with_policies_gaming_suppresses_break_even_when_fullscreen_dnd_disabled() {
+        let clock = FakeClock::default();
+        let mut cfg = test_config();
+        cfg.do_not_disturb.enabled = false;
+        cfg.do_not_disturb.while_gaming = true;
+        let mut sched = Scheduler::new(cfg, &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        clock.advance_secs(890);
+        let gaming_ctx = DndContext {
+            game_detected: true,
+            ..DndContext::default()
+        };
+        let actions = sched.tick_with_policies(None, Some(&gaming_ctx));
+        assert_eq!(sched.state(), SchedulerState::Waiting);
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::ShowOverlay(_)))
+        );
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, SchedulerAction::NotifyPreBreak { .. }))
         );
     }
 

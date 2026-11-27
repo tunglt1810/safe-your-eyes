@@ -344,7 +344,7 @@ This section lists the operating system and framework limits that the code works
 11. `UNUserNotificationCenter` shows a new animated banner for each countdown update, and temporary banners hide after about 5 seconds. `OsNotifier` uses its own `NSPanel` banner instead.
 12. A panel that is released inside its own `mouseDown:` handler frees the object that runs the handler. The banner hides first and releases the panel later. The banner accepts the first mouse click, so one click dismisses it while another app is active.
 13. `NSApplication::activate()` has no effect after the tray menu closes. The Settings window requests `Activation::Take` at first display and again after AppKit ends menu tracking.
-14. The Settings window passes the saved theme to `Root`, not to `AppOptions`. This keeps the real system color scheme available for the System theme.
+14. The Settings window passes the saved theme to `Root` and `AppOptions` to avoid a first-frame flash, and resets the `NSApplication` and `NSWindow` appearance to `None` when switching back to `System` so the window follows the operating system color scheme.
 15. A native titled window without `NSToolbar` has a 16pt corner radius. The Cozy radius scale and the 8pt outer Settings padding use this value.
 16. `launchd` can stop the process when `launchctl` removes a running job. `sye-platform` deletes the legacy plist before it runs `launchctl`.
 17. A LaunchAgent plist without `AssociatedBundleIdentifiers` shows no app icon in System Settings. The fallback plist sets this key to the bundle identifier.

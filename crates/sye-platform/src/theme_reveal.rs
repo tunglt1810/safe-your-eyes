@@ -16,6 +16,18 @@ pub fn map_reveal_origin_y(origin_y: f64, height: f64, geometry_flipped: bool) -
     if geometry_flipped { y } else { h - y }
 }
 
+#[must_use]
+pub fn system_prefers_dark() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::system_prefers_dark()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
 pub fn capture_theme_transition_snapshot() -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -60,7 +72,7 @@ mod macos {
         CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage,
         CGImageAlphaInfo, CGImageByteOrderInfo, CGMutablePath, CGPath, kCGColorSpaceSRGB,
     };
-    use objc2_foundation::ns_string;
+    use objc2_foundation::{NSUserDefaults, ns_string};
     use objc2_quartz_core::{
         CAAnimation, CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CAShapeLayer,
         CATransaction, kCAFillRuleEvenOdd, kCAGravityResize,
@@ -80,6 +92,14 @@ mod macos {
     thread_local! {
         static NEXT_GENERATION: Cell<u64> = const { Cell::new(1) };
         static ACTIVE_REVEAL: RefCell<Option<ActiveReveal>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn system_prefers_dark() -> Option<bool> {
+        autoreleasepool(|_| {
+            let defaults = NSUserDefaults::standardUserDefaults();
+            let style = defaults.stringForKey(ns_string!("AppleInterfaceStyle"));
+            Some(style.is_some_and(|val| val.isEqualToString(ns_string!("Dark"))))
+        })
     }
 
     pub(super) fn capture() -> bool {
@@ -110,6 +130,16 @@ mod macos {
 
     fn visible_window(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
         let app = NSApplication::sharedApplication(mtm);
+        if let Some(window) = app.mainWindow()
+            && window.isVisible()
+        {
+            return Some(window);
+        }
+        if let Some(window) = app.keyWindow()
+            && window.isVisible()
+        {
+            return Some(window);
+        }
         for window in app.windows() {
             if window.isVisible() {
                 return Some(window);
@@ -132,29 +162,28 @@ mod macos {
         let bounds = container_layer.bounds();
         let width = bounds.size.width;
         let height = bounds.size.height;
-        if width <= 0.0 || height <= 0.0 {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
             return false;
         }
         let scale = window.backingScaleFactor().max(1.0);
 
-        let had_active = ACTIVE_REVEAL.with(|slot| slot.borrow().is_some());
-        let source_layer = if had_active {
-            // Capture the in-flight presentation tree so rapid toggles expand smoothly from the
-            // current mid-wave frame rather than jumping back to an older state.
-            presentation_or_self(&container_layer)
+        // Detach any in-flight overlay before rendering so `renderInContext:` captures the live
+        // view tree instead of an animated `CAShapeLayer` presentation mask.
+        let previous = ACTIVE_REVEAL.with(|slot| slot.borrow_mut().take());
+        if let Some(prev) = previous {
+            quiet(|| prev.overlay.removeFromSuperlayer());
+        }
+
+        let source_layer = if let Some(root) = content_view.subviews().firstObject()
+            && let Some(layer) = root.layer()
+        {
+            layer
         } else {
-            let root_layer = match content_view.subviews().firstObject() {
-                Some(root) => root.layer(),
-                None => None,
-            };
-            root_layer.unwrap_or_else(|| container_layer.clone())
+            container_layer.clone()
         };
 
-        display_tree(&container_layer);
+        display_tree(&source_layer);
         let Some(image) = render_layer_image(&source_layer, width, height, scale) else {
-            return false;
-        };
-        let Some(contents) = cgimage_object(&image) else {
             return false;
         };
 
@@ -164,11 +193,11 @@ mod macos {
             next.set(id.wrapping_add(1).max(1));
             id
         });
-        let previous = ACTIVE_REVEAL.with(|slot| {
-            slot.borrow_mut().replace(ActiveReveal {
+        ACTIVE_REVEAL.with(|slot| {
+            *slot.borrow_mut() = Some(ActiveReveal {
                 generation,
                 overlay: overlay.clone(),
-            })
+            });
         });
 
         // `nsh-platform-macos` hides root children on `ScreenTransition` before the GPU returns
@@ -183,10 +212,7 @@ mod macos {
             )]
             unsafe {
                 overlay.setContentsGravity(kCAGravityResize);
-                overlay.setContents(Some(&contents));
-            }
-            if let Some(prev) = previous {
-                prev.overlay.removeFromSuperlayer();
+                overlay.setContents(Some(cgimage_object(&image)));
             }
             container_layer.addSublayer(&overlay);
         });
@@ -207,7 +233,7 @@ mod macos {
         let bounds = overlay.bounds();
         let width = bounds.size.width;
         let height = bounds.size.height;
-        if width <= 0.0 || height <= 0.0 {
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
             finish_reveal(generation);
             return;
         }
@@ -263,20 +289,22 @@ mod macos {
     }
 
     fn finish_reveal(generation: u64) {
-        let removed = ACTIVE_REVEAL.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            if guard
-                .as_ref()
-                .is_some_and(|entry| entry.generation == generation)
-            {
-                guard.take()
-            } else {
-                None
+        autoreleasepool(|_| {
+            let removed = ACTIVE_REVEAL.with(|slot| {
+                let mut guard = slot.borrow_mut();
+                if guard
+                    .as_ref()
+                    .is_some_and(|entry| entry.generation == generation)
+                {
+                    guard.take()
+                } else {
+                    None
+                }
+            });
+            if let Some(active) = removed {
+                quiet(|| active.overlay.removeFromSuperlayer());
             }
         });
-        if let Some(active) = removed {
-            quiet(|| active.overlay.removeFromSuperlayer());
-        }
     }
 
     fn quiet(f: impl FnOnce()) {
@@ -284,15 +312,6 @@ mod macos {
         CATransaction::setDisableActions(true);
         f();
         CATransaction::commit();
-    }
-
-    fn presentation_or_self(layer: &CALayer) -> Retained<CALayer> {
-        #[expect(
-            unsafe_code,
-            reason = "CALayer presentationLayer getter on main thread"
-        )]
-        let presentation = unsafe { layer.presentationLayer() };
-        presentation.unwrap_or_else(|| layer.clone())
     }
 
     fn display_tree(layer: &CALayer) {
@@ -377,12 +396,11 @@ mod macos {
         path
     }
 
-    fn cgimage_object(image: &CGImage) -> Option<Retained<AnyObject>> {
-        let ptr = ptr::from_ref(image).cast::<AnyObject>().cast_mut();
-        // SAFETY: `CGImage` is a toll-free bridged CoreFoundation object.
+    fn cgimage_object(image: &CGImage) -> &AnyObject {
+        // SAFETY: `CGImage` is a toll-free bridged CoreFoundation object kept alive by the caller.
         #[expect(unsafe_code, reason = "Toll-free bridge CGImage to CALayer contents")]
         unsafe {
-            Retained::retain(ptr)
+            &*ptr::from_ref(image).cast::<AnyObject>()
         }
     }
 

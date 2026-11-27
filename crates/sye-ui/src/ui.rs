@@ -180,7 +180,7 @@ pub(crate) fn theme_toggle_button(
         .on_press(move |ev: &PressEvent| {
             let p = ev.page_position;
             let live_press = (p.x.0 > 0.0 || p.y.0 > 0.0).then_some([p.x.0, p.y.0]);
-            let origin = live_press.or_else(|| measured_center.get());
+            let origin = live_press.or_else(|| measured_center.get_untracked());
             on_press(origin);
         })
         .h(px(36.0))

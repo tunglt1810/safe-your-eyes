@@ -75,6 +75,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSRunLoop",
     "NSString",
     "NSTimer",
+    "NSUserDefaults",
 ] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
     "std",

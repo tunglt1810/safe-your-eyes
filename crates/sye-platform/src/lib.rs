@@ -42,6 +42,7 @@ pub use sye_core::traits;
 pub use theme_reveal::{
     cancel_theme_transition_snapshot, capture_theme_transition_snapshot,
     circular_reveal_max_radius, map_reveal_origin_y, reveal_theme_transition_snapshot,
+    system_prefers_dark,
 };
 pub use tray::{
     TrayEvent, TrayHandle, TrayIconState, format_status_label, format_tooltip,

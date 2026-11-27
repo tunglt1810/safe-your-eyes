@@ -108,9 +108,12 @@ mod macos_impl {
 mod windows_impl {
     use sye_core::Locale;
     use windows_sys::Win32::Globalization::{
-        GetUserDefaultLocaleName, GetUserPreferredUILanguages, LOCALE_NAME_MAX_LENGTH,
-        MUI_LANGUAGE_NAME,
+        GetUserDefaultLocaleName, GetUserPreferredUILanguages, MUI_LANGUAGE_NAME,
     };
+
+    // windows-sys only exposes this as `u32` under `Win32_System_SystemServices`, but
+    // `GetUserDefaultLocaleName` takes an `i32` length.
+    const LOCALE_NAME_MAX_LENGTH: i32 = 85;
 
     use super::parse_windows_multi_sz_tags;
 

@@ -213,9 +213,9 @@ Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
 On macOS, `OsNotifier` shows a lazy non-activating `NSPanel` banner in the top-right corner of the active display without window animations and destroys the panel on dismissal.
 On Windows, `OsNotifier` shows a lazy per-monitor-DPI-aware, topmost, non-activating Win32 popup banner in the bottom-right corner of the work area on the display under the cursor, follows the `AppsUseLightTheme` light or dark app mode, and destroys the window on dismissal.
-On macOS and Windows, the pre-break banner shows the break type and exercise name on the left, a Cozy countdown pill badge (`<N>s`) on the right, and a 3px progress bar along the bottom edge that shrinks each second.
+On macOS and Windows, the pre-break banner shows the break type and exercise name on the left, a Cozy countdown pill badge (`<N>s` under 1 minute, `M:SS` at 1 minute or more) on the right, and a 3px progress bar along the bottom edge that shrinks each second.
 The countdown pill badge uses the Cozy yellow badge palette above 3 seconds and switches to the Cozy accent palette (`ACCENT` and `ON_ACCENT`) at 3 seconds or less.
-The banner sets a full spoken accessibility label when it opens or changes exercise without repeating screen reader announcements every second.
+The banner sets a spoken accessibility label without a static countdown number when it opens or changes title or exercise, avoiding repeated screen reader announcements every second.
 On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second with a freedesktop `value` progress hint (0 to 100) and closes it on dismissal.
 On macOS, Linux, and Windows, when the user clicks or closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
 
@@ -388,6 +388,7 @@ This section lists the operating system and framework limits that the code works
 2. The GNOME Mutter `IdleMonitor` returns idle time in milliseconds as `u64`. The Freedesktop `ScreenSaver` fallback returns idle time in milliseconds as `u32`.
 3. The notification server can give a new id to a notification that replaces an expired one. `OsNotifier` stores the id that the server returns.
 4. `handle_action` blocks until the server reports `ActionInvoked` or `NotificationClosed`. `OsNotifier` calls it on a separate thread.
+5. After an atomic binary replacement on Linux, `std::env::current_exe` returns `<path> (deleted)`. The daemon strips that suffix before it starts the replacement binary.
 
 ### 12.4 Native Shell (`nsh`)
 

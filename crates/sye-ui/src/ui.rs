@@ -300,30 +300,22 @@ pub(crate) struct CountdownPillState {
     pub(crate) accessible_label: String,
 }
 
-impl Default for CountdownPillState {
-    fn default() -> Self {
-        Self {
-            tone: CountdownTone::Disabled,
-            label: String::new(),
-            time: None,
-            accessible_label: String::new(),
-        }
-    }
-}
-
 pub(crate) fn countdown_status_pill(
-    state: impl Fn() -> CountdownPillState + Copy + 'static,
+    tone: impl Fn() -> CountdownTone + Copy + 'static,
+    label: impl IntoReactive<SharedString>,
+    time: impl Fn() -> Option<String> + Copy + 'static,
+    accessible_label: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
     let icon = canvas(move || {
-        let tone = state().tone;
-        let stroke = color(tone.icon_color());
+        let current = tone();
+        let stroke = color(current.icon_color());
         Painter::new()
             .scale(14.0_f32 / 24.0_f32, 14.0_f32 / 24.0_f32)
             .stroke_color(stroke)
             .line_width(2.0_f32)
             .line_cap(LineCap::Round)
             .line_join(LineJoin::Round)
-            .stroke_svg(tone.icon_svg())
+            .stroke_svg(current.icon_svg())
     })
     .w(px(14.0))
     .h(px(14.0))
@@ -332,39 +324,39 @@ pub(crate) fn countdown_status_pill(
     view()
         .accessible(true)
         .role(AccessibilityRole::Timer)
-        .label(move || state().accessible_label)
+        .label(accessible_label)
         .h(px(36.0))
         .px_3()
         .flex_row()
         .items_center()
         .gap_2()
         .rounded(radii::PILL)
-        .bg(move || state().tone.bg_color())
+        .bg(move || tone().bg_color())
         .border_1()
-        .border_color(move || state().tone.border_color())
+        .border_color(move || tone().border_color())
         .transition_colors()
         .duration(motion::CONTROL_MS)
         .ease_out()
         .child(icon)
         .child(
-            text(move || state().label)
+            text(label)
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || state().tone.text_color()),
+                .text_color(move || tone().text_color()),
         )
         .child(when(
-            move || state().time.is_some(),
+            move || time().is_some(),
             move || {
                 view()
                     .px_2()
                     .py(px(2.0))
                     .rounded(radii::PILL)
-                    .bg(move || state().tone.time_chip_bg())
+                    .bg(move || tone().time_chip_bg())
                     .child(
-                        text(move || state().time.unwrap_or_default())
+                        text(move || time().unwrap_or_default())
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(move || state().tone.text_color())
+                            .text_color(move || tone().text_color())
                             .tabular_nums(),
                     )
             },

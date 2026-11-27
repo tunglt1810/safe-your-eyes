@@ -32,7 +32,15 @@ impl PreBreakCountdown {
     #[cfg(any(target_os = "macos", windows, test))]
     #[must_use]
     pub(crate) fn badge_text(self) -> String {
-        format!("{}s", self.remaining_secs)
+        if self.remaining_secs >= 60 {
+            format!(
+                "{}:{:02}",
+                self.remaining_secs / 60,
+                self.remaining_secs % 60
+            )
+        } else {
+            format!("{}s", self.remaining_secs)
+        }
     }
 
     #[must_use]
@@ -160,12 +168,14 @@ impl OsNotifier {
 
         #[cfg(target_os = "macos")]
         {
-            macos_impl::show_banner(summary, body, summary, None)
+            let accessible = format_notice_accessibility_label(summary, body);
+            macos_impl::show_banner(summary, body, &accessible, None)
         }
 
         #[cfg(windows)]
         {
-            windows_impl::show_banner(summary, body, summary, None)
+            let accessible = format_notice_accessibility_label(summary, body);
+            windows_impl::show_banner(summary, body, &accessible, None)
         }
 
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -213,10 +223,22 @@ pub fn format_pre_break_notification(
 
 #[cfg(any(target_os = "macos", windows, test))]
 #[must_use]
+pub(crate) fn format_notice_accessibility_label(summary: &str, body: &str) -> String {
+    let summary = summary.trim();
+    let body = body.trim();
+    match (summary.is_empty(), body.is_empty()) {
+        (false, false) => format!("{summary}. {body}"),
+        (false, true) => summary.to_owned(),
+        (true, false) => body.to_owned(),
+        (true, true) => String::new(),
+    }
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+#[must_use]
 pub(crate) fn format_pre_break_banner_copy(
     break_type: BreakType,
     title: &str,
-    _warning_secs: u64,
 ) -> (String, String, String) {
     let kind_label = match break_type {
         BreakType::Short => "Short break",
@@ -288,15 +310,13 @@ impl Notifier for OsNotifier {
 
         #[cfg(target_os = "macos")]
         {
-            let (banner_title, body, accessible) =
-                format_pre_break_banner_copy(break_type, title, warning_secs);
+            let (banner_title, body, accessible) = format_pre_break_banner_copy(break_type, title);
             macos_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
         }
 
         #[cfg(windows)]
         {
-            let (banner_title, body, accessible) =
-                format_pre_break_banner_copy(break_type, title, warning_secs);
+            let (banner_title, body, accessible) = format_pre_break_banner_copy(break_type, title);
             windows_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
         }
 
@@ -420,7 +440,7 @@ mod macos_impl {
     const PAD_RIGHT: f64 = 14.0;
     const PAD_Y: f64 = 12.0;
     const LINE_GAP: f64 = 2.0;
-    const BADGE_WIDTH: f64 = 56.0;
+    const BADGE_WIDTH: f64 = 60.0;
     const BADGE_HEIGHT: f64 = 32.0;
     const BADGE_GAP: f64 = 10.0;
     const PROGRESS_H: f64 = 3.0;
@@ -701,7 +721,7 @@ mod macos_impl {
                 self.title_label
                     .setStringValue(&NSString::from_str(summary));
             }
-            if !was_visible || body_changed || mode_changed {
+            if !was_visible || summary_changed || body_changed || mode_changed {
                 let a11y = NSString::from_str(accessible_label);
                 // SAFETY: `NSView` implements `setAccessibilityLabel:` via `NSAccessibility`.
                 unsafe {
@@ -929,7 +949,7 @@ mod windows_impl {
     const PAD_RIGHT: i32 = 14;
     const PAD_Y: i32 = 12;
     const LINE_GAP: i32 = 2;
-    const BADGE_WIDTH: i32 = 56;
+    const BADGE_WIDTH: i32 = 60;
     const BADGE_HEIGHT: i32 = 32;
     const BADGE_GAP: i32 = 10;
     const PROGRESS_H: i32 = 3;
@@ -1382,6 +1402,7 @@ mod windows_impl {
 
             let summary: Vec<u16> = summary.encode_utf16().collect();
             let body: Vec<u16> = body.encode_utf16().collect();
+            let summary_changed = self.summary != summary;
             let body_changed = self.body != body;
             let mode_changed = self.countdown.is_some() != countdown.is_some();
             let dpi_changed = self.dpi != dpi;
@@ -1392,7 +1413,7 @@ mod windows_impl {
             self.countdown = countdown;
             self.badge_text =
                 countdown.map_or_else(Vec::new, |cd| cd.badge_text().encode_utf16().collect());
-            if !was_visible || body_changed || mode_changed {
+            if !was_visible || summary_changed || body_changed || mode_changed {
                 let a11y_title = wide_z(accessible_label);
                 // SAFETY: `self.hwnd` is live and `a11y_title` is NUL-terminated UTF-16.
                 unsafe { SetWindowTextW(self.hwnd, a11y_title.as_ptr()) };
@@ -1645,18 +1666,34 @@ mod tests {
 
     #[test]
     fn format_pre_break_banner_copy_formats_title_body_and_accessibility_label() {
-        let (title, body, a11y) = format_pre_break_banner_copy(BreakType::Short, "Blink", 10);
+        let (title, body, a11y) = format_pre_break_banner_copy(BreakType::Short, "Blink");
         assert_eq!(title, "Short break");
         assert_eq!(body, "Blink");
         assert_eq!(a11y, "Safe Your Eyes: Short break starting soon. Blink");
 
         let (long_title, long_body, long_a11y) =
-            format_pre_break_banner_copy(BreakType::Long, "  ", 1);
+            format_pre_break_banner_copy(BreakType::Long, "  ");
         assert_eq!(long_title, "Long break");
         assert_eq!(long_body, "Prepare to rest your eyes.");
         assert_eq!(
             long_a11y,
             "Safe Your Eyes: Long break starting soon. Prepare to rest your eyes."
+        );
+    }
+
+    #[test]
+    fn format_notice_accessibility_label_combines_non_empty_parts() {
+        assert_eq!(
+            format_notice_accessibility_label("Update failed", "Check your connection"),
+            "Update failed. Check your connection"
+        );
+        assert_eq!(
+            format_notice_accessibility_label("Update available", "  "),
+            "Update available"
+        );
+        assert_eq!(
+            format_notice_accessibility_label("", "Ready to restart"),
+            "Ready to restart"
         );
     }
 
@@ -1691,6 +1728,20 @@ mod tests {
         assert!(t3.is_urgent());
         assert_eq!(t3.badge_text(), "3s");
         assert_eq!(t3.progress_percent(), 30);
+
+        let long_warn = PreBreakCountdown {
+            remaining_secs: 1000,
+            total_secs: 1000,
+        };
+        assert_eq!(long_warn.badge_text(), "16:40");
+        assert_eq!(
+            PreBreakCountdown {
+                remaining_secs: 60,
+                total_secs: 60,
+            }
+            .badge_text(),
+            "1:00"
+        );
 
         tracker.reset();
         let next_cycle = tracker.observe(6);

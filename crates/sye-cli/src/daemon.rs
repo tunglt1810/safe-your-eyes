@@ -934,13 +934,29 @@ fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io:
     sye_platform::hide_child_console(&mut cmd).spawn()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn strip_linux_deleted_exe_suffix(exe: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if let Some(stripped) = exe.as_os_str().as_bytes().strip_suffix(b" (deleted)") {
+            return std::path::PathBuf::from(std::ffi::OsStr::from_bytes(stripped));
+        }
+        exe
+    }
+    #[cfg(not(unix))]
+    {
+        if let Some(stripped) = exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+            return std::path::PathBuf::from(stripped);
+        }
+        exe
+    }
+}
+
 fn spawn_restarted_daemon(paths: &AppPaths, headless: bool) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
-    // Linux reports `<path> (deleted)` when a self-update replaced the running binary.
-    let exe = exe
-        .to_str()
-        .and_then(|text| text.strip_suffix(" (deleted)"))
-        .map_or(exe.clone(), std::path::PathBuf::from);
+    #[cfg(target_os = "linux")]
+    let exe = strip_linux_deleted_exe_suffix(exe);
     let resolved = exe.canonicalize().unwrap_or(exe);
     let mut cmd = Command::new(resolved);
     cmd.arg("--background")
@@ -1103,5 +1119,21 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    #[test]
+    fn strip_linux_deleted_exe_suffix_handles_replaced_and_normal_paths() {
+        assert_eq!(
+            strip_linux_deleted_exe_suffix(std::path::PathBuf::from(
+                "/usr/local/bin/safe-your-eyes (deleted)"
+            )),
+            std::path::PathBuf::from("/usr/local/bin/safe-your-eyes")
+        );
+        assert_eq!(
+            strip_linux_deleted_exe_suffix(std::path::PathBuf::from(
+                "/usr/local/bin/safe-your-eyes"
+            )),
+            std::path::PathBuf::from("/usr/local/bin/safe-your-eyes")
+        );
     }
 }

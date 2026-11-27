@@ -1941,9 +1941,33 @@ pub(crate) fn build_settings_view_with_hooks(
                         .child(when(
                             move || countdown_pill.with(Option::is_some),
                             move || {
-                                countdown_status_pill(move || {
-                                    countdown_pill.with(|pill| pill.clone().unwrap_or_default())
-                                })
+                                countdown_status_pill(
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref()
+                                                .map_or(CountdownTone::Disabled, |state| state.tone)
+                                        })
+                                    },
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref().map_or_else(String::new, |state| {
+                                                state.label.clone()
+                                            })
+                                        })
+                                    },
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref().and_then(|state| state.time.clone())
+                                        })
+                                    },
+                                    move || {
+                                        countdown_pill.with(|pill| {
+                                            pill.as_ref().map_or_else(String::new, |state| {
+                                                state.accessible_label.clone()
+                                            })
+                                        })
+                                    },
+                                )
                             },
                         ))
                         .child(theme_toggle_button(

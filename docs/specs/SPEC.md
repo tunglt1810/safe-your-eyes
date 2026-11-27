@@ -219,11 +219,11 @@ When the user changes `Launch at login (startup)`, the Settings window saves `co
 Each chime uses a smooth attack and exponential decay envelope to prevent clicks.
 Volume clamps to 0 through 100, and volume 0 produces a valid silent WAV buffer.
 `sye-platform` plays the buffer without blocking via `pw-play`, `paplay`, or `aplay` on Linux, `afplay` on macOS, and `PlaySoundW` on Windows.
-On macOS, `OsNotifier` shows a lazy non-activating `NSPanel` banner in the top-right corner of the active display without window animations and destroys the panel on dismissal.
-On Windows, `OsNotifier` shows a lazy per-monitor-DPI-aware, topmost, non-activating Win32 popup banner in the bottom-right corner of the work area on the display under the cursor, follows the `AppsUseLightTheme` light or dark app mode, and destroys the window on dismissal.
-On macOS and Windows, the pre-break banner shows the break type and exercise name on the left, a Cozy countdown pill badge (`<N>s` under 1 minute, `M:SS` from 1 minute to under 100 minutes, `<N>m` at 100 minutes or more) on the right, and a 3px progress bar along the bottom edge that shrinks each second.
-The progress bar measures the remaining seconds against the effective warning duration that the scheduler sends with each pre-break notification.
-The countdown pill badge uses the Cozy yellow badge palette above 3 seconds and switches to the Cozy accent palette (`ACCENT` and `ON_ACCENT`) at 3 seconds or less.
+On macOS, `OsNotifier` shows a lazy non-activating Cozy `NSPanel` banner in the top-right corner of the active display (`16px` margin, `16px` continuous corner radius) with a 260ms Cozy ease-out fade-in (`cubic-bezier(0.22, 1, 0.36, 1)`) and destroys the panel on dismissal.
+On Windows, `OsNotifier` shows a lazy per-monitor-DPI-aware, topmost, non-activating Win32 popup banner in the bottom-right corner of the work area on the display under the cursor (`16px` margin, DWM rounded corners and `DWMWA_BORDER_COLOR` on Windows 11 with a 1px GDI Cozy border fallback on Windows 10) and destroys the window on dismissal.
+On macOS and Windows, the banner applies the complete Cozy Design System (`bg-surface`, `border-emphasized`, `text-primary`, `text-secondary`, 4px spacing grid, zero pure `#FFFFFF` or `#000000`), follows `Config.theme` (`System`, `Light`, or `Dark`), shows the break type and exercise name on the left, a Cozy countdown pill badge (`<N>s` under 1 minute, `M:SS` from 1 minute to under 100 minutes, `<N>m` at 100 minutes or more) on the right, and an inset 4px pill progress bar (`track` and `accent`) along the bottom.
+The progress bar animates continuously from the remaining ratio to `0%` over the remaining warning window (Core Animation `bounds.size.width` on macOS and a 60fps `WM_TIMER` with double-buffered GDI painting on Windows), and steps once per second when the operating system enables Reduce Motion.
+The countdown pill badge uses the Cozy yellow badge palette above 3 seconds and transitions to the Cozy accent palette (`ACCENT`, `FOCUS_RING`, and `ON_ACCENT`) at 3 seconds or less (`160ms` Cozy ease-out on macOS when Reduce Motion is off).
 The banner sets a spoken accessibility label without a static countdown number when it opens or changes title or exercise, avoiding repeated screen reader announcements every second.
 On Linux, `OsNotifier` updates the active `notify-rust` notification in place each second with a freedesktop `value` progress hint (0 to 100) and closes it on dismissal.
 On macOS, Linux, and Windows, when the user clicks or closes the pre-break notification, `OsNotifier` stops the countdown updates for the rest of that cycle.
@@ -384,10 +384,10 @@ This section lists the operating system and framework limits that the code works
 2. nsh ends the process inside `run_app`, so `run_overlay_with_hook` does not return. The overlay writes its outcome from the outcome hook.
 3. Explorer moves the taskbar below a window only when the window is full screen, is in the foreground, and has a taskbar button. The overlay window has a taskbar button, and the overlay marks its visible windows full screen with `ITaskbarList2::MarkFullscreenWindow`.
 4. Named pipes return `ErrorKind::Unsupported` for stream timeouts. The IPC code ignores this error.
-5. `GetSysColor` does not follow the app dark mode. In dark mode, the banner uses the Windows 11 flyout colors.
+5. `GetSysColor` does not follow app dark mode and uses pure `#FFFFFF`/`#000000`. The Windows banner paints the Cozy Design System palette directly and follows `Config.theme` (reading `AppsUseLightTheme` when `Config.theme` is `System`).
 6. The banner uses per-thread DPI awareness for its Win32 calls. The tray icon keeps the process DPI awareness.
 7. `sye-cli/build.rs` embeds the app icon with resource ID 1 (`winresource::set_icon`). The banner loads the icon with this ID.
-8. Windows 10 does not support rounded window corners from DWM. The banner keeps square corners there.
+8. Windows 10 does not support rounded window corners from DWM. The banner keeps square corners there and draws a 1px Cozy `border-emphasized` GDI frame instead of `DWMWA_BORDER_COLOR`.
 9. Native caption buttons occupy the top-right corner on Windows and Linux. The Settings window keeps clear space at the top for window drag.
 10. Windows blocks `SetForegroundWindow` when the daemon does not hold the foreground lock, and UIPI blocks `AttachThreadInput` against elevated windows. `PlatformEventLoop::activate_child` restores a minimized child window, attaches thread input when `SetForegroundWindow` fails, and toggles `HWND_TOPMOST` briefly if focus still fails.
 11. `Path::canonicalize` returns a `\\?\` verbatim prefix on Windows. `sye-platform` strips that prefix before it writes the Windows startup command.

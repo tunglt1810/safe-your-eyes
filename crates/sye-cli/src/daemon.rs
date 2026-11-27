@@ -579,7 +579,9 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     let notifier = if headless {
         OsNotifier::noop()
     } else {
-        OsNotifier::with_locale(active_locale)
+        let notifier = OsNotifier::with_locale(active_locale);
+        notifier.set_theme_mode(scheduler.config().theme);
+        notifier
     };
     #[cfg(not(feature = "msstore"))]
     if !headless {
@@ -693,6 +695,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             }
             host.execute(scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg)));
             host.set_locale(scheduler.active_locale());
+            host.notifier.set_theme_mode(scheduler.config().theme);
         }
 
         #[cfg(not(feature = "msstore"))]

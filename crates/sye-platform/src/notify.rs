@@ -3,10 +3,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU8, Ordering};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::sync::{Arc, Mutex, PoisonError};
+#[cfg(any(target_os = "macos", windows, test))]
+use std::time::Instant;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use notify_rust::{Hint, Notification, Timeout};
-use sye_core::{BreakType, Locale, Notifier, PlatformError, localize_exercise_name};
+use sye_core::{BreakType, Locale, Notifier, PlatformError, ThemeMode, localize_exercise_name};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 const APP_NAME: &str = "Safe Your Eyes";
@@ -27,8 +29,116 @@ const fn decode_locale(raw: u8) -> Locale {
     }
 }
 
+const fn encode_theme_mode(mode: ThemeMode) -> u8 {
+    match mode {
+        ThemeMode::System => 0,
+        ThemeMode::Light => 1,
+        ThemeMode::Dark => 2,
+    }
+}
+
+const fn decode_theme_mode(raw: u8) -> ThemeMode {
+    match raw {
+        1 => ThemeMode::Light,
+        2 => ThemeMode::Dark,
+        _ => ThemeMode::System,
+    }
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+#[must_use]
+pub(crate) const fn resolve_dark_mode(mode: ThemeMode, system_dark: bool) -> bool {
+    match mode {
+        ThemeMode::System => system_dark,
+        ThemeMode::Light => false,
+        ThemeMode::Dark => true,
+    }
+}
+
 #[cfg(any(target_os = "macos", windows, test))]
 const PRE_BREAK_URGENT_SECS: u64 = 3;
+
+#[cfg(any(target_os = "macos", windows, test))]
+const PROGRESS_DRIFT_TOLERANCE_SECS: f64 = 1.25;
+
+// Cozy v0.2.0 motion tokens (`tunglt1810/cozy`: `tokens/cozy.tokens.json`).
+#[cfg(any(target_os = "macos", test))]
+const COZY_EASE_OUT: (f32, f32, f32, f32) = (0.22, 1.0, 0.36, 1.0);
+#[cfg(any(target_os = "macos", test))]
+const COZY_ENTER_DURATION_SECS: f64 = 0.26;
+#[cfg(any(target_os = "macos", test))]
+const COZY_FAST_DURATION_SECS: f64 = 0.16;
+
+// Cozy v0.2.0 color tokens (`tunglt1810/cozy`: `tokens/cozy.tokens.json`).
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BannerPalette {
+    pub(crate) surface: u32,
+    pub(crate) border: u32,
+    pub(crate) title: u32,
+    pub(crate) body: u32,
+    pub(crate) badge_bg: u32,
+    pub(crate) badge_border: u32,
+    pub(crate) badge_text: u32,
+    pub(crate) urgent_bg: u32,
+    pub(crate) urgent_border: u32,
+    pub(crate) urgent_text: u32,
+    pub(crate) track: u32,
+    pub(crate) fill: u32,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const COZY_LIGHT_PALETTE: BannerPalette = BannerPalette {
+    surface: 0xFBF1E1,
+    border: 0xDFCBB5,
+    title: 0x261101,
+    body: 0x5B4C3B,
+    badge_bg: 0xFAE1B5,
+    badge_border: 0xE5C27D,
+    badge_text: 0x5E3904,
+    urgent_bg: 0xEF8F63,
+    urgent_border: 0xA84A24,
+    urgent_text: 0x261101,
+    track: 0xE6D2BC,
+    fill: 0xEF8F63,
+};
+
+#[cfg(any(target_os = "macos", windows, test))]
+pub(crate) const COZY_DARK_PALETTE: BannerPalette = BannerPalette {
+    surface: 0x231D16,
+    border: 0x52493F,
+    title: 0xFFFEF7,
+    body: 0xC2B7B1,
+    badge_bg: 0x443A26,
+    badge_border: 0xC99A44,
+    badge_text: 0xFCE09B,
+    urgent_bg: 0xEE8F64,
+    urgent_border: 0xF2A57E,
+    urgent_text: 0x18140E,
+    track: 0x30271E,
+    fill: 0xEE8F64,
+};
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl BannerPalette {
+    #[must_use]
+    pub(crate) const fn for_dark(dark: bool) -> Self {
+        if dark {
+            COZY_DARK_PALETTE
+        } else {
+            COZY_LIGHT_PALETTE
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn badge_colors(self, urgent: bool) -> (u32, u32, u32) {
+        if urgent {
+            (self.urgent_bg, self.urgent_border, self.urgent_text)
+        } else {
+            (self.badge_bg, self.badge_border, self.badge_text)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PreBreakCountdown {
@@ -82,9 +192,59 @@ impl PreBreakCountdown {
     }
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProgressTimeline {
+    started_at: Instant,
+    start_ratio: f64,
+    duration_secs: f64,
+    total_secs: u64,
+    last_remaining_secs: u64,
+}
+
+#[cfg(any(target_os = "macos", windows, test))]
+impl ProgressTimeline {
+    #[must_use]
+    pub(crate) fn start(now: Instant, countdown: PreBreakCountdown) -> Self {
+        Self {
+            started_at: now,
+            start_ratio: countdown.progress_ratio(),
+            duration_secs: countdown.remaining_secs as f64,
+            total_secs: countdown.total_secs,
+            last_remaining_secs: countdown.remaining_secs,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn ratio_at(self, now: Instant) -> f64 {
+        if self.duration_secs <= 0.0 || self.start_ratio <= 0.0 {
+            return 0.0;
+        }
+        let elapsed = now.saturating_duration_since(self.started_at).as_secs_f64();
+        (self.start_ratio * (1.0 - elapsed / self.duration_secs)).clamp(0.0, self.start_ratio)
+    }
+
+    pub(crate) fn sync_or_restart(&mut self, now: Instant, countdown: PreBreakCountdown) -> bool {
+        let expected = self.ratio_at(now);
+        let target = countdown.progress_ratio();
+        let drift_secs = (expected - target).abs() * (countdown.total_secs as f64);
+        let needs_restart = countdown.total_secs != self.total_secs
+            || countdown.remaining_secs > self.last_remaining_secs
+            || drift_secs > PROGRESS_DRIFT_TOLERANCE_SECS;
+        if needs_restart {
+            *self = Self::start(now, countdown);
+            true
+        } else {
+            self.last_remaining_secs = countdown.remaining_secs;
+            false
+        }
+    }
+}
+
 pub struct OsNotifier {
     enabled: bool,
     locale: AtomicU8,
+    theme_mode: AtomicU8,
     #[cfg(all(unix, not(target_os = "macos")))]
     active: Mutex<Option<LinuxActive>>,
 }
@@ -118,6 +278,7 @@ impl std::fmt::Debug for OsNotifier {
         f.debug_struct("OsNotifier")
             .field("enabled", &self.enabled)
             .field("locale", &self.locale())
+            .field("theme_mode", &self.theme_mode())
             .finish_non_exhaustive()
     }
 }
@@ -133,6 +294,7 @@ impl OsNotifier {
         Self {
             enabled: true,
             locale: AtomicU8::new(encode_locale(locale)),
+            theme_mode: AtomicU8::new(encode_theme_mode(ThemeMode::System)),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
@@ -143,6 +305,7 @@ impl OsNotifier {
         Self {
             enabled: false,
             locale: AtomicU8::new(encode_locale(Locale::En)),
+            theme_mode: AtomicU8::new(encode_theme_mode(ThemeMode::System)),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
@@ -157,6 +320,16 @@ impl OsNotifier {
         decode_locale(self.locale.load(Ordering::Acquire))
     }
 
+    pub fn set_theme_mode(&self, mode: ThemeMode) {
+        self.theme_mode
+            .store(encode_theme_mode(mode), Ordering::Release);
+    }
+
+    #[must_use]
+    pub fn theme_mode(&self) -> ThemeMode {
+        decode_theme_mode(self.theme_mode.load(Ordering::Acquire))
+    }
+
     pub fn show_notice(&self, summary: &str, body: &str) -> Result<(), PlatformError> {
         if !self.enabled {
             return Ok(());
@@ -165,13 +338,13 @@ impl OsNotifier {
         #[cfg(target_os = "macos")]
         {
             let accessible = format_notice_accessibility_label(summary, body);
-            macos_impl::show_banner(summary, body, &accessible, None)
+            macos_impl::show_banner(summary, body, &accessible, None, self.theme_mode())
         }
 
         #[cfg(windows)]
         {
             let accessible = format_notice_accessibility_label(summary, body);
-            windows_impl::show_banner(summary, body, &accessible, None)
+            windows_impl::show_banner(summary, body, &accessible, None, self.theme_mode())
         }
 
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -299,13 +472,13 @@ pub(crate) fn compute_macos_banner_origin(
     visible_frame: crate::tray::ScreenRect,
     banner_size: (f64, f64),
 ) -> (f64, f64) {
-    const RIGHT_MARGIN: f64 = 12.0;
-    const TOP_MARGIN: f64 = 12.0;
+    // Matches Cozy toast `space-4` (16px) inset from screen edges.
+    const SCREEN_MARGIN: f64 = 16.0;
 
-    let min_x = visible_frame.x + RIGHT_MARGIN;
-    let max_x = (visible_frame.x + visible_frame.width - banner_size.0 - RIGHT_MARGIN).max(min_x);
-    let min_y = visible_frame.y + TOP_MARGIN;
-    let max_y = (visible_frame.y + visible_frame.height - banner_size.1 - TOP_MARGIN).max(min_y);
+    let min_x = visible_frame.x + SCREEN_MARGIN;
+    let max_x = (visible_frame.x + visible_frame.width - banner_size.0 - SCREEN_MARGIN).max(min_x);
+    let min_y = visible_frame.y + SCREEN_MARGIN;
+    let max_y = (visible_frame.y + visible_frame.height - banner_size.1 - SCREEN_MARGIN).max(min_y);
     (max_x.round(), max_y.round())
 }
 
@@ -331,14 +504,26 @@ impl Notifier for OsNotifier {
         {
             let (banner_title, body, accessible) =
                 format_pre_break_banner_copy_localized(break_type, title, locale);
-            macos_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
+            macos_impl::show_banner(
+                &banner_title,
+                &body,
+                &accessible,
+                Some(countdown),
+                self.theme_mode(),
+            )
         }
 
         #[cfg(windows)]
         {
             let (banner_title, body, accessible) =
                 format_pre_break_banner_copy_localized(break_type, title, locale);
-            windows_impl::show_banner(&banner_title, &body, &accessible, Some(countdown))
+            windows_impl::show_banner(
+                &banner_title,
+                &body,
+                &accessible,
+                Some(countdown),
+                self.theme_mode(),
+            )
         }
 
         #[cfg(all(unix, not(target_os = "macos")))]
@@ -431,42 +616,53 @@ impl Notifier for OsNotifier {
 mod macos_impl {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
     use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
     use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
         NSBackingStoreType, NSColor, NSEvent, NSFont, NSFontWeightBold, NSFontWeightRegular,
         NSFontWeightSemibold, NSImage, NSImageView, NSLineBreakMode, NSPanel, NSResponder,
-        NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSVisualEffectBlendingMode,
-        NSVisualEffectMaterial, NSVisualEffectState, NSVisualEffectView, NSWindowAnimationBehavior,
-        NSWindowCollectionBehavior, NSWindowStyleMask,
+        NSScreen, NSStatusWindowLevel, NSTextField, NSView, NSWindowAnimationBehavior,
+        NSWindowCollectionBehavior, NSWindowStyleMask, NSWorkspace,
     };
+    use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_foundation::{
-        NSData, NSObject, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
+        NSData, NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
     };
-    use sye_core::PlatformError;
+    use objc2_quartz_core::{
+        CAAnimation, CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction,
+        CATransaction, kCACornerCurveContinuous, kCAMediaTimingFunctionLinear,
+    };
+    use sye_core::{PlatformError, ThemeMode};
 
-    use super::{PreBreakCountdown, compute_macos_banner_origin};
+    use super::{
+        BannerPalette, COZY_EASE_OUT, COZY_ENTER_DURATION_SECS, COZY_FAST_DURATION_SECS,
+        PreBreakCountdown, ProgressTimeline, compute_macos_banner_origin, resolve_dark_mode,
+    };
     use crate::tray::ScreenRect;
 
     const APP_ICON_PNG: &[u8] =
         include_bytes!("../../../assets/icons/hicolor/128x128/apps/safe-your-eyes.png");
     const BANNER_WIDTH: f64 = 368.0;
-    const MIN_HEIGHT: f64 = 68.0;
+    const MIN_NOTICE_HEIGHT: f64 = 68.0;
     const CORNER_RADIUS: f64 = 16.0;
-    const ICON_SIZE: f64 = 38.0;
-    const ICON_X: f64 = 13.0;
-    const TEXT_X: f64 = 62.0;
-    const PAD_RIGHT: f64 = 14.0;
+    const PAD_X: f64 = 16.0;
     const PAD_Y: f64 = 12.0;
-    const LINE_GAP: f64 = 2.0;
-    const BADGE_WIDTH: f64 = 60.0;
+    const ICON_SIZE: f64 = 36.0;
+    const ICON_GAP: f64 = 12.0;
+    const TEXT_X: f64 = PAD_X + ICON_SIZE + ICON_GAP;
+    const LINE_GAP: f64 = 4.0;
+    const BADGE_WIDTH: f64 = 64.0;
     const BADGE_HEIGHT: f64 = 32.0;
-    const BADGE_GAP: f64 = 10.0;
-    const PROGRESS_H: f64 = 3.0;
-    const FULL_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_RIGHT;
-    const COUNTDOWN_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_RIGHT - BADGE_GAP - BADGE_WIDTH;
+    const BADGE_GAP: f64 = 12.0;
+    const PROGRESS_H: f64 = 4.0;
+    const PROGRESS_GAP: f64 = 12.0;
+    const PROGRESS_TRACK_WIDTH: f64 = BANNER_WIDTH - PAD_X * 2.0;
+    const FULL_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_X;
+    const COUNTDOWN_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_X - BADGE_GAP - BADGE_WIDTH;
     const MAX_FIT_HEIGHT: f64 = 10_000.0;
 
     static USER_DISMISSED: AtomicBool = AtomicBool::new(false);
@@ -482,6 +678,10 @@ mod macos_impl {
             .is_some_and(|val| val.isEqualToString(ns_string!("Dark")))
     }
 
+    fn system_reduce_motion() -> bool {
+        NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion()
+    }
+
     fn srgb_color(hex: u32) -> Retained<NSColor> {
         let r = f64::from((hex >> 16) & 0xFF) / 255.0;
         let g = f64::from((hex >> 8) & 0xFF) / 255.0;
@@ -489,21 +689,37 @@ mod macos_impl {
         NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
     }
 
-    fn set_layer_colors(view: &NSView, bg: &NSColor, border: Option<&NSColor>) {
-        if let Some(layer) = view.layer() {
-            // SAFETY: `NSColor.CGColor` returns a valid `CGColorRef` for the color's lifetime,
-            // and `CALayer` retains assigned color properties.
-            unsafe {
-                let bg_cg: *const AnyObject = msg_send![bg, CGColor];
-                let (): () = msg_send![&*layer, setBackgroundColor: bg_cg];
-                if let Some(border_color) = border {
-                    let border_cg: *const AnyObject = msg_send![border_color, CGColor];
-                    let (): () = msg_send![&*layer, setBorderColor: border_cg];
-                    layer.setBorderWidth(1.0);
-                } else {
-                    layer.setBorderWidth(0.0);
-                }
+    fn cozy_ease_out() -> Retained<CAMediaTimingFunction> {
+        let (x1, y1, x2, y2) = COZY_EASE_OUT;
+        CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
+    }
+
+    fn quiet_ca(f: impl FnOnce()) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        f();
+        CATransaction::commit();
+    }
+
+    fn set_ca_layer_colors(layer: &CALayer, bg: &NSColor, border: Option<&NSColor>) {
+        // SAFETY: `NSColor.CGColor` returns a valid `CGColorRef` for the color's lifetime,
+        // and `CALayer` retains assigned color properties.
+        unsafe {
+            let bg_cg: *const AnyObject = msg_send![bg, CGColor];
+            let (): () = msg_send![layer, setBackgroundColor: bg_cg];
+            if let Some(border_color) = border {
+                let border_cg: *const AnyObject = msg_send![border_color, CGColor];
+                let (): () = msg_send![layer, setBorderColor: border_cg];
+                layer.setBorderWidth(1.0);
+            } else {
+                layer.setBorderWidth(0.0);
             }
+        }
+    }
+
+    fn set_view_colors(view: &NSView, bg: &NSColor, border: Option<&NSColor>) {
+        if let Some(layer) = view.layer() {
+            set_ca_layer_colors(&layer, bg, border);
         }
     }
 
@@ -531,25 +747,29 @@ mod macos_impl {
 
     struct PreBreakBanner {
         panel: Retained<NSPanel>,
-        effect_view: Retained<NSVisualEffectView>,
+        card_view: Retained<NSView>,
         icon_view: Option<Retained<NSImageView>>,
         title_label: Retained<NSTextField>,
         body_label: Retained<NSTextField>,
         badge_view: Retained<NSView>,
         badge_label: Retained<NSTextField>,
         progress_track: Retained<NSView>,
-        progress_fill: Retained<NSView>,
+        progress_fill_layer: Retained<CALayer>,
         click_shield: Retained<BannerClickView>,
         last_summary: String,
         last_body: String,
         last_has_countdown: bool,
+        last_dark: Option<bool>,
+        last_urgent: Option<bool>,
+        last_reduce_motion: bool,
+        timeline: Option<ProgressTimeline>,
     }
 
     impl PreBreakBanner {
         fn new(mtm: MainThreadMarker) -> Self {
             let initial_rect = NSRect::new(
                 NSPoint::new(0.0, 0.0),
-                NSSize::new(BANNER_WIDTH, MIN_HEIGHT),
+                NSSize::new(BANNER_WIDTH, MIN_NOTICE_HEIGHT),
             );
             let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
                 NSPanel::alloc(mtm),
@@ -578,14 +798,12 @@ mod macos_impl {
                     | NSWindowCollectionBehavior::FullScreenAuxiliary,
             );
 
-            let effect_view =
-                NSVisualEffectView::initWithFrame(NSVisualEffectView::alloc(mtm), initial_rect);
-            effect_view.setMaterial(NSVisualEffectMaterial::Popover);
-            effect_view.setBlendingMode(NSVisualEffectBlendingMode::BehindWindow);
-            effect_view.setState(NSVisualEffectState::Active);
-            effect_view.setWantsLayer(true);
-            if let Some(layer) = effect_view.layer() {
+            let card_view = NSView::initWithFrame(NSView::alloc(mtm), initial_rect);
+            card_view.setWantsLayer(true);
+            if let Some(layer) = card_view.layer() {
                 layer.setCornerRadius(CORNER_RADIUS);
+                // SAFETY: `kCACornerCurveContinuous` is an immutable QuartzCore constant.
+                layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
                 layer.setMasksToBounds(true);
             }
 
@@ -593,36 +811,34 @@ mod macos_impl {
             let icon_view = NSImage::initWithData(NSImage::alloc(), &icon_data).map(|image| {
                 image.setSize(NSSize::new(ICON_SIZE, ICON_SIZE));
                 let view = NSImageView::imageViewWithImage(&image, mtm);
-                effect_view.addSubview(&view);
+                card_view.addSubview(&view);
                 view
             });
 
             // SAFETY: AppKit font weight constants are immutable static values.
             let (title_font, body_font, badge_font) = unsafe {
                 (
-                    NSFont::monospacedDigitSystemFontOfSize_weight(13.0, NSFontWeightSemibold),
-                    NSFont::systemFontOfSize_weight(13.0, NSFontWeightRegular),
-                    NSFont::monospacedDigitSystemFontOfSize_weight(15.0, NSFontWeightBold),
+                    NSFont::monospacedDigitSystemFontOfSize_weight(14.0, NSFontWeightSemibold),
+                    NSFont::systemFontOfSize_weight(12.0, NSFontWeightRegular),
+                    NSFont::monospacedDigitSystemFontOfSize_weight(14.0, NSFontWeightBold),
                 )
             };
 
             let title_label = NSTextField::labelWithString(&NSString::new(), mtm);
             title_label.setFont(Some(&title_font));
-            title_label.setTextColor(Some(&NSColor::labelColor()));
             title_label.setMaximumNumberOfLines(1);
             title_label.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            effect_view.addSubview(&title_label);
+            card_view.addSubview(&title_label);
 
             let body_label = NSTextField::wrappingLabelWithString(&NSString::new(), mtm);
             body_label.setSelectable(false);
             body_label.setFont(Some(&body_font));
-            body_label.setTextColor(Some(&NSColor::secondaryLabelColor()));
             body_label.setMaximumNumberOfLines(2);
             body_label.setPreferredMaxLayoutWidth(COUNTDOWN_TEXT_WIDTH);
             if let Some(cell) = body_label.cell() {
                 cell.setTruncatesLastVisibleLine(true);
             }
-            effect_view.addSubview(&body_label);
+            card_view.addSubview(&body_label);
 
             let badge_rect = NSRect::new(
                 NSPoint::new(0.0, 0.0),
@@ -638,61 +854,214 @@ mod macos_impl {
             badge_label.setFont(Some(&badge_font));
             badge_label.setMaximumNumberOfLines(1);
             badge_view.addSubview(&badge_label);
-            effect_view.addSubview(&badge_view);
+            card_view.addSubview(&badge_view);
 
             let progress_rect = NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(BANNER_WIDTH, PROGRESS_H),
+                NSPoint::new(PAD_X, PAD_Y),
+                NSSize::new(PROGRESS_TRACK_WIDTH, PROGRESS_H),
             );
             let progress_track = NSView::initWithFrame(NSView::alloc(mtm), progress_rect);
             progress_track.setWantsLayer(true);
-            effect_view.addSubview(&progress_track);
-
-            let progress_fill = NSView::initWithFrame(NSView::alloc(mtm), progress_rect);
-            progress_fill.setWantsLayer(true);
-            effect_view.addSubview(&progress_fill);
+            let progress_fill_layer = CALayer::new();
+            quiet_ca(|| {
+                progress_fill_layer.setAnchorPoint(CGPoint::new(0.0, 0.5));
+                progress_fill_layer.setPosition(CGPoint::new(0.0, PROGRESS_H * 0.5));
+                progress_fill_layer.setBounds(CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(0.0, PROGRESS_H),
+                ));
+                progress_fill_layer.setCornerRadius(PROGRESS_H * 0.5);
+                if let Some(track_layer) = progress_track.layer() {
+                    track_layer.setCornerRadius(PROGRESS_H * 0.5);
+                    track_layer.setMasksToBounds(true);
+                    track_layer.addSublayer(&progress_fill_layer);
+                }
+            });
+            card_view.addSubview(&progress_track);
 
             // SAFETY: `BannerClickView` inherits `-[NSView initWithFrame:]` with no custom ivars.
             let click_shield: Retained<BannerClickView> =
                 unsafe { msg_send![BannerClickView::alloc(mtm), initWithFrame: initial_rect] };
-            effect_view.addSubview(&click_shield);
-            panel.setContentView(Some(&effect_view));
+            card_view.addSubview(&click_shield);
+            panel.setContentView(Some(&card_view));
 
             Self {
                 panel,
-                effect_view,
+                card_view,
                 icon_view,
                 title_label,
                 body_label,
                 badge_view,
                 badge_label,
                 progress_track,
-                progress_fill,
+                progress_fill_layer,
                 click_shield,
                 last_summary: String::new(),
                 last_body: String::new(),
                 last_has_countdown: false,
+                last_dark: None,
+                last_urgent: None,
+                last_reduce_motion: false,
+                timeline: None,
             }
         }
 
-        fn apply_countdown_style(&self, countdown: PreBreakCountdown) {
-            let dark = system_prefers_dark();
-            let (bg_hex, border_hex, text_hex) = match (countdown.is_urgent(), dark) {
-                (false, false) => (0xFAE1B5, 0xE5C27D, 0x5E3904),
-                (false, true) => (0x443A26, 0xC99A44, 0xFCE09B),
-                (true, false) => (0xEF8F63, 0xA84A24, 0x261101),
-                (true, true) => (0xEE8F64, 0xF2A57E, 0x18140E),
+        fn apply_card_theme(&self, dark: bool, palette: BannerPalette) {
+            // SAFETY: `NSAppearanceNameDarkAqua` and `NSAppearanceNameAqua` are immutable AppKit constants.
+            let appearance_name = unsafe {
+                if dark {
+                    NSAppearanceNameDarkAqua
+                } else {
+                    NSAppearanceNameAqua
+                }
             };
-            let (track_hex, fill_hex) = if dark {
-                (0x30271E, 0xEE8F64)
-            } else {
-                (0xE6D2BC, 0xEF8F63)
-            };
+            let appearance = NSAppearance::appearanceNamed(appearance_name);
+            self.panel.setAppearance(appearance.as_deref());
 
+            let surface = srgb_color(palette.surface);
+            let border = srgb_color(palette.border);
+            let title = srgb_color(palette.title);
+            let body = srgb_color(palette.body);
+            let track = srgb_color(palette.track);
+            let fill = srgb_color(palette.fill);
+
+            self.title_label.setTextColor(Some(&title));
+            self.body_label.setTextColor(Some(&body));
+            quiet_ca(|| {
+                set_view_colors(&self.card_view, &surface, Some(&border));
+                set_view_colors(&self.progress_track, &track, None);
+                set_ca_layer_colors(&self.progress_fill_layer, &fill, None);
+            });
+        }
+
+        fn start_progress_drain(&self, start_width: f64, duration_secs: f64) {
+            let key = ns_string!("cozyProgressDrain");
+            self.progress_fill_layer.removeAnimationForKey(key);
+
+            if start_width <= 0.0 || duration_secs <= 0.0 {
+                quiet_ca(|| {
+                    self.progress_fill_layer.setBounds(CGRect::new(
+                        CGPoint::new(0.0, 0.0),
+                        CGSize::new(0.0, PROGRESS_H),
+                    ));
+                });
+                return;
+            }
+
+            // Set the model layer to the final drained width before adding the explicit animation
+            // so the bar never snaps back when the animation completes.
+            quiet_ca(|| {
+                self.progress_fill_layer.setBounds(CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(0.0, PROGRESS_H),
+                ));
+            });
+
+            let animation =
+                CABasicAnimation::animationWithKeyPath(Some(ns_string!("bounds.size.width")));
+            animation.setDuration(duration_secs);
+            // SAFETY: `kCAMediaTimingFunctionLinear` is an immutable QuartzCore constant.
+            let linear =
+                CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionLinear });
+            animation.setTimingFunction(Some(&linear));
+            let from_num = NSNumber::numberWithDouble(start_width);
+            let to_num = NSNumber::numberWithDouble(0.0);
+            // SAFETY: `bounds.size.width` expects numeric `NSNumber` values.
+            unsafe {
+                animation.setFromValue(Some(from_num.as_ref()));
+                animation.setToValue(Some(to_num.as_ref()));
+            }
+            let ca_animation: &CAAnimation = &animation;
+            self.progress_fill_layer
+                .addAnimation_forKey(ca_animation, Some(key));
+        }
+
+        fn play_entrance_animation(&self) {
+            let Some(layer) = self.card_view.layer() else {
+                return;
+            };
+            quiet_ca(|| {
+                layer.setOpacity(1.0);
+            });
+            let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
+            fade.setDuration(COZY_ENTER_DURATION_SECS);
+            let timing = cozy_ease_out();
+            fade.setTimingFunction(Some(&timing));
+            let from_num = NSNumber::numberWithDouble(0.0);
+            let to_num = NSNumber::numberWithDouble(1.0);
+            // SAFETY: `opacity` expects numeric `NSNumber` values.
+            unsafe {
+                fade.setFromValue(Some(from_num.as_ref()));
+                fade.setToValue(Some(to_num.as_ref()));
+            }
+            let ca_animation: &CAAnimation = &fade;
+            layer.addAnimation_forKey(ca_animation, Some(ns_string!("cozyBannerEnter")));
+        }
+
+        fn animate_layer_color(
+            layer: &CALayer,
+            key_path: &NSString,
+            anim_key: &NSString,
+            from: &NSColor,
+            to: &NSColor,
+        ) {
+            let animation = CABasicAnimation::animationWithKeyPath(Some(key_path));
+            animation.setDuration(COZY_FAST_DURATION_SECS);
+            let timing = cozy_ease_out();
+            animation.setTimingFunction(Some(&timing));
+            // SAFETY: `NSColor.CGColor` returns a valid toll-free bridged `CGColorRef` kept alive
+            // by `from`/`to`; `CABasicAnimation` retains assigned `fromValue`/`toValue`.
+            unsafe {
+                let from_cg: *const AnyObject = msg_send![from, CGColor];
+                let to_cg: *const AnyObject = msg_send![to, CGColor];
+                animation.setFromValue(from_cg.as_ref());
+                animation.setToValue(to_cg.as_ref());
+            }
+            let ca_animation: &CAAnimation = &animation;
+            layer.addAnimation_forKey(ca_animation, Some(anim_key));
+        }
+
+        fn apply_countdown_style(
+            &mut self,
+            countdown: PreBreakCountdown,
+            palette: BannerPalette,
+            was_visible: bool,
+            mode_changed: bool,
+            reduce_motion: bool,
+        ) {
+            let urgent = countdown.is_urgent();
+            let (bg_hex, border_hex, text_hex) = palette.badge_colors(urgent);
             let badge_bg = srgb_color(bg_hex);
             let badge_border = srgb_color(border_hex);
             let badge_text = srgb_color(text_hex);
-            set_layer_colors(&self.badge_view, &badge_bg, Some(&badge_border));
+
+            let animate_badge = was_visible
+                && !mode_changed
+                && !reduce_motion
+                && self.last_urgent.is_some_and(|prev| prev != urgent);
+            quiet_ca(|| {
+                set_view_colors(&self.badge_view, &badge_bg, Some(&badge_border));
+            });
+            if animate_badge && let Some(layer) = self.badge_view.layer() {
+                let (prev_bg_hex, prev_border_hex, _) = palette.badge_colors(!urgent);
+                let prev_bg = srgb_color(prev_bg_hex);
+                let prev_border = srgb_color(prev_border_hex);
+                Self::animate_layer_color(
+                    &layer,
+                    ns_string!("backgroundColor"),
+                    ns_string!("cozyBadgeBg"),
+                    &prev_bg,
+                    &badge_bg,
+                );
+                Self::animate_layer_color(
+                    &layer,
+                    ns_string!("borderColor"),
+                    ns_string!("cozyBadgeBorder"),
+                    &prev_border,
+                    &badge_border,
+                );
+            }
+            self.last_urgent = Some(urgent);
             self.badge_label.setTextColor(Some(&badge_text));
 
             let badge_str = countdown.badge_text();
@@ -711,15 +1080,34 @@ mod macos_impl {
                 NSSize::new(lbl_w, lbl_h),
             ));
 
-            let track_color = srgb_color(track_hex);
-            let fill_color = srgb_color(fill_hex);
-            set_layer_colors(&self.progress_track, &track_color, None);
-            set_layer_colors(&self.progress_fill, &fill_color, None);
-            let fill_w = (BANNER_WIDTH * countdown.progress_ratio()).round();
-            self.progress_fill.setFrame(NSRect::new(
-                NSPoint::new(0.0, 0.0),
-                NSSize::new(fill_w, PROGRESS_H),
-            ));
+            if reduce_motion {
+                self.timeline = None;
+                self.progress_fill_layer
+                    .removeAnimationForKey(ns_string!("cozyProgressDrain"));
+                let fill_w = (PROGRESS_TRACK_WIDTH * countdown.progress_ratio()).round();
+                quiet_ca(|| {
+                    self.progress_fill_layer.setBounds(CGRect::new(
+                        CGPoint::new(0.0, 0.0),
+                        CGSize::new(fill_w, PROGRESS_H),
+                    ));
+                });
+                return;
+            }
+
+            let now = Instant::now();
+            let restart = if !was_visible || mode_changed || self.last_reduce_motion {
+                self.timeline = Some(ProgressTimeline::start(now, countdown));
+                true
+            } else if let Some(timeline) = self.timeline.as_mut() {
+                timeline.sync_or_restart(now, countdown)
+            } else {
+                self.timeline = Some(ProgressTimeline::start(now, countdown));
+                true
+            };
+            if restart && let Some(timeline) = self.timeline {
+                let start_w = PROGRESS_TRACK_WIDTH * timeline.start_ratio;
+                self.start_progress_drain(start_w, timeline.duration_secs);
+            }
         }
 
         fn show_or_update(
@@ -728,6 +1116,7 @@ mod macos_impl {
             body: &str,
             accessible_label: &str,
             countdown: Option<PreBreakCountdown>,
+            theme_mode: ThemeMode,
             mtm: MainThreadMarker,
         ) -> Result<(), PlatformError> {
             let summary_changed = self.last_summary != summary;
@@ -735,6 +1124,14 @@ mod macos_impl {
             let has_countdown = countdown.is_some();
             let mode_changed = self.last_has_countdown != has_countdown;
             let was_visible = self.panel.isVisible();
+            let dark = resolve_dark_mode(theme_mode, system_prefers_dark());
+            let reduce_motion = system_reduce_motion();
+            let palette = BannerPalette::for_dark(dark);
+
+            if self.last_dark != Some(dark) {
+                self.last_dark = Some(dark);
+                self.apply_card_theme(dark, palette);
+            }
 
             if summary_changed {
                 self.last_summary.clear();
@@ -746,7 +1143,7 @@ mod macos_impl {
                 let a11y = NSString::from_str(accessible_label);
                 // SAFETY: `NSView` implements `setAccessibilityLabel:` via `NSAccessibility`.
                 unsafe {
-                    let (): () = msg_send![&*self.effect_view, setAccessibilityLabel: &*a11y];
+                    let (): () = msg_send![&*self.card_view, setAccessibilityLabel: &*a11y];
                 }
             }
             let visible = active_screen_visible_frame(mtm).ok_or_else(|| {
@@ -773,26 +1170,32 @@ mod macos_impl {
                 let title_h = self.title_label.sizeThatFits(fit_bounds).height.ceil();
                 let body_h = self.body_label.sizeThatFits(fit_bounds).height.ceil();
                 let text_block_h = title_h + LINE_GAP + body_h;
-                let bottom_inset = if has_countdown { PROGRESS_H } else { 0.0 };
-                let banner_h = (text_block_h + PAD_Y * 2.0 + bottom_inset)
-                    .max(MIN_HEIGHT)
-                    .ceil();
-                let content_h = banner_h - bottom_inset;
+                let row_h =
+                    text_block_h
+                        .max(ICON_SIZE)
+                        .max(if has_countdown { BADGE_HEIGHT } else { 0.0 });
+                let (banner_h, row_bottom) = if has_countdown {
+                    let h = (PAD_Y + row_h + PROGRESS_GAP + PROGRESS_H + PAD_Y).ceil();
+                    (h, PAD_Y + PROGRESS_H + PROGRESS_GAP)
+                } else {
+                    let h = (PAD_Y + row_h + PAD_Y).max(MIN_NOTICE_HEIGHT).ceil();
+                    (h, (h - row_h) * 0.5)
+                };
                 banner_size = NSSize::new(BANNER_WIDTH, banner_h);
 
-                self.effect_view
+                self.card_view
                     .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
                 self.click_shield
                     .setFrame(NSRect::new(NSPoint::new(0.0, 0.0), banner_size));
                 if let Some(icon_view) = &self.icon_view {
-                    let icon_y = (bottom_inset + (content_h - ICON_SIZE) * 0.5).round();
+                    let icon_y = (row_bottom + (row_h - ICON_SIZE) * 0.5).round();
                     icon_view.setFrame(NSRect::new(
-                        NSPoint::new(ICON_X, icon_y),
+                        NSPoint::new(PAD_X, icon_y),
                         NSSize::new(ICON_SIZE, ICON_SIZE),
                     ));
                 }
 
-                let body_y = (bottom_inset + (content_h - text_block_h) * 0.5).round();
+                let body_y = (row_bottom + (row_h - text_block_h) * 0.5).round();
                 let title_y = body_y + body_h + LINE_GAP;
                 self.body_label.setFrame(NSRect::new(
                     NSPoint::new(TEXT_X, body_y),
@@ -805,24 +1208,33 @@ mod macos_impl {
 
                 self.badge_view.setHidden(!has_countdown);
                 self.progress_track.setHidden(!has_countdown);
-                self.progress_fill.setHidden(!has_countdown);
                 if has_countdown {
-                    let badge_x = BANNER_WIDTH - PAD_RIGHT - BADGE_WIDTH;
-                    let badge_y = (bottom_inset + (content_h - BADGE_HEIGHT) * 0.5).round();
+                    let badge_x = BANNER_WIDTH - PAD_X - BADGE_WIDTH;
+                    let badge_y = (row_bottom + (row_h - BADGE_HEIGHT) * 0.5).round();
                     self.badge_view.setFrame(NSRect::new(
                         NSPoint::new(badge_x, badge_y),
                         NSSize::new(BADGE_WIDTH, BADGE_HEIGHT),
                     ));
                     self.progress_track.setFrame(NSRect::new(
-                        NSPoint::new(0.0, 0.0),
-                        NSSize::new(BANNER_WIDTH, PROGRESS_H),
+                        NSPoint::new(PAD_X, PAD_Y),
+                        NSSize::new(PROGRESS_TRACK_WIDTH, PROGRESS_H),
                     ));
+                    quiet_ca(|| {
+                        self.progress_fill_layer
+                            .setPosition(CGPoint::new(0.0, PROGRESS_H * 0.5));
+                    });
                 }
             }
 
             if let Some(cd) = countdown {
-                self.apply_countdown_style(cd);
+                self.apply_countdown_style(cd, palette, was_visible, mode_changed, reduce_motion);
+            } else {
+                self.timeline = None;
+                self.last_urgent = None;
+                self.progress_fill_layer
+                    .removeAnimationForKey(ns_string!("cozyProgressDrain"));
             }
+            self.last_reduce_motion = reduce_motion;
 
             let (ox, oy) =
                 compute_macos_banner_origin(visible, (banner_size.width, banner_size.height));
@@ -834,6 +1246,9 @@ mod macos_impl {
             }
             if !was_visible {
                 self.panel.orderFrontRegardless();
+                if !reduce_motion {
+                    self.play_entrance_animation();
+                }
             }
             Ok(())
         }
@@ -883,6 +1298,7 @@ mod macos_impl {
         body: &str,
         accessible_label: &str,
         countdown: Option<PreBreakCountdown>,
+        theme_mode: ThemeMode,
     ) -> Result<(), PlatformError> {
         if USER_DISMISSED.load(Ordering::Acquire) {
             clear_banner();
@@ -899,7 +1315,7 @@ mod macos_impl {
                     PlatformError::Unavailable("macOS pre-break banner busy".to_owned())
                 })?;
                 let banner = guard.get_or_insert_with(|| PreBreakBanner::new(mtm));
-                banner.show_or_update(summary, body, accessible_label, countdown, mtm)
+                banner.show_or_update(summary, body, accessible_label, countdown, theme_mode, mtm)
             })
         })
     }
@@ -921,24 +1337,25 @@ mod windows_impl {
     use std::mem::{size_of, zeroed};
     use std::ptr;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Instant;
 
-    use sye_core::PlatformError;
+    use sye_core::{PlatformError, ThemeMode};
     use windows_sys::Win32::Foundation::{
-        COLORREF, ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT,
+        COLORREF, ERROR_SUCCESS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, S_OK,
         WPARAM,
     };
     use windows_sys::Win32::Graphics::Dwm::{
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-        DwmSetWindowAttribute,
+        DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_ROUND, DwmSetWindowAttribute,
     };
     use windows_sys::Win32::Graphics::Gdi::{
-        BeginPaint, COLOR_GRAYTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT, CreateFontIndirectW, CreatePen,
-        CreateSolidBrush, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_EDITCONTROL,
-        DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteObject,
-        DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetSysColor, GetTextMetricsW, HDC,
-        HFONT, InvalidateRect, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
-        PAINTSTRUCT, PS_SOLID, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor,
-        TEXTMETRICW, TRANSPARENT,
+        BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontIndirectW,
+        CreatePen, CreateSolidBrush, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_EDITCONTROL,
+        DT_END_ELLIPSIS, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DT_WORDBREAK, DeleteDC,
+        DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetStockObject,
+        GetTextMetricsW, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+        MonitorFromPoint, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, RoundRect,
+        SRCCOPY, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -949,65 +1366,67 @@ mod windows_impl {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CS_DROPSHADOW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
         DrawIconEx, GetClientRect, GetCursorPos, HICON, HWND_TOPMOST, IDC_ARROW, IMAGE_ICON,
-        IsWindowVisible, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MA_NOACTIVATE,
-        NONCLIENTMETRICSW, RegisterClassExW, SPI_GETNONCLIENTMETRICS, SW_HIDE, SWP_NOACTIVATE,
-        SWP_SHOWWINDOW, SetWindowPos, SetWindowTextW, ShowWindow, WM_ERASEBKGND, WM_LBUTTONDOWN,
-        WM_MOUSEACTIVATE, WM_PAINT, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MA_NOACTIVATE,
+        NONCLIENTMETRICSW, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SPI_GETNONCLIENTMETRICS,
+        SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowTextW,
+        ShowWindow, SystemParametersInfoW, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+        WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
         WS_POPUP,
     };
 
-    use super::{PreBreakCountdown, compute_windows_banner_origin, rgb_to_bgr};
+    use super::{
+        BannerPalette, PreBreakCountdown, ProgressTimeline, compute_windows_banner_origin,
+        resolve_dark_mode, rgb_to_bgr,
+    };
 
     const CLASS_NAME: &str = "SyePreBreakBanner";
     const WINDOW_TITLE: &str = "Safe Your Eyes";
     const APP_ICON_RESOURCE_ID: usize = 1;
     const BASE_DPI: i32 = 96;
     const BANNER_WIDTH: i32 = 368;
-    const MIN_HEIGHT: i32 = 68;
-    const ICON_SIZE: i32 = 38;
-    const ICON_X: i32 = 13;
-    const TEXT_X: i32 = 62;
-    const PAD_RIGHT: i32 = 14;
+    const MIN_NOTICE_HEIGHT: i32 = 68;
+    const PAD_X: i32 = 16;
     const PAD_Y: i32 = 12;
-    const LINE_GAP: i32 = 2;
-    const BADGE_WIDTH: i32 = 60;
+    const ICON_SIZE: i32 = 36;
+    const ICON_GAP: i32 = 12;
+    const TEXT_X: i32 = PAD_X + ICON_SIZE + ICON_GAP;
+    const LINE_GAP: i32 = 4;
+    const BADGE_WIDTH: i32 = 64;
     const BADGE_HEIGHT: i32 = 32;
-    const BADGE_GAP: i32 = 10;
-    const PROGRESS_H: i32 = 3;
-    const MARGIN: i32 = 12;
+    const BADGE_GAP: i32 = 12;
+    const PROGRESS_H: i32 = 4;
+    const PROGRESS_GAP: i32 = 12;
+    const MARGIN: i32 = 16;
     const BODY_MAX_LINES: i32 = 2;
     const TITLE_FONT_WEIGHT: i32 = 600;
     const BADGE_FONT_WEIGHT: i32 = 700;
+    const PROGRESS_TIMER_ID: usize = 1;
+    const PROGRESS_FRAME_MS: u32 = 16;
     const PERSONALIZE_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
     const APPS_USE_LIGHT_THEME: &str = "AppsUseLightTheme";
 
-    struct Palette {
-        background: COLORREF,
+    #[derive(Clone, Copy)]
+    struct WinPalette {
+        surface: COLORREF,
+        border: COLORREF,
         title: COLORREF,
         body: COLORREF,
-        badge_bg: COLORREF,
-        badge_border: COLORREF,
-        badge_text: COLORREF,
-        urgent_bg: COLORREF,
-        urgent_border: COLORREF,
-        urgent_text: COLORREF,
         track: COLORREF,
         fill: COLORREF,
     }
 
-    const DARK_PALETTE: Palette = Palette {
-        background: 0x002C_2C2C,
-        title: 0x00FF_FFFF,
-        body: 0x00CF_CFCF,
-        badge_bg: rgb_to_bgr(0x443A26),
-        badge_border: rgb_to_bgr(0xC99A44),
-        badge_text: rgb_to_bgr(0xFCE09B),
-        urgent_bg: rgb_to_bgr(0xEE8F64),
-        urgent_border: rgb_to_bgr(0xF2A57E),
-        urgent_text: rgb_to_bgr(0x18140E),
-        track: rgb_to_bgr(0x30271E),
-        fill: rgb_to_bgr(0xEE8F64),
-    };
+    impl WinPalette {
+        const fn from_cozy(palette: BannerPalette) -> Self {
+            Self {
+                surface: rgb_to_bgr(palette.surface),
+                border: rgb_to_bgr(palette.border),
+                title: rgb_to_bgr(palette.title),
+                body: rgb_to_bgr(palette.body),
+                track: rgb_to_bgr(palette.track),
+                fill: rgb_to_bgr(palette.fill),
+            }
+        }
+    }
 
     static USER_DISMISSED: AtomicBool = AtomicBool::new(false);
 
@@ -1054,26 +1473,18 @@ mod windows_impl {
         status == ERROR_SUCCESS && data == 0
     }
 
-    fn palette(dark: bool) -> Palette {
-        if dark {
-            return DARK_PALETTE;
-        }
-        // SAFETY: `GetSysColor` only reads the current system color table.
-        unsafe {
-            Palette {
-                background: GetSysColor(COLOR_WINDOW),
-                title: GetSysColor(COLOR_WINDOWTEXT),
-                body: GetSysColor(COLOR_GRAYTEXT),
-                badge_bg: rgb_to_bgr(0xFAE1B5),
-                badge_border: rgb_to_bgr(0xE5C27D),
-                badge_text: rgb_to_bgr(0x5E3904),
-                urgent_bg: rgb_to_bgr(0xEF8F63),
-                urgent_border: rgb_to_bgr(0xA84A24),
-                urgent_text: rgb_to_bgr(0x261101),
-                track: rgb_to_bgr(0xE6D2BC),
-                fill: rgb_to_bgr(0xEF8F63),
-            }
-        }
+    fn windows_reduce_motion() -> bool {
+        let mut enabled: i32 = 1;
+        // SAFETY: `enabled` is writable `BOOL` storage for `SPI_GETCLIENTAREAANIMATION`.
+        let ok = unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                (&raw mut enabled).cast::<c_void>(),
+                0,
+            )
+        };
+        ok != 0 && enabled == 0
     }
 
     fn message_font(dpi: i32, weight: Option<i32>, height_pct: i32) -> HFONT {
@@ -1127,6 +1538,7 @@ mod windows_impl {
     struct Banner {
         hwnd: HWND,
         hinstance: HINSTANCE,
+        dwm_rounded: bool,
         dpi: i32,
         dark: Option<bool>,
         icon: HICON,
@@ -1137,6 +1549,9 @@ mod windows_impl {
         body: Vec<u16>,
         badge_text: Vec<u16>,
         countdown: Option<PreBreakCountdown>,
+        timeline: Option<ProgressTimeline>,
+        last_reduce_motion: bool,
+        timer_active: bool,
         size: (i32, i32),
         icon_rect: RECT,
         title_rect: RECT,
@@ -1193,19 +1608,20 @@ mod windows_impl {
 
             let corner = DWMWCP_ROUND;
             // SAFETY: `corner` outlives the call and the size matches its type. Windows 10 rejects
-            // the attribute and keeps square corners.
-            unsafe {
+            // the attribute and keeps square corners with a GDI Cozy border fallback.
+            let dwm_rounded = unsafe {
                 DwmSetWindowAttribute(
                     hwnd,
                     DWMWA_WINDOW_CORNER_PREFERENCE as u32,
                     (&raw const corner).cast::<c_void>(),
                     size_u32::<i32>(),
-                );
-            }
+                ) == S_OK
+            };
 
             Ok(Self {
                 hwnd,
                 hinstance,
+                dwm_rounded,
                 dpi: 0,
                 dark: None,
                 icon: ptr::null_mut(),
@@ -1216,6 +1632,9 @@ mod windows_impl {
                 body: Vec::new(),
                 badge_text: Vec::new(),
                 countdown: None,
+                timeline: None,
+                last_reduce_motion: false,
+                timer_active: false,
                 size: (0, 0),
                 icon_rect: RECT::default(),
                 title_rect: RECT::default(),
@@ -1223,6 +1642,24 @@ mod windows_impl {
                 badge_rect: RECT::default(),
                 progress_track_rect: RECT::default(),
             })
+        }
+
+        fn start_progress_timer(&mut self) {
+            if !self.timer_active {
+                // SAFETY: `self.hwnd` is the live banner window; timer delivers `WM_TIMER` to `wnd_proc`.
+                let id = unsafe { SetTimer(self.hwnd, PROGRESS_TIMER_ID, PROGRESS_FRAME_MS, None) };
+                self.timer_active = id != 0;
+            }
+        }
+
+        fn stop_progress_timer(&mut self) {
+            if self.timer_active {
+                // SAFETY: `self.hwnd` is the live banner window that owns `PROGRESS_TIMER_ID`.
+                unsafe {
+                    KillTimer(self.hwnd, PROGRESS_TIMER_ID);
+                }
+                self.timer_active = false;
+            }
         }
 
         fn release_resources(&mut self) {
@@ -1250,8 +1687,8 @@ mod windows_impl {
         fn apply_theme(&mut self, dark: bool) {
             self.dark = Some(dark);
             let enabled = i32::from(dark);
-            // SAFETY: `enabled` outlives the call and the size matches its `BOOL` type. The dark
-            // attribute only recolors the DWM border and shadow.
+            let border = WinPalette::from_cozy(BannerPalette::for_dark(dark)).border;
+            // SAFETY: both values outlive the calls and match their DWM attribute types.
             unsafe {
                 DwmSetWindowAttribute(
                     self.hwnd,
@@ -1259,15 +1696,21 @@ mod windows_impl {
                     (&raw const enabled).cast::<c_void>(),
                     size_u32::<i32>(),
                 );
+                DwmSetWindowAttribute(
+                    self.hwnd,
+                    DWMWA_BORDER_COLOR as u32,
+                    (&raw const border).cast::<c_void>(),
+                    size_u32::<COLORREF>(),
+                );
             }
         }
 
         fn apply_dpi(&mut self, dpi: i32) {
             self.release_resources();
             self.dpi = dpi;
-            self.title_font = message_font(dpi, Some(TITLE_FONT_WEIGHT), 100);
-            self.body_font = message_font(dpi, None, 100);
-            self.badge_font = message_font(dpi, Some(BADGE_FONT_WEIGHT), 115);
+            self.title_font = message_font(dpi, Some(TITLE_FONT_WEIGHT), 108);
+            self.body_font = message_font(dpi, None, 96);
+            self.badge_font = message_font(dpi, Some(BADGE_FONT_WEIGHT), 112);
             let icon_px = scale(ICON_SIZE, dpi);
             // SAFETY: the resource ID is a valid `MAKEINTRESOURCEW` value. Test executables have
             // no icon resource and get null, so the banner draws text only.
@@ -1312,9 +1755,9 @@ mod windows_impl {
 
         const fn text_width(&self) -> i32 {
             let logical = if self.countdown.is_some() {
-                BANNER_WIDTH - TEXT_X - PAD_RIGHT - BADGE_GAP - BADGE_WIDTH
+                BANNER_WIDTH - TEXT_X - PAD_X - BADGE_GAP - BADGE_WIDTH
             } else {
-                BANNER_WIDTH - TEXT_X - PAD_RIGHT
+                BANNER_WIDTH - TEXT_X - PAD_X
             };
             scale(logical, self.dpi)
         }
@@ -1331,32 +1774,39 @@ mod windows_impl {
             unsafe { ReleaseDC(self.hwnd, hdc) };
 
             let body_h = body_full_h.min(body_line_h * BODY_MAX_LINES);
+            let pad_x = scale(PAD_X, dpi);
+            let pad_y = scale(PAD_Y, dpi);
             let gap = scale(LINE_GAP, dpi);
-            let progress_h = if has_countdown {
-                scale(PROGRESS_H, dpi).max(1)
-            } else {
-                0
-            };
+            let icon = scale(ICON_SIZE, dpi);
+            let badge_w = scale(BADGE_WIDTH, dpi);
+            let badge_h = scale(BADGE_HEIGHT, dpi);
+            let progress_h = scale(PROGRESS_H, dpi).max(2);
+            let progress_gap = scale(PROGRESS_GAP, dpi);
             let text_block_h = title_h + gap + body_h;
+            let row_h = text_block_h
+                .max(icon)
+                .max(if has_countdown { badge_h } else { 0 });
+
             let width = scale(BANNER_WIDTH, dpi);
-            let height =
-                (text_block_h + scale(PAD_Y, dpi) * 2 + progress_h).max(scale(MIN_HEIGHT, dpi));
-            let content_h = height - progress_h;
+            let (height, row_top) = if has_countdown {
+                (pad_y + row_h + progress_gap + progress_h + pad_y, pad_y)
+            } else {
+                let h = (pad_y * 2 + row_h).max(scale(MIN_NOTICE_HEIGHT, dpi));
+                (h, (h - row_h) / 2)
+            };
             self.size = (width, height);
 
-            let icon = scale(ICON_SIZE, dpi);
-            let icon_x = scale(ICON_X, dpi);
-            let icon_y = (content_h - icon) / 2;
+            let icon_y = row_top + (row_h - icon) / 2;
             self.icon_rect = RECT {
-                left: icon_x,
+                left: pad_x,
                 top: icon_y,
-                right: icon_x + icon,
+                right: pad_x + icon,
                 bottom: icon_y + icon,
             };
 
             let text_x = scale(TEXT_X, dpi);
             let text_right = text_x + self.text_width();
-            let title_top = (content_h - text_block_h) / 2;
+            let title_top = row_top + (row_h - text_block_h) / 2;
             self.title_rect = RECT {
                 left: text_x,
                 top: title_top,
@@ -1372,21 +1822,20 @@ mod windows_impl {
             };
 
             if has_countdown {
-                let badge_w = scale(BADGE_WIDTH, dpi);
-                let badge_h = scale(BADGE_HEIGHT, dpi);
-                let badge_left = width - scale(PAD_RIGHT, dpi) - badge_w;
-                let badge_top = (content_h - badge_h) / 2;
+                let badge_left = width - pad_x - badge_w;
+                let badge_top = row_top + (row_h - badge_h) / 2;
                 self.badge_rect = RECT {
                     left: badge_left,
                     top: badge_top,
                     right: badge_left + badge_w,
                     bottom: badge_top + badge_h,
                 };
+                let track_top = height - pad_y - progress_h;
                 self.progress_track_rect = RECT {
-                    left: 0,
-                    top: height - progress_h,
-                    right: width,
-                    bottom: height,
+                    left: pad_x,
+                    top: track_top,
+                    right: width - pad_x,
+                    bottom: track_top + progress_h,
                 };
             } else {
                 self.badge_rect = RECT::default();
@@ -1400,6 +1849,7 @@ mod windows_impl {
             body: &str,
             accessible_label: &str,
             countdown: Option<PreBreakCountdown>,
+            theme_mode: ThemeMode,
         ) -> Result<(), PlatformError> {
             let mut cursor = POINT { x: 0, y: 0 };
             // SAFETY: `cursor` is writable storage for a `POINT`.
@@ -1429,6 +1879,7 @@ mod windows_impl {
             let dpi_changed = self.dpi != dpi;
             // SAFETY: `self.hwnd` is the live banner window.
             let was_visible = unsafe { IsWindowVisible(self.hwnd) } != 0;
+            let reduce_motion = windows_reduce_motion();
             self.summary = summary;
             self.body = body;
             self.countdown = countdown;
@@ -1442,13 +1893,34 @@ mod windows_impl {
             if dpi_changed {
                 self.apply_dpi(dpi);
             }
-            let dark = apps_use_dark_theme();
+            let dark = resolve_dark_mode(theme_mode, apps_use_dark_theme());
             if self.dark != Some(dark) {
                 self.apply_theme(dark);
             }
             if !was_visible || body_changed || mode_changed || dpi_changed {
                 self.layout();
             }
+
+            if let Some(cd) = countdown {
+                if reduce_motion {
+                    self.timeline = None;
+                    self.stop_progress_timer();
+                } else {
+                    let now = Instant::now();
+                    if !was_visible || mode_changed || self.last_reduce_motion {
+                        self.timeline = Some(ProgressTimeline::start(now, cd));
+                    } else if let Some(timeline) = self.timeline.as_mut() {
+                        let _ = timeline.sync_or_restart(now, cd);
+                    } else {
+                        self.timeline = Some(ProgressTimeline::start(now, cd));
+                    }
+                    self.start_progress_timer();
+                }
+            } else {
+                self.timeline = None;
+                self.stop_progress_timer();
+            }
+            self.last_reduce_motion = reduce_motion;
 
             let work = info.rcWork;
             let (x, y) = compute_windows_banner_origin(
@@ -1479,15 +1951,63 @@ mod windows_impl {
 
         fn paint(&self, hdc: HDC) {
             let mut client = RECT::default();
+            // SAFETY: `self.hwnd` is the live banner window and `client` is writable storage.
+            unsafe { GetClientRect(self.hwnd, &mut client) };
+            let width = client.right - client.left;
+            let height = client.bottom - client.top;
+            if width <= 0 || height <= 0 {
+                return;
+            }
+            // Double-buffer GDI draws so 60fps progress bar updates never flicker.
+            // SAFETY: `hdc` comes from `BeginPaint` for `self.hwnd`, and every handle is released.
+            unsafe {
+                let mem_dc = CreateCompatibleDC(hdc);
+                let mem_bmp = if mem_dc.is_null() {
+                    ptr::null_mut()
+                } else {
+                    CreateCompatibleBitmap(hdc, width, height)
+                };
+                if !mem_dc.is_null() && !mem_bmp.is_null() {
+                    let prev_bmp = SelectObject(mem_dc, mem_bmp);
+                    self.paint_surface(mem_dc, client);
+                    BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+                    SelectObject(mem_dc, prev_bmp);
+                    DeleteObject(mem_bmp);
+                    DeleteDC(mem_dc);
+                } else {
+                    if !mem_bmp.is_null() {
+                        DeleteObject(mem_bmp);
+                    }
+                    if !mem_dc.is_null() {
+                        DeleteDC(mem_dc);
+                    }
+                    self.paint_surface(hdc, client);
+                }
+            }
+        }
+
+        fn paint_surface(&self, hdc: HDC, client: RECT) {
             let mut title_rect = self.title_rect;
             let mut body_rect = self.body_rect;
-            let colors = palette(self.dark.unwrap_or(false));
-            // SAFETY: `hdc` comes from `BeginPaint` for `self.hwnd`, and every handle is live.
+            let cozy = BannerPalette::for_dark(self.dark.unwrap_or(false));
+            let colors = WinPalette::from_cozy(cozy);
+            // SAFETY: `hdc` is a live GDI device context and every handle is owned or restored.
             unsafe {
-                GetClientRect(self.hwnd, &mut client);
-                let background = CreateSolidBrush(colors.background);
+                let background = CreateSolidBrush(colors.surface);
                 FillRect(hdc, &client, background);
                 DeleteObject(background);
+
+                if !self.dwm_rounded {
+                    let border_w = scale(1, self.dpi).max(1);
+                    let border_pen = CreatePen(PS_SOLID, border_w, colors.border);
+                    let prev_pen = SelectObject(hdc, border_pen);
+                    let prev_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    Rectangle(hdc, client.left, client.top, client.right, client.bottom);
+                    SelectObject(hdc, prev_brush);
+                    SelectObject(hdc, prev_pen);
+                    DeleteObject(border_pen);
+                }
+
                 if !self.icon.is_null() {
                     DrawIconEx(
                         hdc,
@@ -1520,11 +2040,12 @@ mod windows_impl {
                 );
 
                 if let Some(cd) = self.countdown {
-                    let (badge_bg, badge_border, badge_fg) = if cd.is_urgent() {
-                        (colors.urgent_bg, colors.urgent_border, colors.urgent_text)
-                    } else {
-                        (colors.badge_bg, colors.badge_border, colors.badge_text)
-                    };
+                    let (bg_hex, border_hex, text_hex) = cozy.badge_colors(cd.is_urgent());
+                    let (badge_bg, badge_border, badge_fg) = (
+                        rgb_to_bgr(bg_hex),
+                        rgb_to_bgr(border_hex),
+                        rgb_to_bgr(text_hex),
+                    );
                     let mut badge_rect = self.badge_rect;
                     let pill_h = badge_rect.bottom - badge_rect.top;
                     let badge_brush = CreateSolidBrush(badge_bg);
@@ -1555,23 +2076,53 @@ mod windows_impl {
                         DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
                     );
 
-                    let track_brush = CreateSolidBrush(colors.track);
-                    FillRect(hdc, &self.progress_track_rect, track_brush);
-                    DeleteObject(track_brush);
+                    let track = self.progress_track_rect;
+                    let track_w = track.right - track.left;
+                    let track_h = track.bottom - track.top;
+                    if track_w > 0 && track_h > 0 {
+                        let track_brush = CreateSolidBrush(colors.track);
+                        let track_pen = CreatePen(PS_SOLID, 1, colors.track);
+                        let prev_brush = SelectObject(hdc, track_brush);
+                        let prev_pen = SelectObject(hdc, track_pen);
+                        RoundRect(
+                            hdc,
+                            track.left,
+                            track.top,
+                            track.right,
+                            track.bottom,
+                            track_h,
+                            track_h,
+                        );
+                        SelectObject(hdc, prev_pen);
+                        SelectObject(hdc, prev_brush);
+                        DeleteObject(track_pen);
+                        DeleteObject(track_brush);
 
-                    let track_w = self.progress_track_rect.right - self.progress_track_rect.left;
-                    let fill_w = (f64::from(track_w) * cd.progress_ratio()).round() as i32;
-                    if fill_w > 0 {
-                        let fill_rect = RECT {
-                            left: self.progress_track_rect.left,
-                            top: self.progress_track_rect.top,
-                            right: (self.progress_track_rect.left + fill_w)
-                                .min(self.progress_track_rect.right),
-                            bottom: self.progress_track_rect.bottom,
-                        };
-                        let fill_brush = CreateSolidBrush(colors.fill);
-                        FillRect(hdc, &fill_rect, fill_brush);
-                        DeleteObject(fill_brush);
+                        let ratio = self
+                            .timeline
+                            .map_or_else(|| cd.progress_ratio(), |tl| tl.ratio_at(Instant::now()));
+                        let fill_w = (f64::from(track_w) * ratio).round() as i32;
+                        if fill_w > 0 {
+                            let fill_right = (track.left + fill_w).min(track.right);
+                            let radius = track_h.min(fill_w);
+                            let fill_brush = CreateSolidBrush(colors.fill);
+                            let fill_pen = CreatePen(PS_SOLID, 1, colors.fill);
+                            let prev_brush = SelectObject(hdc, fill_brush);
+                            let prev_pen = SelectObject(hdc, fill_pen);
+                            RoundRect(
+                                hdc,
+                                track.left,
+                                track.top,
+                                fill_right,
+                                track.bottom,
+                                radius,
+                                radius,
+                            );
+                            SelectObject(hdc, prev_pen);
+                            SelectObject(hdc, prev_brush);
+                            DeleteObject(fill_pen);
+                            DeleteObject(fill_brush);
+                        }
                     }
                 }
                 SelectObject(hdc, previous);
@@ -1581,6 +2132,7 @@ mod windows_impl {
 
     impl Drop for Banner {
         fn drop(&mut self) {
+            self.stop_progress_timer();
             // SAFETY: `self.hwnd` is the live banner window owned by this value.
             unsafe {
                 DestroyWindow(self.hwnd);
@@ -1599,9 +2151,37 @@ mod windows_impl {
             WM_MOUSEACTIVATE => MA_NOACTIVATE as LRESULT,
             WM_LBUTTONDOWN => {
                 USER_DISMISSED.store(true, Ordering::Release);
+                BANNER.with(|slot| {
+                    if let Ok(mut guard) = slot.try_borrow_mut()
+                        && let Some(banner) = guard.as_mut().filter(|b| b.hwnd == hwnd)
+                    {
+                        banner.stop_progress_timer();
+                    }
+                });
                 // Hide only: `DestroyWindow` here would free the window while it dispatches.
                 // SAFETY: `hwnd` is the live banner window that received this message.
-                unsafe { ShowWindow(hwnd, SW_HIDE) };
+                unsafe {
+                    KillTimer(hwnd, PROGRESS_TIMER_ID);
+                    ShowWindow(hwnd, SW_HIDE);
+                }
+                0
+            }
+            WM_TIMER if wparam == PROGRESS_TIMER_ID => {
+                BANNER.with(|slot| {
+                    if let Ok(mut guard) = slot.try_borrow_mut()
+                        && let Some(banner) = guard.as_mut().filter(|b| b.hwnd == hwnd)
+                    {
+                        let track = banner.progress_track_rect;
+                        // SAFETY: `hwnd` is the live banner window and `track` is a client rect.
+                        unsafe { InvalidateRect(hwnd, &track, 0) };
+                        let still_running = banner
+                            .timeline
+                            .is_some_and(|tl| tl.ratio_at(Instant::now()) > 0.0);
+                        if !still_running {
+                            banner.stop_progress_timer();
+                        }
+                    }
+                });
                 0
             }
             WM_ERASEBKGND => 1,
@@ -1644,6 +2224,7 @@ mod windows_impl {
         body: &str,
         accessible_label: &str,
         countdown: Option<PreBreakCountdown>,
+        theme_mode: ThemeMode,
     ) -> Result<(), PlatformError> {
         if USER_DISMISSED.load(Ordering::Acquire) {
             clear_banner();
@@ -1658,7 +2239,7 @@ mod windows_impl {
                 *guard = Some(Banner::new()?);
             }
             guard.as_mut().map_or(Ok(()), |banner| {
-                banner.show_or_update(summary, body, accessible_label, countdown)
+                banner.show_or_update(summary, body, accessible_label, countdown, theme_mode)
             })
         })
     }
@@ -1842,7 +2423,7 @@ mod tests {
         };
         assert_eq!(
             compute_macos_banner_origin(visible, (368.0, 68.0)),
-            (1132.0, 878.0)
+            (1128.0, 874.0)
         );
 
         let tiny = ScreenRect {
@@ -1853,24 +2434,157 @@ mod tests {
         };
         assert_eq!(
             compute_macos_banner_origin(tiny, (368.0, 68.0)),
-            (112.0, 52.0)
+            (116.0, 56.0)
         );
     }
 
     #[test]
     fn windows_banner_anchors_bottom_right_inside_work_area() {
         assert_eq!(
-            compute_windows_banner_origin((0, 0, 1920, 1032), (368, 68), 12),
-            (1540, 952)
+            compute_windows_banner_origin((0, 0, 1920, 1032), (368, 68), 16),
+            (1536, 948)
         );
         assert_eq!(
-            compute_windows_banner_origin((-1280, 0, 0, 984), (460, 85), 15),
-            (-475, 884)
+            compute_windows_banner_origin((-1280, 0, 0, 984), (460, 85), 20),
+            (-480, 879)
         );
         assert_eq!(
-            compute_windows_banner_origin((100, 40, 400, 100), (368, 68), 12),
-            (112, 52)
+            compute_windows_banner_origin((100, 40, 400, 100), (368, 68), 16),
+            (116, 56)
         );
+    }
+
+    #[test]
+    fn cozy_banner_palette_matches_tokens_and_avoids_pure_white_or_black() {
+        let light = BannerPalette::for_dark(false);
+        assert_eq!(light, COZY_LIGHT_PALETTE);
+        assert_eq!(light.surface, 0xFBF1E1);
+        assert_eq!(light.border, 0xDFCBB5);
+        assert_eq!(light.title, 0x261101);
+        assert_eq!(light.body, 0x5B4C3B);
+        assert_eq!(light.badge_colors(false), (0xFAE1B5, 0xE5C27D, 0x5E3904));
+        assert_eq!(light.badge_colors(true), (0xEF8F63, 0xA84A24, 0x261101));
+        assert_eq!(light.track, 0xE6D2BC);
+        assert_eq!(light.fill, 0xEF8F63);
+
+        let dark = BannerPalette::for_dark(true);
+        assert_eq!(dark, COZY_DARK_PALETTE);
+        assert_eq!(dark.surface, 0x231D16);
+        assert_eq!(dark.border, 0x52493F);
+        assert_eq!(dark.title, 0xFFFEF7);
+        assert_eq!(dark.body, 0xC2B7B1);
+        assert_eq!(dark.badge_colors(false), (0x443A26, 0xC99A44, 0xFCE09B));
+        assert_eq!(dark.badge_colors(true), (0xEE8F64, 0xF2A57E, 0x18140E));
+        assert_eq!(dark.track, 0x30271E);
+        assert_eq!(dark.fill, 0xEE8F64);
+
+        for p in [light, dark] {
+            for color in [
+                p.surface,
+                p.border,
+                p.title,
+                p.body,
+                p.badge_bg,
+                p.badge_border,
+                p.badge_text,
+                p.urgent_bg,
+                p.urgent_border,
+                p.urgent_text,
+                p.track,
+                p.fill,
+            ] {
+                assert_ne!(color, 0x000000);
+                assert_ne!(color, 0xFFFFFF);
+            }
+        }
+
+        assert_eq!(COZY_EASE_OUT, (0.22, 1.0, 0.36, 1.0));
+        assert!((COZY_ENTER_DURATION_SECS - 0.26).abs() < 1e-9);
+        assert!((COZY_FAST_DURATION_SECS - 0.16).abs() < 1e-9);
+    }
+
+    #[test]
+    fn theme_mode_resolves_explicit_and_system_modes_and_round_trips_on_notifier() {
+        assert!(!resolve_dark_mode(ThemeMode::Light, true));
+        assert!(!resolve_dark_mode(ThemeMode::Light, false));
+        assert!(resolve_dark_mode(ThemeMode::Dark, false));
+        assert!(resolve_dark_mode(ThemeMode::Dark, true));
+        assert!(!resolve_dark_mode(ThemeMode::System, false));
+        assert!(resolve_dark_mode(ThemeMode::System, true));
+
+        let notifier = OsNotifier::new();
+        assert_eq!(notifier.theme_mode(), ThemeMode::System);
+        notifier.set_theme_mode(ThemeMode::Dark);
+        assert_eq!(notifier.theme_mode(), ThemeMode::Dark);
+        notifier.set_theme_mode(ThemeMode::Light);
+        assert_eq!(notifier.theme_mode(), ThemeMode::Light);
+        notifier.set_theme_mode(ThemeMode::System);
+        assert_eq!(notifier.theme_mode(), ThemeMode::System);
+    }
+
+    #[test]
+    fn progress_timeline_interpolates_continuously_without_stuttering_on_second_ticks() {
+        use std::time::Duration;
+
+        let t0 = Instant::now();
+        let mut tl = ProgressTimeline::start(
+            t0,
+            PreBreakCountdown {
+                remaining_secs: 10,
+                total_secs: 10,
+            },
+        );
+        assert!((tl.ratio_at(t0) - 1.0).abs() < 1e-9);
+        assert!((tl.ratio_at(t0 + Duration::from_millis(250)) - 0.975).abs() < 1e-6);
+        assert!((tl.ratio_at(t0 + Duration::from_millis(500)) - 0.95).abs() < 1e-6);
+        assert!((tl.ratio_at(t0 + Duration::from_secs(5)) - 0.5).abs() < 1e-6);
+        assert!((tl.ratio_at(t0 + Duration::from_secs(10)) - 0.0).abs() < 1e-9);
+        assert!((tl.ratio_at(t0 + Duration::from_secs(12)) - 0.0).abs() < 1e-9);
+
+        // Normal per-second ticks (including slight 30ms jitter) keep the continuous animation running.
+        assert!(!tl.sync_or_restart(
+            t0 + Duration::from_millis(1030),
+            PreBreakCountdown {
+                remaining_secs: 9,
+                total_secs: 10,
+            },
+        ));
+        assert!(!tl.sync_or_restart(
+            t0 + Duration::from_secs(9),
+            PreBreakCountdown {
+                remaining_secs: 1,
+                total_secs: 10,
+            },
+        ));
+
+        // Large drift (e.g., process pause) restarts cleanly from the new remaining ratio.
+        let t_drift = t0 + Duration::from_secs(3);
+        assert!(tl.sync_or_restart(
+            t_drift,
+            PreBreakCountdown {
+                remaining_secs: 4,
+                total_secs: 10,
+            },
+        ));
+        assert!((tl.ratio_at(t_drift) - 0.4).abs() < 1e-9);
+        assert!((tl.ratio_at(t_drift + Duration::from_secs(2)) - 0.2).abs() < 1e-6);
+        assert!((tl.ratio_at(t_drift + Duration::from_secs(4)) - 0.0).abs() < 1e-9);
+
+        // Remaining increase or total_secs change restarts the timeline.
+        assert!(tl.sync_or_restart(
+            t_drift + Duration::from_secs(1),
+            PreBreakCountdown {
+                remaining_secs: 8,
+                total_secs: 10,
+            },
+        ));
+        assert!(tl.sync_or_restart(
+            t_drift + Duration::from_secs(2),
+            PreBreakCountdown {
+                remaining_secs: 7,
+                total_secs: 15,
+            },
+        ));
     }
 
     #[test]

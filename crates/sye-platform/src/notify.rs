@@ -1504,14 +1504,14 @@ mod windows_impl {
         MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext, SystemParametersInfoForDpi,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CS_DROPSHADOW, CreateWindowExW, GCL_STYLE, SetClassLongPtrW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
-        DrawIconEx, GetClientRect, GetCursorPos, HICON, HWND_TOPMOST, IDC_ARROW, IMAGE_ICON,
-        IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW, MA_NOACTIVATE,
-        NONCLIENTMETRICSW, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SPI_GETNONCLIENTMETRICS,
-        SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetTimer, SetWindowPos, SetWindowTextW,
-        ShowWindow, SystemParametersInfoW, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-        WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_POPUP,
+        CS_DROPSHADOW, CreateWindowExW, DI_NORMAL, DefWindowProcW, DestroyIcon, DestroyWindow,
+        DrawIconEx, GCL_STYLE, GetClientRect, GetCursorPos, HICON, HWND_TOPMOST, IDC_ARROW,
+        IMAGE_ICON, IsWindowVisible, KillTimer, LR_DEFAULTCOLOR, LoadCursorW, LoadImageW,
+        MA_NOACTIVATE, NONCLIENTMETRICSW, RegisterClassExW, SPI_GETCLIENTAREAANIMATION,
+        SPI_GETNONCLIENTMETRICS, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetClassLongPtrW,
+        SetTimer, SetWindowPos, SetWindowTextW, ShowWindow, SystemParametersInfoW, WM_ERASEBKGND,
+        WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_PAINT, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     use super::{

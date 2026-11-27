@@ -343,7 +343,7 @@ mod windows_impl {
     use std::ptr;
     use std::time::{Duration, Instant};
 
-    use windows_sys::Win32::Foundation::{FALSE, HWND, LPARAM, TRUE, WAIT_OBJECT_0};
+    use windows_sys::Win32::Foundation::{FALSE, HWND, LPARAM, TRUE, WAIT_FAILED, WAIT_OBJECT_0};
     use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         ASFW_ANY, AllowSetForegroundWindow, BringWindowToTop, DispatchMessageW, EnumWindows,
@@ -454,6 +454,10 @@ mod windows_impl {
             let status =
                 unsafe { MsgWaitForMultipleObjects(0, ptr::null(), FALSE, wait_ms, QS_ALLINPUT) };
             if status != WAIT_OBJECT_0 {
+                // Keeps the daemon loop from spinning when the wait itself fails.
+                if status == WAIT_FAILED {
+                    std::thread::sleep(remaining);
+                }
                 break;
             }
         }

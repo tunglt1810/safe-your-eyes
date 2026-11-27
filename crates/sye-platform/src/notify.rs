@@ -472,8 +472,7 @@ pub(crate) fn compute_macos_banner_origin(
     visible_frame: crate::tray::ScreenRect,
     banner_size: (f64, f64),
 ) -> (f64, f64) {
-    // Matches Cozy toast `space-4` (16px) inset from screen edges.
-    const SCREEN_MARGIN: f64 = 16.0;
+        const SCREEN_MARGIN: f64 = 16.0;
 
     let min_x = visible_frame.x + SCREEN_MARGIN;
     let max_x = (visible_frame.x + visible_frame.width - banner_size.0 - SCREEN_MARGIN).max(min_x);
@@ -618,6 +617,7 @@ mod macos_impl {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Instant;
 
+    use block2::RcBlock;
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::AnyObject;
     use objc2::{AnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -995,7 +995,16 @@ mod macos_impl {
                 fade.setToValue(Some(to_num.as_ref()));
             }
             let ca_animation: &CAAnimation = &fade;
+            // AppKit computes the panel shadow from the transparent first frame of the fade.
+            let panel = self.panel.clone();
+            let completion = RcBlock::new(move || panel.invalidateShadow());
+            CATransaction::begin();
+            // SAFETY: `CATransaction` copies the block and runs it on the main thread.
+            unsafe {
+                CATransaction::setCompletionBlock(Some(&completion));
+            }
             layer.addAnimation_forKey(ca_animation, Some(ns_string!("cozyBannerEnter")));
+            CATransaction::commit();
         }
 
         fn animate_layer_color(
@@ -1027,6 +1036,7 @@ mod macos_impl {
             palette: BannerPalette,
             was_visible: bool,
             mode_changed: bool,
+            theme_changed: bool,
             reduce_motion: bool,
         ) {
             let urgent = countdown.is_urgent();
@@ -1037,6 +1047,7 @@ mod macos_impl {
 
             let animate_badge = was_visible
                 && !mode_changed
+                && !theme_changed
                 && !reduce_motion
                 && self.last_urgent.is_some_and(|prev| prev != urgent);
             quiet_ca(|| {
@@ -1128,7 +1139,8 @@ mod macos_impl {
             let reduce_motion = system_reduce_motion();
             let palette = BannerPalette::for_dark(dark);
 
-            if self.last_dark != Some(dark) {
+            let theme_changed = self.last_dark != Some(dark);
+            if theme_changed {
                 self.last_dark = Some(dark);
                 self.apply_card_theme(dark, palette);
             }
@@ -1227,7 +1239,14 @@ mod macos_impl {
             }
 
             if let Some(cd) = countdown {
-                self.apply_countdown_style(cd, palette, was_visible, mode_changed, reduce_motion);
+                self.apply_countdown_style(
+                    cd,
+                    palette,
+                    was_visible,
+                    mode_changed,
+                    theme_changed,
+                    reduce_motion,
+                );
             } else {
                 self.timeline = None;
                 self.last_urgent = None;
@@ -1355,7 +1374,7 @@ mod windows_impl {
         DeleteObject, DrawTextW, EndPaint, FillRect, GetDC, GetMonitorInfoW, GetStockObject,
         GetTextMetricsW, HDC, HFONT, InvalidateRect, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
         MonitorFromPoint, NULL_BRUSH, PAINTSTRUCT, PS_SOLID, Rectangle, ReleaseDC, RoundRect,
-        SRCCOPY, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT,
+        SRCCOPY, SelectObject, SetBkMode, SetTextColor, SetViewportOrgEx, TEXTMETRICW, TRANSPARENT,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -1552,6 +1571,7 @@ mod windows_impl {
         timeline: Option<ProgressTimeline>,
         last_reduce_motion: bool,
         timer_active: bool,
+        last_fill_w: i32,
         size: (i32, i32),
         icon_rect: RECT,
         title_rect: RECT,
@@ -1635,6 +1655,7 @@ mod windows_impl {
                 timeline: None,
                 last_reduce_motion: false,
                 timer_active: false,
+                last_fill_w: -1,
                 size: (0, 0),
                 icon_rect: RECT::default(),
                 title_rect: RECT::default(),
@@ -1914,7 +1935,11 @@ mod windows_impl {
                     } else {
                         self.timeline = Some(ProgressTimeline::start(now, cd));
                     }
-                    self.start_progress_timer();
+                    if self.timeline.is_some_and(|tl| tl.ratio_at(now) > 0.0) {
+                        self.start_progress_timer();
+                    } else {
+                        self.stop_progress_timer();
+                    }
                 }
             } else {
                 self.timeline = None;
@@ -1949,12 +1974,21 @@ mod windows_impl {
             Ok(())
         }
 
-        fn paint(&self, hdc: HDC) {
+        fn paint(&self, hdc: HDC, dirty: RECT) {
             let mut client = RECT::default();
             // SAFETY: `self.hwnd` is the live banner window and `client` is writable storage.
             unsafe { GetClientRect(self.hwnd, &mut client) };
-            let width = client.right - client.left;
-            let height = client.bottom - client.top;
+            let track = self.progress_track_rect;
+            let progress_only = self.countdown.is_some()
+                && track.right > track.left
+                && track.bottom > track.top
+                && dirty.left >= track.left
+                && dirty.top >= track.top
+                && dirty.right <= track.right
+                && dirty.bottom <= track.bottom;
+            let area = if progress_only { track } else { client };
+            let width = area.right - area.left;
+            let height = area.bottom - area.top;
             if width <= 0 || height <= 0 {
                 return;
             }
@@ -1969,8 +2003,12 @@ mod windows_impl {
                 };
                 if !mem_dc.is_null() && !mem_bmp.is_null() {
                     let prev_bmp = SelectObject(mem_dc, mem_bmp);
-                    self.paint_surface(mem_dc, client);
-                    BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
+                    SetViewportOrgEx(mem_dc, -area.left, -area.top, ptr::null_mut());
+                    self.paint_area(mem_dc, client, progress_only);
+                    BitBlt(
+                        hdc, area.left, area.top, width, height, mem_dc, area.left, area.top,
+                        SRCCOPY,
+                    );
                     SelectObject(mem_dc, prev_bmp);
                     DeleteObject(mem_bmp);
                     DeleteDC(mem_dc);
@@ -1981,7 +2019,83 @@ mod windows_impl {
                     if !mem_dc.is_null() {
                         DeleteDC(mem_dc);
                     }
-                    self.paint_surface(hdc, client);
+                    self.paint_area(hdc, client, progress_only);
+                }
+            }
+        }
+
+        fn paint_area(&self, hdc: HDC, client: RECT, progress_only: bool) {
+            if !progress_only {
+                self.paint_surface(hdc, client);
+                return;
+            }
+            let colors = WinPalette::from_cozy(BannerPalette::for_dark(self.dark.unwrap_or(false)));
+            // SAFETY: `hdc` is a live GDI device context and the brush is deleted after use.
+            unsafe {
+                let background = CreateSolidBrush(colors.surface);
+                FillRect(hdc, &self.progress_track_rect, background);
+                DeleteObject(background);
+            }
+            self.paint_progress(hdc, &colors);
+        }
+
+        fn progress_fill_width(&self, now: Instant) -> i32 {
+            let track_w = self.progress_track_rect.right - self.progress_track_rect.left;
+            let ratio = self.countdown.map_or(0.0, |cd| {
+                self.timeline
+                    .map_or_else(|| cd.progress_ratio(), |tl| tl.ratio_at(now))
+            });
+            (f64::from(track_w) * ratio).round() as i32
+        }
+
+        fn paint_progress(&self, hdc: HDC, colors: &WinPalette) {
+            let track = self.progress_track_rect;
+            let track_w = track.right - track.left;
+            let track_h = track.bottom - track.top;
+            if track_w <= 0 || track_h <= 0 {
+                return;
+            }
+            // SAFETY: `hdc` is a live GDI device context and every handle is owned or restored.
+            unsafe {
+                let track_brush = CreateSolidBrush(colors.track);
+                let track_pen = CreatePen(PS_SOLID, 1, colors.track);
+                let prev_brush = SelectObject(hdc, track_brush);
+                let prev_pen = SelectObject(hdc, track_pen);
+                RoundRect(
+                    hdc,
+                    track.left,
+                    track.top,
+                    track.right,
+                    track.bottom,
+                    track_h,
+                    track_h,
+                );
+                SelectObject(hdc, prev_pen);
+                SelectObject(hdc, prev_brush);
+                DeleteObject(track_pen);
+                DeleteObject(track_brush);
+
+                let fill_w = self.progress_fill_width(Instant::now());
+                if fill_w > 0 {
+                    let fill_right = (track.left + fill_w).min(track.right);
+                    let radius = track_h.min(fill_w);
+                    let fill_brush = CreateSolidBrush(colors.fill);
+                    let fill_pen = CreatePen(PS_SOLID, 1, colors.fill);
+                    let prev_brush = SelectObject(hdc, fill_brush);
+                    let prev_pen = SelectObject(hdc, fill_pen);
+                    RoundRect(
+                        hdc,
+                        track.left,
+                        track.top,
+                        fill_right,
+                        track.bottom,
+                        radius,
+                        radius,
+                    );
+                    SelectObject(hdc, prev_pen);
+                    SelectObject(hdc, prev_brush);
+                    DeleteObject(fill_pen);
+                    DeleteObject(fill_brush);
                 }
             }
         }
@@ -2076,54 +2190,7 @@ mod windows_impl {
                         DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_NOPREFIX,
                     );
 
-                    let track = self.progress_track_rect;
-                    let track_w = track.right - track.left;
-                    let track_h = track.bottom - track.top;
-                    if track_w > 0 && track_h > 0 {
-                        let track_brush = CreateSolidBrush(colors.track);
-                        let track_pen = CreatePen(PS_SOLID, 1, colors.track);
-                        let prev_brush = SelectObject(hdc, track_brush);
-                        let prev_pen = SelectObject(hdc, track_pen);
-                        RoundRect(
-                            hdc,
-                            track.left,
-                            track.top,
-                            track.right,
-                            track.bottom,
-                            track_h,
-                            track_h,
-                        );
-                        SelectObject(hdc, prev_pen);
-                        SelectObject(hdc, prev_brush);
-                        DeleteObject(track_pen);
-                        DeleteObject(track_brush);
-
-                        let ratio = self
-                            .timeline
-                            .map_or_else(|| cd.progress_ratio(), |tl| tl.ratio_at(Instant::now()));
-                        let fill_w = (f64::from(track_w) * ratio).round() as i32;
-                        if fill_w > 0 {
-                            let fill_right = (track.left + fill_w).min(track.right);
-                            let radius = track_h.min(fill_w);
-                            let fill_brush = CreateSolidBrush(colors.fill);
-                            let fill_pen = CreatePen(PS_SOLID, 1, colors.fill);
-                            let prev_brush = SelectObject(hdc, fill_brush);
-                            let prev_pen = SelectObject(hdc, fill_pen);
-                            RoundRect(
-                                hdc,
-                                track.left,
-                                track.top,
-                                fill_right,
-                                track.bottom,
-                                radius,
-                                radius,
-                            );
-                            SelectObject(hdc, prev_pen);
-                            SelectObject(hdc, prev_brush);
-                            DeleteObject(fill_pen);
-                            DeleteObject(fill_brush);
-                        }
-                    }
+                    self.paint_progress(hdc, &colors);
                 }
                 SelectObject(hdc, previous);
             }
@@ -2171,12 +2238,16 @@ mod windows_impl {
                     if let Ok(mut guard) = slot.try_borrow_mut()
                         && let Some(banner) = guard.as_mut().filter(|b| b.hwnd == hwnd)
                     {
-                        let track = banner.progress_track_rect;
-                        // SAFETY: `hwnd` is the live banner window and `track` is a client rect.
-                        unsafe { InvalidateRect(hwnd, &track, 0) };
-                        let still_running = banner
-                            .timeline
-                            .is_some_and(|tl| tl.ratio_at(Instant::now()) > 0.0);
+                        let now = Instant::now();
+                        let fill_w = banner.progress_fill_width(now);
+                        if fill_w != banner.last_fill_w {
+                            banner.last_fill_w = fill_w;
+                            let track = banner.progress_track_rect;
+                            // SAFETY: `hwnd` is the live banner window and `track` is a client rect.
+                            unsafe { InvalidateRect(hwnd, &track, 0) };
+                        }
+                        let still_running =
+                            banner.timeline.is_some_and(|tl| tl.ratio_at(now) > 0.0);
                         if !still_running {
                             banner.stop_progress_timer();
                         }
@@ -2197,7 +2268,7 @@ mod windows_impl {
                     let mut paint: PAINTSTRUCT = unsafe { zeroed() };
                     // SAFETY: `hwnd` is the live banner window and `paint` is writable storage.
                     let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
-                    banner.paint(hdc);
+                    banner.paint(hdc, paint.rcPaint);
                     // SAFETY: ends the paint cycle that `BeginPaint` started.
                     unsafe { EndPaint(hwnd, &paint) };
                     true
@@ -2541,7 +2612,6 @@ mod tests {
         assert!((tl.ratio_at(t0 + Duration::from_secs(10)) - 0.0).abs() < 1e-9);
         assert!((tl.ratio_at(t0 + Duration::from_secs(12)) - 0.0).abs() < 1e-9);
 
-        // Normal per-second ticks (including slight 30ms jitter) keep the continuous animation running.
         assert!(!tl.sync_or_restart(
             t0 + Duration::from_millis(1030),
             PreBreakCountdown {
@@ -2557,7 +2627,6 @@ mod tests {
             },
         ));
 
-        // Large drift (e.g., process pause) restarts cleanly from the new remaining ratio.
         let t_drift = t0 + Duration::from_secs(3);
         assert!(tl.sync_or_restart(
             t_drift,
@@ -2570,7 +2639,6 @@ mod tests {
         assert!((tl.ratio_at(t_drift + Duration::from_secs(2)) - 0.2).abs() < 1e-6);
         assert!((tl.ratio_at(t_drift + Duration::from_secs(4)) - 0.0).abs() < 1e-9);
 
-        // Remaining increase or total_secs change restarts the timeline.
         assert!(tl.sync_or_restart(
             t_drift + Duration::from_secs(1),
             PreBreakCountdown {

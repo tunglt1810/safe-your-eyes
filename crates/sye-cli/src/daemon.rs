@@ -461,11 +461,20 @@ fn poll_config_change(
     if !force_read && fingerprint == *last_fingerprint {
         return None;
     }
-    let Ok(updated) = Config::load_from_path(path) else {
-        return None;
-    };
+    let changed = fingerprint != *last_fingerprint;
     *last_fingerprint = fingerprint;
-    (updated != *current_config).then_some(updated)
+    match Config::load_from_path(path) {
+        Ok(updated) => (updated != *current_config).then_some(updated),
+        Err(err) => {
+            if changed {
+                eprintln!(
+                    "Warning: ignoring invalid config file {}: {err}",
+                    path.display()
+                );
+            }
+            None
+        }
+    }
 }
 
 #[cfg(not(feature = "msstore"))]
@@ -527,11 +536,16 @@ fn bind_or_replace_daemon(
             if !should_replace_running_daemon(&snapshot, current_version) {
                 return Err(IpcError::AlreadyRunning);
             }
-            let _ = IpcClient::send_command_with_timeout(
-                socket_path,
-                &IpcCommand::Quit,
-                DAEMON_HANDOFF_IPC_TIMEOUT,
-            );
+            if !matches!(
+                IpcClient::send_command_with_timeout(
+                    socket_path,
+                    &IpcCommand::Quit,
+                    DAEMON_HANDOFF_IPC_TIMEOUT,
+                ),
+                Ok(IpcResponse::Ok { .. })
+            ) {
+                return Err(IpcError::AlreadyRunning);
+            }
             let deadline = Instant::now() + DAEMON_HANDOFF_TIMEOUT;
             loop {
                 match IpcServer::bind(socket_path) {
@@ -752,7 +766,16 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         } else {
             CONFIG_POLL_INTERVAL_IDLE
         };
-        if settings_exited || last_config_poll.elapsed() >= config_poll_interval {
+        // An outside edit must not close an active break overlay. The fingerprint stays
+        // unchanged, so the edit is applied after the break.
+        let defer_idle_reload = host.settings_child.is_none()
+            && matches!(
+                scheduler.state(),
+                SchedulerState::PreBreak | SchedulerState::Break
+            );
+        if settings_exited
+            || (!defer_idle_reload && last_config_poll.elapsed() >= config_poll_interval)
+        {
             last_config_poll = Instant::now();
             let force_read = settings_exited || host.settings_child.is_some();
             if let Some(updated_cfg) = poll_config_change(
@@ -1094,7 +1117,28 @@ fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io:
     sye_platform::hide_child_console(&mut cmd).spawn()
 }
 
-pub(crate) fn spawn_daemon_for_handoff(paths: &AppPaths) -> std::io::Result<Child> {
+pub(crate) fn hand_off_to_new_daemon(paths: &AppPaths) -> bool {
+    let Ok(mut child) = spawn_daemon_for_handoff(paths) else {
+        return false;
+    };
+    // The new daemon exits when the old daemon does not quit. The caller then opens Settings
+    // itself, so that the user's request is not lost.
+    let deadline = Instant::now() + DAEMON_HANDOFF_TIMEOUT + 2 * DAEMON_HANDOFF_IPC_TIMEOUT;
+    while Instant::now() < deadline {
+        if !matches!(child.try_wait(), Ok(None)) {
+            return false;
+        }
+        if query_running_daemon_status(&paths.socket_path)
+            .is_some_and(|s| s.daemon_version.as_deref() == Some(CURRENT_VERSION))
+        {
+            return true;
+        }
+        std::thread::sleep(DAEMON_HANDOFF_POLL_INTERVAL);
+    }
+    true
+}
+
+fn spawn_daemon_for_handoff(paths: &AppPaths) -> std::io::Result<Child> {
     let exe = std::env::current_exe()?;
     let resolved = exe.canonicalize().unwrap_or(exe);
     let mut cmd = Command::new(resolved);
@@ -1383,6 +1427,7 @@ mod tests {
             poll_config_change(&cfg_path, true, &mut fingerprint, &current),
             None
         );
+        assert_eq!(fingerprint, file_fingerprint(&cfg_path));
 
         let next = Config {
             language: sye_core::LanguageMode::Vi,

@@ -169,7 +169,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     if std::env::var_os(daemon::HANDOFF_ENV_VAR).is_none()
         && let Some(snapshot) = query_daemon_status(&paths.socket_path)
         && daemon::should_replace_running_daemon(&snapshot, daemon::CURRENT_VERSION)
-        && daemon::spawn_daemon_for_handoff(paths).is_ok()
+        && daemon::hand_off_to_new_daemon(paths)
     {
         return ExitCode::SUCCESS;
     }

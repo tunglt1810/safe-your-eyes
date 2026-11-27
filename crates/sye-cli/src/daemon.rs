@@ -64,6 +64,7 @@ impl DaemonHost<'_> {
                 SchedulerAction::NotifyPreBreak {
                     break_spec,
                     warning_secs,
+                    total_secs,
                 } => {
                     if !self.headless {
                         self.pending_notification_dismiss = false;
@@ -71,6 +72,7 @@ impl DaemonHost<'_> {
                             break_spec.break_type,
                             &break_spec.name,
                             warning_secs,
+                            total_secs,
                         );
                     }
                 }

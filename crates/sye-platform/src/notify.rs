@@ -1,6 +1,5 @@
 #[cfg(all(unix, not(target_os = "macos")))]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(all(unix, not(target_os = "macos")))]
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -32,7 +31,10 @@ impl PreBreakCountdown {
     #[cfg(any(target_os = "macos", windows, test))]
     #[must_use]
     pub(crate) fn badge_text(self) -> String {
-        if self.remaining_secs >= 60 {
+        // `MM:SS` needs 6 characters from 100 minutes, which do not fit in the badge.
+        if self.remaining_secs >= 100 * 60 {
+            format!("{}m", self.remaining_secs.div_ceil(60))
+        } else if self.remaining_secs >= 60 {
             format!(
                 "{}:{:02}",
                 self.remaining_secs / 60,
@@ -65,45 +67,8 @@ impl PreBreakCountdown {
     }
 }
 
-struct PreBreakCycleTracker {
-    total_secs: AtomicU64,
-    last_remaining: AtomicU64,
-}
-
-impl PreBreakCycleTracker {
-    const fn new() -> Self {
-        Self {
-            total_secs: AtomicU64::new(0),
-            last_remaining: AtomicU64::new(0),
-        }
-    }
-
-    fn observe(&self, remaining_secs: u64) -> PreBreakCountdown {
-        let prev_total = self.total_secs.load(Ordering::Acquire);
-        let prev_remaining = self.last_remaining.load(Ordering::Acquire);
-        let total_secs = if prev_total == 0 || remaining_secs > prev_remaining {
-            let next_total = remaining_secs.max(1);
-            self.total_secs.store(next_total, Ordering::Release);
-            next_total
-        } else {
-            prev_total
-        };
-        self.last_remaining.store(remaining_secs, Ordering::Release);
-        PreBreakCountdown {
-            remaining_secs,
-            total_secs,
-        }
-    }
-
-    fn reset(&self) {
-        self.total_secs.store(0, Ordering::Release);
-        self.last_remaining.store(0, Ordering::Release);
-    }
-}
-
 pub struct OsNotifier {
     enabled: bool,
-    cycle: PreBreakCycleTracker,
     #[cfg(all(unix, not(target_os = "macos")))]
     active: Mutex<Option<LinuxActive>>,
 }
@@ -145,7 +110,6 @@ impl OsNotifier {
     pub const fn new() -> Self {
         Self {
             enabled: true,
-            cycle: PreBreakCycleTracker::new(),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
@@ -155,7 +119,6 @@ impl OsNotifier {
     pub const fn noop() -> Self {
         Self {
             enabled: false,
-            cycle: PreBreakCycleTracker::new(),
             #[cfg(all(unix, not(target_os = "macos")))]
             active: Mutex::new(None),
         }
@@ -301,12 +264,16 @@ impl Notifier for OsNotifier {
         break_type: BreakType,
         title: &str,
         warning_secs: u64,
+        total_secs: u64,
     ) -> Result<(), PlatformError> {
         if !self.enabled {
             return Ok(());
         }
 
-        let countdown = self.cycle.observe(warning_secs);
+        let countdown = PreBreakCountdown {
+            remaining_secs: warning_secs,
+            total_secs: total_secs.max(warning_secs).max(1),
+        };
 
         #[cfg(target_os = "macos")]
         {
@@ -376,7 +343,6 @@ impl Notifier for OsNotifier {
     }
 
     fn dismiss(&self) -> Result<(), PlatformError> {
-        self.cycle.reset();
         if !self.enabled {
             return Ok(());
         }
@@ -1698,10 +1664,13 @@ mod tests {
     }
 
     #[test]
-    fn pre_break_cycle_tracker_tracks_total_progress_urgency_and_reset() {
-        let tracker = PreBreakCycleTracker::new();
+    fn pre_break_countdown_tracks_progress_urgency_and_badge_text() {
+        let at = |remaining_secs, total_secs| PreBreakCountdown {
+            remaining_secs,
+            total_secs,
+        };
 
-        let t10 = tracker.observe(10);
+        let t10 = at(10, 10);
         assert_eq!(
             t10,
             PreBreakCountdown {
@@ -1713,7 +1682,7 @@ mod tests {
         assert_eq!(t10.badge_text(), "10s");
         assert_eq!(t10.progress_percent(), 100);
 
-        let t5 = tracker.observe(5);
+        let t5 = at(5, 10);
         assert_eq!(
             t5,
             PreBreakCountdown {
@@ -1724,7 +1693,7 @@ mod tests {
         assert!(!t5.is_urgent());
         assert_eq!(t5.progress_percent(), 50);
 
-        let t3 = tracker.observe(3);
+        let t3 = at(3, 10);
         assert!(t3.is_urgent());
         assert_eq!(t3.badge_text(), "3s");
         assert_eq!(t3.progress_percent(), 30);
@@ -1742,17 +1711,25 @@ mod tests {
             .badge_text(),
             "1:00"
         );
-
-        tracker.reset();
-        let next_cycle = tracker.observe(6);
         assert_eq!(
-            next_cycle,
             PreBreakCountdown {
-                remaining_secs: 6,
-                total_secs: 6
+                remaining_secs: 5999,
+                total_secs: 6000,
             }
+            .badge_text(),
+            "99:59"
         );
-        assert_eq!(next_cycle.progress_percent(), 100);
+        assert_eq!(
+            PreBreakCountdown {
+                remaining_secs: 6000,
+                total_secs: 6000,
+            }
+            .badge_text(),
+            "100m"
+        );
+
+        // A late first notification still measures against the full warning window.
+        assert_eq!(at(7, 10).progress_percent(), 70);
     }
 
     #[test]
@@ -1806,7 +1783,7 @@ mod tests {
     #[test]
     fn noop_notifier_succeeds_without_display_or_dbus() -> Result<(), Box<dyn std::error::Error>> {
         let notifier = OsNotifier::noop();
-        notifier.show_pre_break(BreakType::Short, "Look away", 10)?;
+        notifier.show_pre_break(BreakType::Short, "Look away", 10, 10)?;
         notifier.dismiss()?;
         Ok(())
     }
@@ -1814,7 +1791,7 @@ mod tests {
     #[test]
     fn os_notifier_degrades_gracefully_in_headless_env() {
         let notifier = OsNotifier::new();
-        let res = notifier.show_pre_break(BreakType::Short, "Look away", 5);
+        let res = notifier.show_pre_break(BreakType::Short, "Look away", 5, 10);
         assert!(matches!(res, Ok(()) | Err(PlatformError::Unavailable(_))));
         assert!(notifier.dismiss().is_ok());
     }

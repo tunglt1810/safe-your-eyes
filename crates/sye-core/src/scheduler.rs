@@ -97,6 +97,7 @@ pub enum SchedulerAction {
     NotifyPreBreak {
         break_spec: ResolvedBreak,
         warning_secs: u64,
+        total_secs: u64,
     },
     DismissNotification,
     PlayChime {
@@ -120,6 +121,7 @@ pub struct Scheduler<C: Clock> {
     skip_limit: SkipLimitPolicy,
     pre_break_notification_active: bool,
     last_pre_break_notified_secs: Option<u64>,
+    pre_break_total_secs: u64,
 
     pre_break_at_ms: u64,
     next_break_at_ms: u64,
@@ -150,6 +152,7 @@ impl<C: Clock> Scheduler<C> {
             skip_limit: SkipLimitPolicy::new(0),
             pre_break_notification_active: false,
             last_pre_break_notified_secs: None,
+            pre_break_total_secs: 0,
             pre_break_at_ms: 0,
             next_break_at_ms: 0,
             countdown_started_ms: 0,
@@ -437,12 +440,14 @@ impl<C: Clock> Scheduler<C> {
         self.state = SchedulerState::PreBreak;
         self.pre_break_notification_active = true;
         self.last_pre_break_notified_secs = Some(effective_warning_secs);
+        self.pre_break_total_secs = effective_warning_secs;
         let warning_ms = effective_warning_secs.saturating_mul(1000);
         // Ensure the user still receives a warning window if tick() arrived late.
         self.next_break_at_ms = self.next_break_at_ms.max(now.saturating_add(warning_ms));
         let mut actions = vec![SchedulerAction::NotifyPreBreak {
             break_spec: queued.spec,
             warning_secs: effective_warning_secs,
+            total_secs: effective_warning_secs,
         }];
         if self.config.audible_alert.pre_break {
             actions.push(SchedulerAction::PlayChime {
@@ -473,6 +478,7 @@ impl<C: Clock> Scheduler<C> {
                     return vec![SchedulerAction::NotifyPreBreak {
                         break_spec: spec,
                         warning_secs: remaining_secs,
+                        total_secs: self.pre_break_total_secs,
                     }];
                 }
             }
@@ -1817,7 +1823,7 @@ mod tests {
             assert_eq!(actions.len(), 1);
             assert!(matches!(
                 actions.first(),
-                Some(SchedulerAction::NotifyPreBreak { warning_secs, .. }) if *warning_secs == expected
+                Some(SchedulerAction::NotifyPreBreak { warning_secs, total_secs: 10, .. }) if *warning_secs == expected
             ));
             notified_secs.push(expected);
         }

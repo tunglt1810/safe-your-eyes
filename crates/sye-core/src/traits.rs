@@ -151,6 +151,7 @@ pub trait Notifier {
         break_type: BreakType,
         title: &str,
         warning_secs: u64,
+        total_secs: u64,
     ) -> Result<(), PlatformError>;
     fn dismiss(&self) -> Result<(), PlatformError>;
 }
@@ -190,6 +191,7 @@ mod tests {
             _break_type: BreakType,
             _title: &str,
             _warning_secs: u64,
+            _total_secs: u64,
         ) -> Result<(), PlatformError> {
             Ok(())
         }
@@ -230,7 +232,7 @@ mod tests {
         assert_eq!(dnd.query_dnd_context()?, DndContext::default());
 
         let notifier: Box<dyn Notifier> = Box::new(DummyNotifier);
-        notifier.show_pre_break(BreakType::Short, "Blink", 10)?;
+        notifier.show_pre_break(BreakType::Short, "Blink", 10, 10)?;
         notifier.dismiss()?;
 
         let audio: Box<dyn AudioPlayer> = Box::new(DummyAudio);

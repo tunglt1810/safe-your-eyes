@@ -399,16 +399,14 @@ pub struct SettingsStatusConfig {
     pub on_poll_status: Option<StatusPollCallback>,
 }
 
+// Screen readers can re-announce a changed label, so it carries whole minutes, not seconds.
 fn format_spoken_duration(total_secs: u64) -> String {
-    let mins = total_secs / 60;
-    let secs = total_secs % 60;
-    let min_unit = if mins == 1 { "minute" } else { "minutes" };
-    let sec_unit = if secs == 1 { "second" } else { "seconds" };
-    match (mins, secs) {
-        (0, s) => format!("{s} {sec_unit}"),
-        (m, 0) => format!("{m} {min_unit}"),
-        (m, s) => format!("{m} {min_unit} {s} {sec_unit}"),
+    if total_secs < 60 {
+        return "less than a minute".to_owned();
     }
+    let mins = total_secs.div_ceil(60);
+    let min_unit = if mins == 1 { "minute" } else { "minutes" };
+    format!("{mins} {min_unit}")
 }
 
 fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<CountdownPillState> {
@@ -440,15 +438,12 @@ fn format_countdown_pill(snapshot: &StatusSnapshot) -> Option<CountdownPillState
                 accessible_label: format!("{spoken_kind} in {spoken_time}"),
             })
         }
-        SchedulerState::PreBreak => {
-            let spoken_time = format_spoken_duration(snapshot.seconds_until_next_break);
-            Some(CountdownPillState {
-                tone: CountdownTone::Warning,
-                label: "Starting".to_owned(),
-                time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
-                accessible_label: format!("Break starting in {spoken_time}"),
-            })
-        }
+        SchedulerState::PreBreak => Some(CountdownPillState {
+            tone: CountdownTone::Warning,
+            label: "Starting".to_owned(),
+            time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
+            accessible_label: "Break starting soon".to_owned(),
+        }),
         SchedulerState::Break => Some(CountdownPillState {
             tone: CountdownTone::Break,
             label: "Break active".to_owned(),
@@ -4127,7 +4122,7 @@ mod tests {
                 tone: CountdownTone::Active,
                 label: "Short".to_owned(),
                 time: Some("14:32".to_owned()),
-                accessible_label: "Next short break in 14 minutes 32 seconds".to_owned(),
+                accessible_label: "Next short break in 15 minutes".to_owned(),
             })
         );
         assert_eq!(
@@ -4153,7 +4148,7 @@ mod tests {
                 tone: CountdownTone::Active,
                 label: "Next".to_owned(),
                 time: Some("01:05".to_owned()),
-                accessible_label: "Next break in 1 minute 5 seconds".to_owned(),
+                accessible_label: "Next break in 2 minutes".to_owned(),
             })
         );
         assert_eq!(
@@ -4166,7 +4161,7 @@ mod tests {
                 tone: CountdownTone::Warning,
                 label: "Starting".to_owned(),
                 time: Some("00:08".to_owned()),
-                accessible_label: "Break starting in 8 seconds".to_owned(),
+                accessible_label: "Break starting soon".to_owned(),
             })
         );
         assert_eq!(
@@ -4329,7 +4324,7 @@ mod tests {
 
         assert_eq!(
             timer_label(app.screen())?,
-            Some("Next short break in 14 minutes 32 seconds".to_owned())
+            Some("Next short break in 15 minutes".to_owned())
         );
 
         let nodes = app.screen().layout_nodes();

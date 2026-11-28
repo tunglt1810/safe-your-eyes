@@ -749,8 +749,13 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         host.open_settings();
     }
 
+    let mut server = Some(server);
+
     loop {
-        match drain_ipc_requests(&server, &mut scheduler, &mut host) {
+        let ipc_control = server.as_ref().map_or(LoopControl::Quit, |ipc_server| {
+            drain_ipc_requests(ipc_server, &mut scheduler, &mut host)
+        });
+        match ipc_control {
             LoopControl::Continue => {}
             LoopControl::Quit => break,
             LoopControl::Restart => {
@@ -910,7 +915,11 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 host.execute(actions);
                 host.close_overlay();
                 host.close_settings();
+                server = None;
             });
+            if scheduler.state() == SchedulerState::Quit {
+                break;
+            }
         } else {
             std::thread::sleep(POLL_INTERVAL);
         }

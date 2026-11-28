@@ -9,6 +9,8 @@ macOS, Win32 on Windows) that:
    window(s) covering every active display, and exits with a completed outcome.
 3. On Linux and Windows, closing the daemon's startup Settings window keeps
    the daemon running and preserves its active countdown.
+4. On macOS, `NSRunningApplication.terminate` runs daemon quit cleanup
+   (persisting session state and removing the IPC socket) and exits cleanly.
 """
 
 from __future__ import annotations
@@ -506,10 +508,20 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
 
 
 def verify_macos_daemon_terminate(binary: Path) -> None:
-    cfg = TMP_BASE / "macos_terminate_config.toml"
-    sock = TMP_BASE / "macos_terminate.sock"
-    cfg.write_text("autostart = false\ncheck_for_updates = false\n", encoding="utf-8")
-    log_path = TMP_BASE / "macos_terminate.stderr.log"
+    base = TMP_BASE / "macos_terminate"
+    base.mkdir(parents=True, exist_ok=True)
+    cfg = base / "config.toml"
+    session = base / "session.toml"
+    sock = base / "sye.sock"
+    cfg.write_text(
+        "autostart = false\n"
+        "check_for_updates = false\n"
+        "persist_state = true\n\n"
+        "[smart_pause]\n"
+        "enabled = false\n",
+        encoding="utf-8",
+    )
+    log_path = base / "daemon.stderr.log"
     log = log_path.open("w", encoding="utf-8")
     daemon = subprocess.Popen(
         [str(binary), "--background", "--config", str(cfg), "--socket", str(sock)],
@@ -536,6 +548,7 @@ def verify_macos_daemon_terminate(binary: Path) -> None:
                 f"Daemon IPC did not become ready in time: {_read_log(log_path)}"
             )
 
+        session.unlink(missing_ok=True)
         _macos_request_quit(daemon.pid)
         try:
             exit_code = daemon.wait(timeout=5.0)
@@ -547,6 +560,15 @@ def verify_macos_daemon_terminate(binary: Path) -> None:
             raise AssertionError(
                 f"Daemon exited with {exit_code} on macOS terminate request: "
                 f"{_read_log(log_path)}"
+            )
+        if not session.is_file():
+            raise AssertionError(
+                f"Daemon did not persist session state on macOS terminate: "
+                f"{_read_log(log_path)}"
+            )
+        if sock.exists():
+            raise AssertionError(
+                f"Daemon left stale IPC socket behind on macOS terminate: {sock}"
             )
         print("PASS macOS NSRunningApplication.terminate exits daemon cleanly")
     finally:

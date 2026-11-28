@@ -122,7 +122,6 @@ mod macos_impl {
     const KEY_AE_PROP_DATA: u32 = u32::from_be_bytes(*b"prdt");
     const KEY_AE_LAUNCHED_AS_LOGIN_ITEM: u32 = u32::from_be_bytes(*b"lgit");
 
-    #[derive(Clone, Copy)]
     struct TerminateCallback {
         data: *mut (),
         call: unsafe fn(*mut ()),
@@ -164,7 +163,7 @@ mod macos_impl {
 
     impl Drop for TerminateCallbackGuard<'_> {
         fn drop(&mut self) {
-            self.slot.set(self.prev);
+            self.slot.set(self.prev.take());
         }
     }
 
@@ -389,6 +388,23 @@ mod macos_impl {
                     TerminateCallbackGuard::install(&cell, TerminateCallback::new(&mut cb));
             }
             assert_eq!(count, 1);
+            assert!(cell.take().is_none());
+
+            {
+                let mut outer = Some(|| count += 100);
+                let _outer_guard =
+                    TerminateCallbackGuard::install(&cell, TerminateCallback::new(&mut outer));
+                {
+                    let mut inner = Some(|| count += 1000);
+                    let _inner_guard =
+                        TerminateCallbackGuard::install(&cell, TerminateCallback::new(&mut inner));
+                }
+                if let Some(callback) = cell.take() {
+                    // SAFETY: `outer` is alive for the scope of `_outer_guard`.
+                    unsafe { callback.invoke() };
+                }
+            }
+            assert_eq!(count, 101);
             assert!(cell.take().is_none());
         }
     }

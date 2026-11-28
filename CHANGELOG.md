@@ -2,6 +2,17 @@
 
 All notable changes to Safe Your Eyes are recorded in this file.
 
+## [0.5.2] - 2026-11-28
+
+### Fixed
+
+- Toggling `autostart` in `config.toml` no longer resets the active countdown or interrupts an ongoing break.
+- Atomic writes for `config.toml`, `session.toml`, and `update.toml` now use unique per-process temporary filenames and remove temporary files on error.
+
+### Changed
+
+- Consolidate shared Cozy tokens, RLE icon decoding, executable path resolution, and cross-platform helper code across crates, release automation, and E2E scripts.
+
 ## [0.5.1] - 2026-11-27
 
 ### Changed

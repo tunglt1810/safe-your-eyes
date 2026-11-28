@@ -202,7 +202,7 @@ def _macos_request_quit(pid: int) -> None:
         "  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier("
         "    parseInt(argv[0], 10)"
         "  );"
-        "  if (app.isNil() || !app.terminate()) {"
+        "  if (app.isNil() || !app.terminate) {"
         "    throw new Error('NSRunningApplication.terminate failed');"
         "  }"
         "}"

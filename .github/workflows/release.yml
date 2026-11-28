@@ -79,9 +79,10 @@ jobs:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
         run: |
           TAG_VERSION="${RELEASE_TAG#v}"
+          BASE_TAG_VERSION="${TAG_VERSION%%-*}"
           CARGO_VERSION=$(python3 -c 'import re; m=re.search(r"^version\s*=\s*\"([^\"]+)\"", open("Cargo.toml").read(), re.M); assert m; print(m.group(1))')
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-            echo "::error::Release tag ($RELEASE_TAG) does not match Cargo.toml version ($CARGO_VERSION)"
+          if [ "$BASE_TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Release tag ($RELEASE_TAG) base version ($BASE_TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
             exit 1
           fi
 

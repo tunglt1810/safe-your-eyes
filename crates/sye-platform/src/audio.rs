@@ -95,20 +95,37 @@ impl OsAudioPlayer {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn is_valid_riff_wav(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return false;
+    }
+    let declared = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    declared
+        .checked_add(8)
+        .is_some_and(|total| total <= bytes.len())
+}
+
 #[cfg(target_os = "windows")]
 fn play_windows_wav_in_memory(wav_bytes: &[u8]) -> Result<(), PlatformError> {
     use std::ptr;
 
     use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
 
+    if !is_valid_riff_wav(wav_bytes) {
+        return Err(PlatformError::Io(
+            "invalid RIFF/WAVE audio buffer".to_owned(),
+        ));
+    }
+
     let wav_owned = wav_bytes.to_vec();
     thread::Builder::new()
         .name("sye-audio-win32".to_owned())
         .spawn(move || {
-            // SAFETY: `SND_MEMORY | SND_SYNC` keeps `PlaySoundW` reading `wav_owned`
-            // synchronously on this thread until playback completes, so the buffer stays
-            // live for the entire call. Win32 interprets `pszSound` as raw RIFF WAV bytes
-            // when `SND_MEMORY` is set.
+            // SAFETY: `is_valid_riff_wav` verified the RIFF/WAVE header and that the
+            // declared RIFF chunk length + 8 fits within `wav_owned.len()`, so `PlaySoundW`
+            // cannot read past the buffer. `SND_MEMORY | SND_SYNC` keeps `wav_owned` live
+            // on this thread until playback completes.
             #[expect(unsafe_code, reason = "Win32 PlaySoundW in-memory WAV playback")]
             let _ = unsafe {
                 PlaySoundW(
@@ -208,6 +225,20 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(tmp.path())?.collect();
         assert!(entries.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn riff_wav_validation_checks_header_and_declared_length() {
+        let valid = synthesize_chime_wav(ChimeKind::PreBreak, 80);
+        assert!(is_valid_riff_wav(&valid));
+
+        assert!(!is_valid_riff_wav(&[]));
+        assert!(!is_valid_riff_wav(b"RIFF\x04\x00\x00\x00WAV"));
+        assert!(!is_valid_riff_wav(b"XXXX\x04\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\x04\x00\x00\x00XXXX"));
+        assert!(is_valid_riff_wav(b"RIFF\x04\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\x05\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\xff\xff\xff\xffWAVE"));
     }
 
     #[test]

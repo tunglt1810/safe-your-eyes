@@ -54,23 +54,6 @@ impl Default for SystemIdleProvider {
     }
 }
 
-#[cfg(test)]
-fn parse_macos_hid_idle_time(output: &str) -> Option<Duration> {
-    for line in output.lines() {
-        if !line.contains("\"HIDIdleTime\"") {
-            continue;
-        }
-        let Some((_, rhs)) = line.split_once('=') else {
-            continue;
-        };
-        let Ok(nanos) = rhs.trim().parse::<u64>() else {
-            continue;
-        };
-        return Some(Duration::from_nanos(nanos));
-    }
-    None
-}
-
 #[cfg(target_os = "linux")]
 mod linux_impl {
     use std::sync::{Mutex, PoisonError};
@@ -101,6 +84,12 @@ mod linux_impl {
                 .ok()?;
             Some(reply.ms_since_user_input)
         }
+    }
+
+    enum DbusIdleOutcome {
+        Idle(Duration),
+        ServiceUnavailable,
+        ConnectionLost,
     }
 
     pub(super) fn query_idle_duration(
@@ -147,43 +136,58 @@ mod linux_impl {
         Some(Duration::from_millis(u64::from(ms)))
     }
 
-    fn query_dbus_idle_on(conn: &zbus::blocking::Connection) -> Option<Duration> {
-        if let Ok(msg) = conn.call_method(
+    fn query_dbus_idle_on(conn: &zbus::blocking::Connection) -> DbusIdleOutcome {
+        match conn.call_method(
             Some("org.gnome.Mutter.IdleMonitor"),
             "/org/gnome/Mutter/IdleMonitor/Core",
             Some("org.gnome.Mutter.IdleMonitor"),
             "GetIdletime",
             &(),
-        ) && let Ok(ms) = msg.body().deserialize::<u64>()
-        {
-            return Some(Duration::from_millis(ms));
+        ) {
+            Ok(msg) => {
+                if let Ok(ms) = msg.body().deserialize::<u64>() {
+                    return DbusIdleOutcome::Idle(Duration::from_millis(ms));
+                }
+            }
+            Err(zbus::Error::InputOutput(_)) => return DbusIdleOutcome::ConnectionLost,
+            Err(_) => {}
         }
 
-        if let Ok(msg) = conn.call_method(
+        match conn.call_method(
             Some("org.freedesktop.ScreenSaver"),
             "/org/freedesktop/ScreenSaver",
             Some("org.freedesktop.ScreenSaver"),
             "GetSessionIdleTime",
             &(),
-        ) && let Ok(ms) = msg.body().deserialize::<u32>()
-        {
-            return Some(Duration::from_millis(u64::from(ms)));
+        ) {
+            Ok(msg) => {
+                if let Ok(ms) = msg.body().deserialize::<u32>() {
+                    return DbusIdleOutcome::Idle(Duration::from_millis(u64::from(ms)));
+                }
+            }
+            Err(zbus::Error::InputOutput(_)) => return DbusIdleOutcome::ConnectionLost,
+            Err(_) => {}
         }
 
-        None
+        DbusIdleOutcome::ServiceUnavailable
     }
 
     fn query_wayland_dbus_idle(
         cache: &Mutex<Option<zbus::blocking::Connection>>,
     ) -> Option<Duration> {
         let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(existing) = guard.as_ref()
-            && let Some(dur) = query_dbus_idle_on(existing)
-        {
-            return Some(dur);
+        if let Some(existing) = guard.as_ref() {
+            match query_dbus_idle_on(existing) {
+                DbusIdleOutcome::Idle(dur) => return Some(dur),
+                DbusIdleOutcome::ServiceUnavailable => return None,
+                DbusIdleOutcome::ConnectionLost => {}
+            }
         }
         *guard = zbus::blocking::Connection::session().ok();
-        guard.as_ref().and_then(query_dbus_idle_on)
+        match guard.as_ref().map(query_dbus_idle_on) {
+            Some(DbusIdleOutcome::Idle(dur)) => Some(dur),
+            _ => None,
+        }
     }
 }
 
@@ -249,25 +253,6 @@ mod windows_impl {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parse_macos_hid_idle_time_extracts_nanoseconds() {
-        let sample = r#"
-          | |   "HIDIdleTime" = 4250000000
-          | |   "HIDParameters" = {}
-        "#;
-        assert_eq!(
-            parse_macos_hid_idle_time(sample),
-            Some(Duration::from_nanos(4_250_000_000))
-        );
-
-        assert_eq!(
-            parse_macos_hid_idle_time(r#""HIDIdleTime" = 0"#),
-            Some(Duration::ZERO)
-        );
-        assert_eq!(parse_macos_hid_idle_time("no idle key here"), None);
-        assert_eq!(parse_macos_hid_idle_time(r#""HIDIdleTime" = abc"#), None);
-    }
 
     #[test]
     fn system_idle_provider_degrades_gracefully_in_headless_env() {

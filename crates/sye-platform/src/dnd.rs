@@ -369,7 +369,7 @@ mod linux_impl {
         let active = query_x11_window_state(cache);
         let (active_process_name, active_executable_path, proc_game_env) =
             active.pid.map_or((None, None, false), query_proc_info);
-        let on_battery = if options.check_fullscreen {
+        let on_battery = if options.check_battery {
             is_battery_discharging_in(Path::new("/sys/class/power_supply"))
         } else {
             false
@@ -583,7 +583,7 @@ end tell
     }
 
     pub(super) fn query_dnd_context(options: DndQueryOptions) -> DndContext {
-        let on_battery = if options.check_fullscreen {
+        let on_battery = if options.check_battery {
             Command::new("pmset")
                 .args(["-g", "batt"])
                 .output()
@@ -700,7 +700,7 @@ mod windows_impl {
     }
 
     pub(super) fn query_dnd_context(options: DndQueryOptions) -> DndContext {
-        let on_battery = if options.check_fullscreen {
+        let on_battery = if options.check_battery {
             query_on_battery()
         } else {
             false

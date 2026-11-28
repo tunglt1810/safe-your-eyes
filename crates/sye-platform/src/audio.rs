@@ -59,6 +59,11 @@ impl OsAudioPlayer {
             return Ok(());
         }
 
+        #[cfg(target_os = "windows")]
+        if self.players.is_empty() {
+            return play_windows_wav_in_memory(wav_bytes);
+        }
+
         fs::create_dir_all(&self.temp_dir).map_err(|err| PlatformError::Io(err.to_string()))?;
 
         let seq = AUDIO_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -90,6 +95,50 @@ impl OsAudioPlayer {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn is_valid_riff_wav(bytes: &[u8]) -> bool {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return false;
+    }
+    let declared = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    declared
+        .checked_add(8)
+        .is_some_and(|total| total <= bytes.len())
+}
+
+#[cfg(target_os = "windows")]
+fn play_windows_wav_in_memory(wav_bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::ptr;
+
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
+
+    if !is_valid_riff_wav(wav_bytes) {
+        return Err(PlatformError::Io(
+            "invalid RIFF/WAVE audio buffer".to_owned(),
+        ));
+    }
+
+    let wav_owned = wav_bytes.to_vec();
+    thread::Builder::new()
+        .name("sye-audio-win32".to_owned())
+        .spawn(move || {
+            // SAFETY: `is_valid_riff_wav` verified the RIFF/WAVE header and that the
+            // declared RIFF chunk length + 8 fits within `wav_owned.len()`, so `PlaySoundW`
+            // cannot read past the buffer. `SND_MEMORY | SND_SYNC` keeps `wav_owned` live
+            // on this thread until playback completes.
+            #[expect(unsafe_code, reason = "Win32 PlaySoundW in-memory WAV playback")]
+            let _ = unsafe {
+                PlaySoundW(
+                    wav_owned.as_ptr().cast(),
+                    ptr::null_mut(),
+                    SND_MEMORY | SND_SYNC | SND_NODEFAULT,
+                )
+            };
+        })
+        .map(|_| ())
+        .map_err(|err| PlatformError::Io(err.to_string()))
+}
+
 fn default_audio_temp_dir() -> PathBuf {
     #[cfg(unix)]
     {
@@ -109,16 +158,7 @@ const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
 }];
 
 #[cfg(target_os = "windows")]
-const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
-    program: "powershell.exe",
-    args: &[
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-    ],
-}];
+const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[];
 
 #[cfg(all(unix, not(target_os = "macos")))]
 const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[
@@ -145,22 +185,7 @@ fn spawn_first_available_player(
     for spec in players {
         let mut cmd = Command::new(spec.program);
         cmd.args(spec.args);
-
-        #[cfg(target_os = "windows")]
-        if spec.program.eq_ignore_ascii_case("powershell.exe") {
-            let escaped = wav_path.to_string_lossy().replace('\'', "''");
-            cmd.arg(format!(
-                "(New-Object Media.SoundPlayer '{escaped}').PlaySync()"
-            ));
-        } else {
-            cmd.arg(wav_path);
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            cmd.arg(wav_path);
-        }
-
+        cmd.arg(wav_path);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -200,6 +225,20 @@ mod tests {
         let entries: Vec<_> = fs::read_dir(tmp.path())?.collect();
         assert!(entries.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn riff_wav_validation_checks_header_and_declared_length() {
+        let valid = synthesize_chime_wav(ChimeKind::PreBreak, 80);
+        assert!(is_valid_riff_wav(&valid));
+
+        assert!(!is_valid_riff_wav(&[]));
+        assert!(!is_valid_riff_wav(b"RIFF\x04\x00\x00\x00WAV"));
+        assert!(!is_valid_riff_wav(b"XXXX\x04\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\x04\x00\x00\x00XXXX"));
+        assert!(is_valid_riff_wav(b"RIFF\x04\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\x05\x00\x00\x00WAVE"));
+        assert!(!is_valid_riff_wav(b"RIFF\xff\xff\xff\xffWAVE"));
     }
 
     #[test]

@@ -244,6 +244,8 @@ pub(crate) fn theme_toggle_button(
     );
 
     let base = view()
+        .accessible(true)
+        .label(move || theme_mode_label_localized(mode(), locale()))
         .element_ref(&btn_ref)
         .on_layout(move |_: &Bounds<Points>| {
             measure_center_into(btn_ref, measured_center);

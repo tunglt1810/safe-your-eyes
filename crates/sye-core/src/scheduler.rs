@@ -139,6 +139,8 @@ pub struct Scheduler<C: Clock> {
     resting_since_mono_ms: u64,
     resting_since_wall_secs: u64,
     remaining_until_break_ms: u64,
+    last_waiting_mono_ms: u64,
+    last_waiting_wall_secs: u64,
 }
 
 impl<C: Clock> Scheduler<C> {
@@ -169,6 +171,8 @@ impl<C: Clock> Scheduler<C> {
             resting_since_mono_ms: 0,
             resting_since_wall_secs: 0,
             remaining_until_break_ms: 0,
+            last_waiting_mono_ms: 0,
+            last_waiting_wall_secs: 0,
         }
     }
 
@@ -416,6 +420,25 @@ impl<C: Clock> Scheduler<C> {
         current_idle: Option<Duration>,
         dnd_ctx: Option<&DndContext>,
     ) -> Vec<SchedulerAction> {
+        let now_wall = self.now_wall_secs();
+        let mono_elapsed_secs = now.saturating_sub(self.last_waiting_mono_ms) / 1000;
+        let wall_elapsed_secs = now_wall.saturating_sub(self.last_waiting_wall_secs);
+        self.last_waiting_mono_ms = now;
+        self.last_waiting_wall_secs = now_wall;
+
+        let suspend_gap_secs = wall_elapsed_secs.saturating_sub(mono_elapsed_secs);
+        if let Some(long_dur) = self
+            .queue
+            .as_ref()
+            .and_then(BreakQueue::next_long_duration_secs)
+            && suspend_gap_secs > long_dur
+        {
+            if let Some(queue) = self.queue.as_mut() {
+                queue.skip_long_break();
+            }
+            return self.enter_waiting_fresh();
+        }
+
         if now < self.pre_break_at_ms {
             return Vec::new();
         }
@@ -601,6 +624,8 @@ impl<C: Clock> Scheduler<C> {
             let remaining_ms = self.remaining_until_break_ms;
             self.state = SchedulerState::Waiting;
             self.countdown_started_ms = now_mono;
+            self.last_waiting_mono_ms = now_mono;
+            self.last_waiting_wall_secs = now_wall;
             self.next_break_at_ms = now_mono.saturating_add(remaining_ms);
             let warning_ms = self
                 .config
@@ -888,6 +913,8 @@ impl<C: Clock> Scheduler<C> {
         self.next_break_at_ms = now.saturating_add(wait_ms);
         self.pre_break_at_ms = self.next_break_at_ms.saturating_sub(warning_ms);
         self.countdown_started_ms = now;
+        self.last_waiting_mono_ms = now;
+        self.last_waiting_wall_secs = self.now_wall_secs();
 
         let mut actions = vec![SchedulerAction::UpdateTray(self.tray_snapshot())];
         if self.config.persist_state {
@@ -1261,6 +1288,37 @@ mod tests {
         let _ = sched.handle_event(SchedulerEvent::ExitResting {
             credit_idle_secs: None,
         });
+        assert_eq!(
+            sched.status_snapshot().next_break_type,
+            Some(BreakType::Short)
+        );
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 900);
+    }
+
+    #[test]
+    fn waiting_suspend_gap_longer_than_long_duration_resets_cycle() {
+        let clock = FakeClock::default();
+        let mut sched = Scheduler::new(test_config(), &clock, 1);
+        let _ = sched.handle_event(SchedulerEvent::Start);
+
+        for _ in 0..4 {
+            let _ = sched.handle_event(SchedulerEvent::TakeBreak { kind: None });
+            let _ = sched.handle_event(SchedulerEvent::OverlayFinished(OverlayOutcome::Completed));
+        }
+        assert_eq!(
+            sched.status_snapshot().next_break_type,
+            Some(BreakType::Long)
+        );
+
+        clock.advance_secs(300);
+        let _ = sched.tick();
+        assert_eq!(sched.status_snapshot().seconds_until_next_break, 600);
+
+        // Simulate OS suspend while Waiting: wall clock advances 120s (> 60s long break) while monotonic pauses.
+        clock.advance_wall_only(Duration::from_secs(120));
+        let actions = sched.tick();
+        assert!(!actions.is_empty());
+        assert_eq!(sched.state(), SchedulerState::Waiting);
         assert_eq!(
             sched.status_snapshot().next_break_type,
             Some(BreakType::Short)

@@ -41,7 +41,7 @@
 ```
 
 ### Skill & Quality Rules (`leanrea` + `rust-anything` + User Rules)
-1. **Docs & ADRs**: Numbered ADRs in `docs/specs/DECISIONS.md`, canonical terminology in `docs/specs/GLOSSARY.md`, full product spec in `docs/specs/SPEC.md`, temporary implementation plan in `docs/plans/PLAN.md`. Vietnamese technical docs follow STE structural rules; English technical text follows ASD-STE100 Strict mode.
+1. **Docs & ADRs**: Full product, architecture, and Cozy design specification in `docs/specs/SPEC.md`, temporary implementation plans in `docs/plans/`. Vietnamese technical docs follow STE structural rules; English technical text follows ASD-STE100 Strict mode.
 2. **Workspace Safety & Lints**: `[workspace.lints.rust] unsafe_code = "forbid"` (isolated in `sye-platform` only where OS FFI requires it, with mandatory `// SAFETY:` comments); `cargo clippy --all-targets -- -D warnings`; `cargo fmt --check`; zero `unwrap()`/`expect()`/`panic!()` on fallible paths (`// INFALLIBLE:` only for provably impossible states); `#[expect(lint, reason = "...")]` over `#[allow]`.
 3. **Minimalism & Binary Size**: Release profile uses `opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = "symbols"`; `default-features = false` on heavy crates; zero `tokio`, zero `libgtk-3-dev` / `libayatana-appindicator3-dev` / `libdbus-1-dev` / `libasound2-dev` build dependencies on Linux.
 4. **Temporary Files**: Always use `.tmp/` inside the repo (never OS `/tmp`), with `/.tmp` in `.gitignore`. `.agents/teamwork/` holds agent metadata only.
@@ -67,7 +67,7 @@
 │   ├── sye-platform/                 # M2 (cross-platform OS adapters)
 │   │   ├── Cargo.toml
 │   │   └── src/
-│   ├── sye-ui/                       # M3 (eframe/egui overlay + settings)
+│   ├── sye-ui/                       # M3 (Native Shell nsh Cozy overlay + settings)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   └── sye-cli/                      # M4 (single binary: daemon + CLI + subprocesses)
@@ -84,7 +84,7 @@ Every Survey feature is assigned a milestone (none unassigned).
 
 | # | Feature | Description | Milestone | Source |
 |---|---------|-------------|-----------|--------|
-| F1 | Project Specs, ADRs, Glossary & Hygiene | `.gitignore` (`/.tmp`, `/target`), `docs/specs/{SPEC.md,DECISIONS.md,GLOSSARY.md}`, `docs/plans/PLAN.md`, Cargo workspace with strict lints & size-optimized release profile | M1 | survey (`explorer_survey_1`, `spec_miner_survey_3`) |
+| F1 | Project Specs, ADRs, Glossary & Hygiene | `.gitignore` (`/.tmp`, `/target`), `docs/specs/SPEC.md`, Cargo workspace with strict lints & size-optimized release profile | M1 | survey (`explorer_survey_1`, `spec_miner_survey_3`) |
 | F2 | Dual-Tier Break Queue | Short (15m/15s) & Long (75m/60s) break queues (4:1 ratio), 13 default short + 6 default long exercises, random shuffle per cycle or sequential, per-break interval/duration overrides | M1 | survey (`spec_miner_survey_2` #1–3) |
 | F3 | 7-State Scheduler State Machine | Deterministic `Start`, `Waiting`, `PreBreak`, `Break`, `Stopped`, `Quit`, `Resting` transitions; 10s pre-break warning; reentrancy-safe tick/event model with trait-injected `Clock` | M1 | survey (`spec_miner_survey_2` #4–5) |
 | F4 | Strict Break, Postpone, Skip & Anti-Accidental Lock | `strict_break` (disables Skip), `allow_postpone` (queue-preserving postpone by configured minutes/seconds), Skip (advances queue, skips chime), `shortcut_disable_time` (2s lock) | M1 | survey (`spec_miner_survey_2` #6–8, #15) |
@@ -99,8 +99,8 @@ Every Survey feature is assigned a milestone (none unassigned).
 | F13 | Cross-Platform Idle & DND Providers | OS idle duration (Linux X11/Wayland, macOS, Windows), fullscreen/active-window detection, battery discharging status, all with graceful fallback | M2 | survey (`spec_miner_survey_2` #19–20, `spec_miner_survey_3`) |
 | F14 | Cross-Platform Notifications & Audio Playback | `notify-rust` (`zbus` on Linux, native macOS/Windows) for pre-break alerts; non-blocking OS WAV chime playback (`pw-play`/`paplay`/`aplay`, `afplay`, `PlaySoundW`) with volume clamp & graceful fallback | M2 | survey (`spec_miner_survey_2` #21–22, `spec_miner_survey_3`) |
 | F15 | Single-Instance Local IPC & Autostart | `interprocess` local socket (UDS on Linux/macOS, Named Pipes on Windows) with stale-socket recovery; OS autostart entry helper | M2 | survey (`spec_miner_survey_2` #27, #29, `spec_miner_survey_3`) |
-| F16 | Multi-Monitor Fullscreen Break Overlay UI | `eframe`/`egui` (`glow`, `default-features = false`): dark fullscreen overlay per monitor, fade-in animation (`1500ms`), centered bold exercise text, `MM:SS` countdown, skip-limit label, Skip (`Esc`) & Postpone (`Space`) with 2s lock & strict mode | M3 | survey (`spec_miner_survey_2` #12–16, `spec_miner_survey_3`) |
-| F17 | Compact Settings UI | Lightweight `egui` Settings window: edit intervals/durations/toggles/exercises, Reset to defaults, Save/Cancel | M3 | survey (`spec_miner_survey_2` #28, `spec_miner_survey_3`) |
+| F16 | Multi-Monitor Fullscreen Break Overlay UI | Native Shell (`nsh`): dark fullscreen overlay per monitor, fade-in animation (`1500ms`), centered bold exercise text, `MM:SS` countdown, skip-limit label, Skip (`Esc`) & Postpone (`Space`) with 2s lock & strict mode | M3 | survey (`spec_miner_survey_2` #12–16, `spec_miner_survey_3`) |
+| F17 | Compact Settings UI | Native Shell (`nsh`) Cozy Settings window: edit intervals/durations/toggles/window rules/exercises, Reset to defaults, autosave | M3 | survey (`spec_miner_survey_2` #28, `spec_miner_survey_3`) |
 | F18 | Single-Binary CLI, Daemon & Subprocess Orchestration | `safe-your-eyes` binary: daemon mode, CLI flags (`--status`, `--enable`, `--disable [MIN]`, `--take-break`, `-b/--short-break`, `-l/--long-break`, `--settings`, `--quit`, `--version`, `--config`, `--socket`, `--headless`), on-demand `--internal-overlay`/`--internal-settings` subprocesses, signal handling, release size verification | M4 | survey (`spec_miner_survey_2` #29, `spec_miner_survey_3`) |
 | F19 | Cross-Platform CI Matrix | `.github/workflows/ci.yml` running `fmt`, `clippy`, `test`, and release build across `ubuntu-latest`, `macos-latest`, `windows-latest` | M4 | survey (`explorer_survey_1`, `spec_miner_survey_3`) |
 | F20 | Opaque-Box E2E Test Suite (Tiers 1–4) | Requirement-driven E2E harness & tests in `e2e/` covering all CLI/config/scheduler/IPC/policy behaviors + `TEST_READY.md` | E2E Track | Project Pattern |

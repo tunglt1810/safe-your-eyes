@@ -107,6 +107,7 @@ pub(crate) fn duration_to_ms_u64(d: Duration) -> u64 {
 pub struct DndQueryOptions {
     pub check_fullscreen: bool,
     pub check_gaming: bool,
+    pub check_battery: bool,
 }
 
 impl Default for DndQueryOptions {
@@ -114,6 +115,7 @@ impl Default for DndQueryOptions {
         Self {
             check_fullscreen: true,
             check_gaming: true,
+            check_battery: true,
         }
     }
 }

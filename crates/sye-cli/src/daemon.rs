@@ -894,6 +894,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                     .query_dnd_context_with(DndQueryOptions {
                         check_fullscreen: dnd_cfg.enabled,
                         check_gaming: dnd_cfg.while_gaming,
+                        check_battery: dnd_cfg.enabled && dnd_cfg.while_on_battery,
                     })
                     .ok()
             } else {

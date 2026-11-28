@@ -1,6 +1,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub mod chime;
 pub mod config;
@@ -59,16 +60,27 @@ pub fn decode_rle_rgba(encoded: &[u8], expected_len: usize) -> Vec<u8> {
 }
 
 pub(crate) fn write_string_atomic(path: &Path, content: &str) -> io::Result<()> {
+    static NEXT_SEQ: AtomicU64 = AtomicU64::new(0);
+
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
     {
         fs::create_dir_all(parent)?;
     }
+    let pid = std::process::id();
+    let seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".tmp");
+    tmp_name.push(format!(".{pid}.{seq}.tmp"));
     let tmp_path = PathBuf::from(tmp_name);
-    fs::write(&tmp_path, content)?;
-    fs::rename(&tmp_path, path)
+    if let Err(err) = fs::write(&tmp_path, content) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
 }
 
 pub use chime::{
@@ -104,3 +116,41 @@ pub use update::{
     parse_latest_release_json, parse_sha256sums, release_asset_url, release_checksums_url,
     resolve_release_asset_name,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_string_atomic_overwrites_and_cleans_temp_file_on_rename_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(".tmp")
+            .join(format!("sye-core-atomic-write-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir)?;
+
+        let file = dir.join("config.toml");
+        write_string_atomic(&file, "first")?;
+        write_string_atomic(&file, "second")?;
+        assert_eq!(fs::read_to_string(&file)?, "second");
+
+        // Renaming a regular file over an existing directory fails on all platforms;
+        // verify the temporary file is removed on error.
+        let blocking_dir = dir.join("blocked");
+        fs::create_dir_all(&blocking_dir)?;
+        assert!(write_string_atomic(&blocking_dir, "should-fail").is_err());
+
+        let leftovers: Vec<_> = fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temp files: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+        Ok(())
+    }
+}

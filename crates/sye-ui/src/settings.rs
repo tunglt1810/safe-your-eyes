@@ -209,7 +209,7 @@ impl SettingsViewModel {
             return Ok(());
         }
         // Keep `autostart` aligned with the OS login-item state seen by the daemon so a
-        // theme/language-only close neither clobbers OS autostart nor triggers a schedule reload.
+        // theme/language-only close does not clobber OS autostart.
         if let Some(actual) = self.system_autostart {
             on_disk.autostart = actual;
         }

@@ -360,7 +360,7 @@ This section lists the operating system and framework limits that the code works
 1. LaunchServices passes a `-psn_*` argument when it starts an `.app` bundle. The CLI parser ignores it.
 2. `tray-icon` needs an active `NSApplication` event loop on the main thread. The daemon creates `PlatformEventLoop` before `TrayHandle`.
 3. At launch, AppKit sends the `'aevt'/'oapp'` AppleEvent and calls `applicationDidFinishLaunching:` only while the event loop runs. `PlatformEventLoop::new` pumps events until this occurs.
-4. A logout or restart asks `applicationShouldTerminate:`. The delegate returns `TerminateLater`, and the daemon replies after its cleanup. This keeps the logout or restart going.
+4. A quit request from macOS or Homebrew calls `applicationShouldTerminate:` during event pumping. If the delegate returns `TerminateLater`, `terminate:` enters `NSModalPanelRunLoopMode` and stops the manual daemon loop. The delegate runs the daemon cleanup callback immediately and returns `TerminateNow`.
 5. AppKit can keep a reference to a delegate that is gone. `PlatformEventLoop` removes the delegate from `NSApplication` before it releases the delegate.
 6. While the status bar menu is open, AppKit runs `NSEventTrackingRunLoopMode` and the daemon loop stops. `TrayHandle` updates the countdown from a timer in that mode.
 7. Menu tracking blocks the daemon loop, so `poll` does not see the click that opened the menu. `TrayHandle` records the menu open from the `NSMenuDidBeginTrackingNotification` observer.

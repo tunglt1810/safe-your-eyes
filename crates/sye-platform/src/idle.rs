@@ -7,6 +7,8 @@ use sye_core::PlatformError;
 pub struct SystemIdleProvider {
     #[cfg(target_os = "linux")]
     x11: Mutex<Option<linux_impl::X11IdleConn>>,
+    #[cfg(target_os = "linux")]
+    dbus: Mutex<Option<zbus::blocking::Connection>>,
 }
 
 impl std::fmt::Debug for SystemIdleProvider {
@@ -21,13 +23,15 @@ impl SystemIdleProvider {
         Self {
             #[cfg(target_os = "linux")]
             x11: Mutex::new(None),
+            #[cfg(target_os = "linux")]
+            dbus: Mutex::new(None),
         }
     }
 
     pub fn idle_duration(&self) -> Result<Duration, PlatformError> {
         #[cfg(target_os = "linux")]
         {
-            linux_impl::query_idle_duration(&self.x11)
+            linux_impl::query_idle_duration(&self.x11, &self.dbus)
         }
         #[cfg(target_os = "macos")]
         {
@@ -50,7 +54,7 @@ impl Default for SystemIdleProvider {
     }
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn parse_macos_hid_idle_time(output: &str) -> Option<Duration> {
     for line in output.lines() {
         if !line.contains("\"HIDIdleTime\"") {
@@ -100,13 +104,28 @@ mod linux_impl {
     }
 
     pub(super) fn query_idle_duration(
-        cache: &Mutex<Option<X11IdleConn>>,
+        x11_cache: &Mutex<Option<X11IdleConn>>,
+        dbus_cache: &Mutex<Option<zbus::blocking::Connection>>,
     ) -> Result<Duration, PlatformError> {
-        if let Some(dur) = query_x11_idle(cache) {
-            return Ok(dur);
-        }
-        if let Some(dur) = query_wayland_dbus_idle() {
-            return Ok(dur);
+        // Under Wayland with XWayland, X11 MIT-SCREEN-SAVER ignores native Wayland input
+        // and reports stale idle times; query the session D-Bus idle monitor first.
+        let wayland_session =
+            std::env::var_os("WAYLAND_DISPLAY").is_some_and(|val| !val.is_empty());
+
+        if wayland_session {
+            if let Some(dur) = query_wayland_dbus_idle(dbus_cache) {
+                return Ok(dur);
+            }
+            if let Some(dur) = query_x11_idle(x11_cache) {
+                return Ok(dur);
+            }
+        } else {
+            if let Some(dur) = query_x11_idle(x11_cache) {
+                return Ok(dur);
+            }
+            if let Some(dur) = query_wayland_dbus_idle(dbus_cache) {
+                return Ok(dur);
+            }
         }
         Err(PlatformError::Unavailable(
             "no X11 display or session D-Bus idle monitor available".to_owned(),
@@ -128,9 +147,7 @@ mod linux_impl {
         Some(Duration::from_millis(u64::from(ms)))
     }
 
-    fn query_wayland_dbus_idle() -> Option<Duration> {
-        let conn = zbus::blocking::Connection::session().ok()?;
-
+    fn query_dbus_idle_on(conn: &zbus::blocking::Connection) -> Option<Duration> {
         if let Ok(msg) = conn.call_method(
             Some("org.gnome.Mutter.IdleMonitor"),
             "/org/gnome/Mutter/IdleMonitor/Core",
@@ -155,33 +172,42 @@ mod linux_impl {
 
         None
     }
+
+    fn query_wayland_dbus_idle(
+        cache: &Mutex<Option<zbus::blocking::Connection>>,
+    ) -> Option<Duration> {
+        let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(existing) = guard.as_ref()
+            && let Some(dur) = query_dbus_idle_on(existing)
+        {
+            return Some(dur);
+        }
+        *guard = zbus::blocking::Connection::session().ok();
+        guard.as_ref().and_then(query_dbus_idle_on)
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod macos_impl {
-    use std::process::Command;
     use std::time::Duration;
 
+    use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
     use sye_core::PlatformError;
 
-    use super::parse_macos_hid_idle_time;
+    // CoreGraphics kCGAnyInputEventType (~0u32) matches any HID input event without permissions.
+    const ANY_INPUT_EVENT_TYPE: CGEventType = CGEventType(u32::MAX);
 
     pub(super) fn query_idle_duration() -> Result<Duration, PlatformError> {
-        let output = Command::new("ioreg")
-            .args(["-c", "IOHIDSystem", "-d", "4"])
-            .output()
-            .map_err(|err| PlatformError::Unavailable(err.to_string()))?;
-
-        if !output.status.success() {
+        let secs = CGEventSource::seconds_since_last_event_type(
+            CGEventSourceStateID::CombinedSessionState,
+            ANY_INPUT_EVENT_TYPE,
+        );
+        if !secs.is_finite() || secs < 0.0 {
             return Err(PlatformError::Unavailable(
-                "ioreg exited with non-zero status".to_owned(),
+                "CGEventSourceSecondsSinceLastEventType returned invalid duration".to_owned(),
             ));
         }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_macos_hid_idle_time(&stdout).ok_or_else(|| {
-            PlatformError::Unavailable("HIDIdleTime not found in ioreg output".to_owned())
-        })
+        Ok(Duration::from_secs_f64(secs))
     }
 }
 

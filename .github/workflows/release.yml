@@ -73,6 +73,18 @@ jobs:
         with:
           key: ${{ matrix.asset_name }}
 
+      - name: Verify release tag matches Cargo.toml version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          TAG_VERSION="${RELEASE_TAG#v}"
+          CARGO_VERSION=$(python3 -c 'import re; m=re.search(r"^version\s*=\s*\"([^\"]+)\"", open("Cargo.toml").read(), re.M); assert m; print(m.group(1))')
+          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Release tag ($RELEASE_TAG) does not match Cargo.toml version ($CARGO_VERSION)"
+            exit 1
+          fi
+
       - name: Build release binary
         shell: bash
         run: |
@@ -358,17 +370,19 @@ jobs:
           ARM_SHA=$(awk '$2 == "safe-your-eyes-macos-arm64.zip" {print $1}' release-assets/SHA256SUMS.txt)
           INTEL_SHA=$(awk '$2 == "safe-your-eyes-macos-x86_64.zip" {print $1}' release-assets/SHA256SUMS.txt)
           if [ -z "$ARM_SHA" ] || [ -z "$INTEL_SHA" ]; then
-            echo "Missing macOS .zip SHA-256 checksums; skipping Cask update"
-            exit 0
+            echo "::error::Missing macOS .zip SHA-256 checksums for Cask update"
+            exit 1
           fi
-          git fetch origin main
-          git checkout main
-          git pull --ff-only origin main
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN secret is required to update tunglt1810/homebrew-tap"
+            exit 1
+          fi
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tunglt1810/homebrew-tap.git" tap-repo
           VERSION="$VERSION" ARM_SHA="$ARM_SHA" INTEL_SHA="$INTEL_SHA" python3 - <<'PY'
           import os, re
           from pathlib import Path
 
-          cask = Path("Casks/safe-your-eyes.rb")
+          cask = Path("tap-repo/Casks/safe-your-eyes.rb")
           text = cask.read_text(encoding="utf-8")
           for pattern, repl, label in [
               (r'^(\s*version\s+)"[^"]+"', rf'\g<1>"{os.environ["VERSION"]}"', "version"),
@@ -380,23 +394,11 @@ jobs:
                   raise SystemExit(f"Failed to update {label} in {cask}")
           cask.write_text(text, encoding="utf-8")
           PY
-          if ! git diff --quiet Casks/safe-your-eyes.rb; then
+          cd tap-repo
+          if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add Casks/safe-your-eyes.rb
-            git commit -m "chore(cask): update safe-your-eyes to ${VERSION} [skip ci]"
+            git commit -m "chore(cask): update safe-your-eyes to ${VERSION}"
             git push origin main
-          fi
-          if [ -n "$HOMEBREW_TAP_TOKEN" ]; then
-            git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/tunglt1810/homebrew-tap.git" tap-repo
-            mkdir -p tap-repo/Casks
-            cp Casks/safe-your-eyes.rb tap-repo/Casks/safe-your-eyes.rb
-            cd tap-repo
-            if ! git diff --quiet || [ -n "$(git status --porcelain)" ]; then
-              git config user.name "github-actions[bot]"
-              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-              git add Casks/safe-your-eyes.rb
-              git commit -m "chore(cask): update safe-your-eyes to ${VERSION}"
-              git push origin main
-            fi
           fi

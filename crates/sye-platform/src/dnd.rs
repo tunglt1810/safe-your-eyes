@@ -583,7 +583,7 @@ end tell
     }
 
     pub(super) fn query_dnd_context(options: DndQueryOptions) -> DndContext {
-        let on_battery = if options.check_fullscreen {
+        let on_battery = if options.check_battery {
             Command::new("pmset")
                 .args(["-g", "batt"])
                 .output()

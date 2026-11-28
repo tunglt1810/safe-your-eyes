@@ -59,6 +59,11 @@ impl OsAudioPlayer {
             return Ok(());
         }
 
+        #[cfg(target_os = "windows")]
+        if self.players.is_empty() {
+            return play_windows_wav_in_memory(wav_bytes);
+        }
+
         fs::create_dir_all(&self.temp_dir).map_err(|err| PlatformError::Io(err.to_string()))?;
 
         let seq = AUDIO_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -90,6 +95,33 @@ impl OsAudioPlayer {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn play_windows_wav_in_memory(wav_bytes: &[u8]) -> Result<(), PlatformError> {
+    use std::ptr;
+
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_MEMORY, SND_NODEFAULT, SND_SYNC};
+
+    let wav_owned = wav_bytes.to_vec();
+    thread::Builder::new()
+        .name("sye-audio-win32".to_owned())
+        .spawn(move || {
+            // SAFETY: `SND_MEMORY | SND_SYNC` keeps `PlaySoundW` reading `wav_owned`
+            // synchronously on this thread until playback completes, so the buffer stays
+            // live for the entire call. Win32 interprets `pszSound` as raw RIFF WAV bytes
+            // when `SND_MEMORY` is set.
+            #[expect(unsafe_code, reason = "Win32 PlaySoundW in-memory WAV playback")]
+            let _ = unsafe {
+                PlaySoundW(
+                    wav_owned.as_ptr().cast(),
+                    ptr::null_mut(),
+                    SND_MEMORY | SND_SYNC | SND_NODEFAULT,
+                )
+            };
+        })
+        .map(|_| ())
+        .map_err(|err| PlatformError::Io(err.to_string()))
+}
+
 fn default_audio_temp_dir() -> PathBuf {
     #[cfg(unix)]
     {
@@ -109,16 +141,7 @@ const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
 }];
 
 #[cfg(target_os = "windows")]
-const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[PlayerSpec {
-    program: "powershell.exe",
-    args: &[
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-    ],
-}];
+const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[];
 
 #[cfg(all(unix, not(target_os = "macos")))]
 const DEFAULT_PLAYER_SPECS: &[PlayerSpec] = &[
@@ -145,22 +168,7 @@ fn spawn_first_available_player(
     for spec in players {
         let mut cmd = Command::new(spec.program);
         cmd.args(spec.args);
-
-        #[cfg(target_os = "windows")]
-        if spec.program.eq_ignore_ascii_case("powershell.exe") {
-            let escaped = wav_path.to_string_lossy().replace('\'', "''");
-            cmd.arg(format!(
-                "(New-Object Media.SoundPlayer '{escaped}').PlaySync()"
-            ));
-        } else {
-            cmd.arg(wav_path);
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            cmd.arg(wav_path);
-        }
-
+        cmd.arg(wav_path);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

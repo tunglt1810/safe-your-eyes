@@ -85,6 +85,7 @@ pub struct SettingsViewModel {
     pub draft_short_exercise: String,
     pub draft_long_exercise: String,
     pub draft_skip_window: String,
+    pub draft_take_window: String,
     system_autostart: Option<bool>,
 }
 
@@ -112,6 +113,7 @@ impl SettingsViewModel {
             draft_short_exercise: String::new(),
             draft_long_exercise: String::new(),
             draft_skip_window: String::new(),
+            draft_take_window: String::new(),
             system_autostart: None,
         }
     }
@@ -252,6 +254,7 @@ impl SettingsViewModel {
         self.draft_short_exercise.clear();
         self.draft_long_exercise.clear();
         self.draft_skip_window.clear();
+        self.draft_take_window.clear();
     }
 
     #[must_use]
@@ -343,10 +346,31 @@ impl SettingsViewModel {
         Ok(())
     }
 
+    fn window_list(&self, list: WindowList) -> &[String] {
+        match list {
+            WindowList::Skip => &self.config.do_not_disturb.skip_break_windows,
+            WindowList::Take => &self.config.do_not_disturb.take_break_windows,
+        }
+    }
+
     fn window_list_mut(&mut self, list: WindowList) -> &mut Vec<String> {
         match list {
             WindowList::Skip => &mut self.config.do_not_disturb.skip_break_windows,
             WindowList::Take => &mut self.config.do_not_disturb.take_break_windows,
+        }
+    }
+
+    fn draft_window(&self, list: WindowList) -> &str {
+        match list {
+            WindowList::Skip => &self.draft_skip_window,
+            WindowList::Take => &self.draft_take_window,
+        }
+    }
+
+    fn draft_window_mut(&mut self, list: WindowList) -> &mut String {
+        match list {
+            WindowList::Skip => &mut self.draft_skip_window,
+            WindowList::Take => &mut self.draft_take_window,
         }
     }
 
@@ -791,6 +815,98 @@ fn timing_section(
         )
 }
 
+fn unique_keyed_strings<'a>(items: impl Iterator<Item = &'a str>) -> Vec<(usize, String)> {
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    items
+        .map(|raw| {
+            let owned = raw.to_owned();
+            let count = seen.entry(owned.clone()).or_insert(0);
+            let occ = *count;
+            *count += 1;
+            (occ, owned)
+        })
+        .collect()
+}
+
+fn window_rule_list(
+    vm: Signal<SettingsViewModel>,
+    active_locale: Memo<Locale>,
+    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    list: WindowList,
+) -> impl IntoElement {
+    let key_prefix = match list {
+        WindowList::Skip => "skip-win",
+        WindowList::Take => "take-win",
+    };
+    let items = computed(move || {
+        vm.with(|m| unique_keyed_strings(m.window_list(list).iter().map(String::as_str)))
+    });
+    let add_sink = Arc::clone(&outcome_sink);
+
+    view()
+        .gap_2()
+        .child(
+            view()
+                .flex_row()
+                .gap_2()
+                .items_center()
+                .child(view().flex_1().child(cozy_input(
+                    move || {
+                        let copy = ui_text(active_locale.get());
+                        match list {
+                            WindowList::Skip => copy.skip_window_placeholder.to_owned(),
+                            WindowList::Take => copy.take_window_placeholder.to_owned(),
+                        }
+                    },
+                    move || vm.with(|m| m.draft_window(list).to_owned()),
+                    move |s: &str| vm.update(|m| *m.draft_window_mut(list) = s.to_owned()),
+                )))
+                .child(secondary_button(
+                    move || ui_text(active_locale.get()).add_button,
+                    move || {
+                        let _ = apply_with_autosave(vm, &add_sink, |m| {
+                            let pattern = std::mem::take(m.draft_window_mut(list));
+                            if m.add_window_pattern(list, &pattern).is_ok() {
+                                m.autosave().is_ok()
+                            } else {
+                                *m.draft_window_mut(list) = pattern;
+                                false
+                            }
+                        });
+                    },
+                )),
+        )
+        .child(view().gap_2().child(each(
+            items,
+            move |(occ, pattern)| format!("{key_prefix}-{occ}-{pattern}"),
+            move |item, row_idx| {
+                let remove_sink = Arc::clone(&outcome_sink);
+                view()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .rounded(radii::ELEMENT)
+                    .bg(colors::BACKGROUND_MUTED)
+                    .px_3()
+                    .py_2()
+                    .child(
+                        text(move || item.get().1)
+                            .text_sm()
+                            .text_color(colors::TEXT_PRIMARY),
+                    )
+                    .child(destructive_button(
+                        move || ui_text(active_locale.get()).remove_button,
+                        move || {
+                            let idx = row_idx.get_untracked();
+                            let _ = apply_with_autosave(vm, &remove_sink, |m| {
+                                m.remove_window_pattern(list, idx).is_ok() && m.autosave().is_ok()
+                            });
+                        },
+                    ))
+            },
+        )))
+}
+
 fn policies_section(
     vm: Signal<SettingsViewModel>,
     active_locale: Memo<Locale>,
@@ -903,6 +1019,23 @@ fn policies_section(
                 .child(stagger_item(
                     9,
                     animate,
+                    cozy_switch_with_disabled(
+                        move || ui_text(active_locale.get()).postpone_if_active,
+                        move || {
+                            vm.with(|m| {
+                                m.config.smart_pause.enabled
+                                    && m.config.smart_pause.postpone_if_active
+                            })
+                        },
+                        move || vm.with(|m| !m.config.smart_pause.enabled),
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.smart_pause.postpone_if_active = v;
+                        }),
+                    ),
+                ))
+                .child(stagger_item(
+                    10,
+                    animate,
                     cozy_switch(
                         move || ui_text(active_locale.get()).dnd_fullscreen,
                         move || vm.with(|m| m.config.do_not_disturb.enabled),
@@ -912,7 +1045,7 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    10,
+                    11,
                     animate,
                     cozy_switch(
                         move || ui_text(active_locale.get()).pause_while_gaming,
@@ -923,7 +1056,7 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    11,
+                    12,
                     animate,
                     cozy_switch(
                         move || ui_text(active_locale.get()).pause_while_on_battery,
@@ -934,12 +1067,45 @@ fn policies_section(
                     ),
                 )),
         )
-        .child(stagger_item(12, animate, section_divider()))
+        .child(stagger_item(13, animate, section_divider()))
         .child(
             view()
                 .gap_3()
                 .child(stagger_item(
-                    13,
+                    14,
+                    animate,
+                    section_header(
+                        move || ui_text(active_locale.get()).window_rules_title,
+                        move || ui_text(active_locale.get()).window_rules_caption,
+                    ),
+                ))
+                .child(stagger_item(
+                    15,
+                    animate,
+                    window_rule_list(
+                        vm,
+                        active_locale,
+                        Arc::clone(outcome_sink),
+                        WindowList::Skip,
+                    ),
+                ))
+                .child(stagger_item(
+                    16,
+                    animate,
+                    window_rule_list(
+                        vm,
+                        active_locale,
+                        Arc::clone(outcome_sink),
+                        WindowList::Take,
+                    ),
+                )),
+        )
+        .child(stagger_item(17, animate, section_divider()))
+        .child(
+            view()
+                .gap_3()
+                .child(stagger_item(
+                    18,
                     animate,
                     section_header(
                         move || ui_text(active_locale.get()).policies_chime_title,
@@ -947,7 +1113,7 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    14,
+                    19,
                     animate,
                     cozy_switch(
                         move || ui_text(active_locale.get()).pre_break_chime,
@@ -958,7 +1124,7 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    15,
+                    20,
                     animate,
                     cozy_switch(
                         move || ui_text(active_locale.get()).post_break_chime,
@@ -969,7 +1135,7 @@ fn policies_section(
                     ),
                 ))
                 .child(stagger_item(
-                    16,
+                    21,
                     animate,
                     number_field_row(
                         move || ui_text(active_locale.get()).chime_volume,
@@ -1009,9 +1175,7 @@ fn exercise_tier_section(
                 BreakType::Short => &m.config.short_breaks,
                 BreakType::Long => &m.config.long_breaks,
             };
-            list.iter()
-                .map(|spec| spec.name.clone())
-                .collect::<Vec<_>>()
+            unique_keyed_strings(list.iter().map(|spec| spec.name.as_str()))
         })
     });
     let add_sink = Arc::clone(&outcome_sink);
@@ -1073,7 +1237,7 @@ fn exercise_tier_section(
         ))
         .child(view().gap_2().child(each(
             items,
-            move |name| format!("{key_prefix}-{name}"),
+            move |(occ, name)| format!("{key_prefix}-{occ}-{name}"),
             move |item, row_idx| {
                 let rem = initial_remaining.get();
                 let row_animate = rem > 0;
@@ -1095,7 +1259,7 @@ fn exercise_tier_section(
                         .py_2()
                         .child(
                             text(move || {
-                                let raw = item.get();
+                                let raw = item.get().1;
                                 localize_exercise_name(&raw, active_locale.get()).to_owned()
                             })
                             .text_sm()

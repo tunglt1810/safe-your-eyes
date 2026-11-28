@@ -69,13 +69,15 @@ jobs:
       - name: Build release binary
         run: cargo build --release --bin safe-your-eyes
 
-      - name: Run real-OS GUI window smoke E2E (macOS / Windows)
+      - name: Run opaque-box E2E & GUI smoke tests (macOS / Windows)
         if: runner.os != 'Linux'
         shell: bash
         run: |
           if [ "$RUNNER_OS" = "Windows" ]; then
+            python e2e/run_e2e.py --bin target/release/safe-your-eyes.exe --tier all
             python e2e/gui_smoke.py --bin target/release/safe-your-eyes.exe
           else
+            python3 e2e/run_e2e.py --bin target/release/safe-your-eyes --tier all
             python3 e2e/gui_smoke.py --bin target/release/safe-your-eyes
           fi
 

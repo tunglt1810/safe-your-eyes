@@ -370,24 +370,9 @@ impl Config {
     pub fn save_to_path(&self, path: &Path) -> Result<(), ConfigError> {
         self.validate()?;
         let encoded = self.to_toml_string()?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|err| ConfigError::Io {
-                message: err.to_string(),
-            })?;
-        }
-        fs::write(path, encoded).map_err(|err| ConfigError::Io {
+        crate::write_string_atomic(path, &encoded).map_err(|err| ConfigError::Io {
             message: err.to_string(),
         })
-    }
-}
-
-impl std::str::FromStr for Config {
-    type Err = ConfigError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_toml_str(s)
     }
 }
 

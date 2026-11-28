@@ -54,7 +54,7 @@ impl fmt::Display for SemVer {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub latest_version: String,
     pub download_url: String,
@@ -149,33 +149,20 @@ impl UpdateCacheState {
 
     pub fn save_to_path(&self, path: &Path) -> Result<(), UpdateCacheError> {
         let encoded = self.to_toml_string()?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|err| UpdateCacheError::Io {
-                message: err.to_string(),
-            })?;
-        }
-        // The daemon polls this file while Settings writes it, so a reader must never see a partial file.
-        let mut tmp_name = path.as_os_str().to_owned();
-        tmp_name.push(".tmp");
-        let tmp_path = std::path::PathBuf::from(tmp_name);
-        fs::write(&tmp_path, encoded)
-            .and_then(|()| fs::rename(&tmp_path, path))
-            .map_err(|err| UpdateCacheError::Io {
-                message: err.to_string(),
-            })
+        crate::write_string_atomic(path, &encoded).map_err(|err| UpdateCacheError::Io {
+            message: err.to_string(),
+        })
     }
 
     #[must_use]
     pub fn available_update(&self, current_version: &str) -> Option<UpdateInfo> {
-        let latest_raw = self.latest_version.as_deref()?;
-        if !is_newer_version(latest_raw, current_version) {
+        let latest = SemVer::parse_stable(self.latest_version.as_deref()?)?;
+        let current = SemVer::parse_stable(current_version)?;
+        if latest <= current {
             return None;
         }
-        let parsed = SemVer::parse_stable(latest_raw)?;
         Some(UpdateInfo {
-            latest_version: parsed.to_string(),
+            latest_version: latest.to_string(),
             download_url: PUBLIC_DOWNLOAD_URL.to_owned(),
         })
     }

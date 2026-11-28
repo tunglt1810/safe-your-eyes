@@ -1,15 +1,12 @@
 use std::f64::consts::TAU;
 
-use serde::{Deserialize, Serialize};
-
 pub const CHIME_SAMPLE_RATE: u32 = 22_050;
 
 pub const CHIME_CHANNELS: u16 = 1;
 
 pub const CHIME_BITS_PER_SAMPLE: u16 = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChimeKind {
     PreBreak,
     PostBreak,

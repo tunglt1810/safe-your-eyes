@@ -85,7 +85,6 @@ pub struct SettingsViewModel {
     pub draft_short_exercise: String,
     pub draft_long_exercise: String,
     pub draft_skip_window: String,
-    pub draft_take_window: String,
     system_autostart: Option<bool>,
 }
 
@@ -113,7 +112,6 @@ impl SettingsViewModel {
             draft_short_exercise: String::new(),
             draft_long_exercise: String::new(),
             draft_skip_window: String::new(),
-            draft_take_window: String::new(),
             system_autostart: None,
         }
     }
@@ -201,40 +199,37 @@ impl SettingsViewModel {
         }
     }
 
-    pub fn persist_theme(&self) -> Result<(), String> {
+    fn persist_config_field(
+        &self,
+        is_unchanged: impl FnOnce(&Config) -> bool,
+        apply: impl FnOnce(&mut Config),
+    ) -> Result<(), String> {
         let (mut on_disk, load_err) = Config::load_or_default(&self.config_path);
-        if load_err.is_some() {
-            return Ok(());
-        }
-        if on_disk.theme == self.config.theme {
+        if load_err.is_some() || is_unchanged(&on_disk) {
             return Ok(());
         }
         // Keep `autostart` aligned with the OS login-item state seen by the daemon so a
-        // theme-only close neither clobbers OS autostart nor triggers a non-theme reload.
+        // theme/language-only close neither clobbers OS autostart nor triggers a schedule reload.
         if let Some(actual) = self.system_autostart {
             on_disk.autostart = actual;
         }
-        on_disk.theme = self.config.theme;
+        apply(&mut on_disk);
         on_disk
             .save_to_path(&self.config_path)
             .map_err(|err| err.to_string())
     }
 
+    pub fn persist_theme(&self) -> Result<(), String> {
+        let theme = self.config.theme;
+        self.persist_config_field(|cfg| cfg.theme == theme, |cfg| cfg.theme = theme)
+    }
+
     pub fn persist_language(&self) -> Result<(), String> {
-        let (mut on_disk, load_err) = Config::load_or_default(&self.config_path);
-        if load_err.is_some() {
-            return Ok(());
-        }
-        if on_disk.language == self.config.language {
-            return Ok(());
-        }
-        if let Some(actual) = self.system_autostart {
-            on_disk.autostart = actual;
-        }
-        on_disk.language = self.config.language;
-        on_disk
-            .save_to_path(&self.config_path)
-            .map_err(|err| err.to_string())
+        let language = self.config.language;
+        self.persist_config_field(
+            |cfg| cfg.language == language,
+            |cfg| cfg.language = language,
+        )
     }
 
     pub fn validate(&mut self) -> Result<(), String> {
@@ -257,7 +252,6 @@ impl SettingsViewModel {
         self.draft_short_exercise.clear();
         self.draft_long_exercise.clear();
         self.draft_skip_window.clear();
-        self.draft_take_window.clear();
     }
 
     #[must_use]
@@ -452,21 +446,15 @@ pub struct SettingsStatusConfig {
 
 fn format_countdown_pill(snapshot: &StatusSnapshot, locale: Locale) -> Option<CountdownPillState> {
     let copy = ui_text(locale);
-    match snapshot.state {
-        SchedulerState::Quit => None,
-        _ if !snapshot.enabled => Some(CountdownPillState {
+    match (snapshot.enabled, snapshot.state) {
+        (_, SchedulerState::Quit) => None,
+        (false, _) | (true, SchedulerState::Stopped) => Some(CountdownPillState {
             tone: CountdownTone::Disabled,
             label: copy.countdown_disabled.to_owned(),
             time: None,
             accessible_label: copy.countdown_disabled_a11y.to_owned(),
         }),
-        SchedulerState::Stopped => Some(CountdownPillState {
-            tone: CountdownTone::Disabled,
-            label: copy.countdown_disabled.to_owned(),
-            time: None,
-            accessible_label: copy.countdown_disabled_a11y.to_owned(),
-        }),
-        SchedulerState::Waiting => {
+        (true, SchedulerState::Waiting) => {
             let kind = match snapshot.next_break_type {
                 Some(BreakType::Short) => copy.countdown_short,
                 Some(BreakType::Long) => copy.countdown_long,
@@ -483,25 +471,25 @@ fn format_countdown_pill(snapshot: &StatusSnapshot, locale: Locale) -> Option<Co
                 ),
             })
         }
-        SchedulerState::PreBreak => Some(CountdownPillState {
+        (true, SchedulerState::PreBreak) => Some(CountdownPillState {
             tone: CountdownTone::Warning,
             label: copy.countdown_starting.to_owned(),
             time: Some(format_mm_ss(snapshot.seconds_until_next_break)),
             accessible_label: copy.countdown_starting_a11y.to_owned(),
         }),
-        SchedulerState::Break => Some(CountdownPillState {
+        (true, SchedulerState::Break) => Some(CountdownPillState {
             tone: CountdownTone::Break,
             label: copy.countdown_break_active.to_owned(),
             time: None,
             accessible_label: copy.countdown_break_active_a11y.to_owned(),
         }),
-        SchedulerState::Resting => Some(CountdownPillState {
+        (true, SchedulerState::Resting) => Some(CountdownPillState {
             tone: CountdownTone::Paused,
             label: copy.countdown_paused.to_owned(),
             time: None,
             accessible_label: copy.countdown_paused_a11y.to_owned(),
         }),
-        SchedulerState::Start => Some(CountdownPillState {
+        (true, SchedulerState::Start) => Some(CountdownPillState {
             tone: CountdownTone::Disabled,
             label: copy.countdown_initializing.to_owned(),
             time: None,
@@ -604,22 +592,39 @@ fn update_and_autosave(
     let _ = try_update_and_autosave(vm, outcome_sink, mutate);
 }
 
-fn try_update_and_autosave(
+fn apply_with_autosave(
     vm: Signal<SettingsViewModel>,
     outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
-    mutate: impl FnOnce(&mut SettingsViewModel),
+    mutate_and_save: impl FnOnce(&mut SettingsViewModel) -> bool,
 ) -> bool {
     let mut saved = false;
     vm.update(|m| {
-        mutate(m);
-        if m.autosave().is_ok() {
-            saved = true;
-        }
+        saved = mutate_and_save(m);
     });
     if saved {
         crate::store_outcome(outcome_sink, SettingsOutcome::Saved);
     }
     saved
+}
+
+fn try_update_and_autosave(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
+    mutate: impl FnOnce(&mut SettingsViewModel),
+) -> bool {
+    apply_with_autosave(vm, outcome_sink, |m| {
+        mutate(m);
+        m.autosave().is_ok()
+    })
+}
+
+fn autosave_handler<T>(
+    vm: Signal<SettingsViewModel>,
+    outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
+    mutate: impl Fn(&mut SettingsViewModel, T) + 'static,
+) -> impl Fn(T) + 'static {
+    let sink = Arc::clone(outcome_sink);
+    move |v| update_and_autosave(vm, &sink, |m| mutate(m, v))
 }
 
 fn timing_section(
@@ -629,18 +634,6 @@ fn timing_section(
     on_autostart_change: Option<AutostartHook>,
     animate: bool,
 ) -> impl IntoElement {
-    let s1 = Arc::clone(&outcome_sink);
-    let s2 = Arc::clone(&outcome_sink);
-    let s3 = Arc::clone(&outcome_sink);
-    let s4 = Arc::clone(&outcome_sink);
-    let s5 = Arc::clone(&outcome_sink);
-    let s6 = Arc::clone(&outcome_sink);
-    let s7 = Arc::clone(&outcome_sink);
-    let s8 = Arc::clone(&outcome_sink);
-    let s9 = Arc::clone(&outcome_sink);
-    let s10 = Arc::clone(&outcome_sink);
-    let s11 = outcome_sink;
-
     view()
         .gap_5()
         .child(
@@ -661,11 +654,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).short_break_interval,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.short_break_interval_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s1, |m| {
-                                m.config.short_break_interval_secs = v;
-                            });
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.short_break_interval_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -675,11 +666,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).short_break_duration,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.short_break_duration_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s2, |m| {
-                                m.config.short_break_duration_secs = v;
-                            });
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.short_break_duration_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -689,9 +678,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).long_break_interval,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.long_break_interval_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s3, |m| m.config.long_break_interval_secs = v);
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.long_break_interval_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -701,9 +690,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).long_break_duration,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.long_break_duration_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s4, |m| m.config.long_break_duration_secs = v);
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.long_break_duration_secs = v;
+                        }),
                     ),
                 )),
         )
@@ -726,9 +715,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).pre_break_warning,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.pre_break_warning_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s5, |m| m.config.pre_break_warning_secs = v);
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.pre_break_warning_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -738,7 +727,7 @@ fn timing_section(
                         move || ui_text(active_locale.get()).fade_in_duration,
                         move || ui_text(active_locale.get()).unit_ms,
                         move || vm.with(|m| m.config.fade_in_ms),
-                        move |v| update_and_autosave(vm, &s6, |m| m.config.fade_in_ms = v),
+                        autosave_handler(vm, &outcome_sink, |m, v| m.config.fade_in_ms = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -748,9 +737,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).shortcut_unlock_delay,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.shortcut_disable_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s7, |m| m.config.shortcut_disable_secs = v);
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.shortcut_disable_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -760,9 +749,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).postpone_duration,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.postpone_duration_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s8, |m| m.config.postpone_duration_secs = v);
-                        },
+                        autosave_handler(vm, &outcome_sink, |m, v| {
+                            m.config.postpone_duration_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -771,7 +760,7 @@ fn timing_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).randomize_exercise_order,
                         move || vm.with(|m| m.config.random_order),
-                        move |v| update_and_autosave(vm, &s9, |m| m.config.random_order = v),
+                        autosave_handler(vm, &outcome_sink, |m, v| m.config.random_order = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -780,7 +769,7 @@ fn timing_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).persist_session,
                         move || vm.with(|m| m.config.persist_state),
-                        move |v| update_and_autosave(vm, &s10, |m| m.config.persist_state = v),
+                        autosave_handler(vm, &outcome_sink, |m, v| m.config.persist_state = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -790,8 +779,9 @@ fn timing_section(
                         move || ui_text(active_locale.get()).launch_at_login,
                         move || vm.with(|m| m.config.autostart),
                         move |v| {
-                            if try_update_and_autosave(vm, &s11, |m| m.config.autostart = v)
-                                && let Some(cb) = &on_autostart_change
+                            if try_update_and_autosave(vm, &outcome_sink, |m| {
+                                m.config.autostart = v;
+                            }) && let Some(cb) = &on_autostart_change
                             {
                                 cb(v);
                             }
@@ -804,22 +794,9 @@ fn timing_section(
 fn policies_section(
     vm: Signal<SettingsViewModel>,
     active_locale: Memo<Locale>,
-    outcome_sink: Arc<Mutex<Option<SettingsOutcome>>>,
+    outcome_sink: &Arc<Mutex<Option<SettingsOutcome>>>,
     animate: bool,
-) -> impl IntoElement {
-    let s1 = Arc::clone(&outcome_sink);
-    let s2 = Arc::clone(&outcome_sink);
-    let s3 = Arc::clone(&outcome_sink);
-    let s4 = Arc::clone(&outcome_sink);
-    let s5 = Arc::clone(&outcome_sink);
-    let s6 = Arc::clone(&outcome_sink);
-    let s7 = Arc::clone(&outcome_sink);
-    let s8 = Arc::clone(&outcome_sink);
-    let s9 = Arc::clone(&outcome_sink);
-    let s10 = Arc::clone(&outcome_sink);
-    let s11 = Arc::clone(&outcome_sink);
-    let s12 = outcome_sink;
-
+) -> impl IntoElement + use<> {
     view()
         .gap_5()
         .child(
@@ -839,7 +816,7 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).strict_break,
                         move || vm.with(|m| m.config.strict_break),
-                        move |v| update_and_autosave(vm, &s1, |m| m.set_strict_break(v)),
+                        autosave_handler(vm, outcome_sink, SettingsViewModel::set_strict_break),
                     ),
                 ))
                 .child(stagger_item(
@@ -848,7 +825,7 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).allow_postpone,
                         move || vm.with(|m| m.config.allow_postpone),
-                        move |v| update_and_autosave(vm, &s2, |m| m.config.allow_postpone = v),
+                        autosave_handler(vm, outcome_sink, |m, v| m.config.allow_postpone = v),
                     ),
                 ))
                 .child(stagger_item(
@@ -862,7 +839,11 @@ fn policies_section(
                             })
                         },
                         move || vm.with(|m| m.config.strict_break),
-                        move |v| update_and_autosave(vm, &s3, |m| m.set_limit_consecutive_skips(v)),
+                        autosave_handler(
+                            vm,
+                            outcome_sink,
+                            SettingsViewModel::set_limit_consecutive_skips,
+                        ),
                     ),
                 ))
                 .child(stagger_item(
@@ -877,12 +858,10 @@ fn policies_section(
                                 m.config.strict_break || !m.config.limit_consecutive_skips.enabled
                             })
                         },
-                        move |v| {
-                            update_and_autosave(vm, &s4, |m| {
-                                m.config.limit_consecutive_skips.max_skips =
-                                    u32::try_from(v).unwrap_or(u32::MAX);
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.limit_consecutive_skips.max_skips =
+                                u32::try_from(v).unwrap_or(u32::MAX);
+                        }),
                     ),
                 )),
         )
@@ -904,7 +883,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).smart_pause_on_idle,
                         move || vm.with(|m| m.config.smart_pause.enabled),
-                        move |v| update_and_autosave(vm, &s5, |m| m.config.smart_pause.enabled = v),
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.smart_pause.enabled = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -914,11 +895,9 @@ fn policies_section(
                         move || ui_text(active_locale.get()).idle_threshold,
                         move || ui_text(active_locale.get()).unit_secs,
                         move || vm.with(|m| m.config.smart_pause.idle_threshold_secs),
-                        move |v| {
-                            update_and_autosave(vm, &s6, |m| {
-                                m.config.smart_pause.idle_threshold_secs = v;
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.smart_pause.idle_threshold_secs = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -927,9 +906,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).dnd_fullscreen,
                         move || vm.with(|m| m.config.do_not_disturb.enabled),
-                        move |v| {
-                            update_and_autosave(vm, &s7, |m| m.config.do_not_disturb.enabled = v);
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.do_not_disturb.enabled = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -938,11 +917,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).pause_while_gaming,
                         move || vm.with(|m| m.config.do_not_disturb.while_gaming),
-                        move |v| {
-                            update_and_autosave(vm, &s8, |m| {
-                                m.config.do_not_disturb.while_gaming = v;
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.do_not_disturb.while_gaming = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -951,11 +928,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).pause_while_on_battery,
                         move || vm.with(|m| m.config.do_not_disturb.while_on_battery),
-                        move |v| {
-                            update_and_autosave(vm, &s9, |m| {
-                                m.config.do_not_disturb.while_on_battery = v;
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.do_not_disturb.while_on_battery = v;
+                        }),
                     ),
                 )),
         )
@@ -977,9 +952,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).pre_break_chime,
                         move || vm.with(|m| m.config.audible_alert.pre_break),
-                        move |v| {
-                            update_and_autosave(vm, &s10, |m| m.config.audible_alert.pre_break = v);
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.audible_alert.pre_break = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -988,11 +963,9 @@ fn policies_section(
                     cozy_switch(
                         move || ui_text(active_locale.get()).post_break_chime,
                         move || vm.with(|m| m.config.audible_alert.post_break),
-                        move |v| {
-                            update_and_autosave(vm, &s11, |m| {
-                                m.config.audible_alert.post_break = v;
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v| {
+                            m.config.audible_alert.post_break = v;
+                        }),
                     ),
                 ))
                 .child(stagger_item(
@@ -1002,12 +975,9 @@ fn policies_section(
                         move || ui_text(active_locale.get()).chime_volume,
                         move || ui_text(active_locale.get()).unit_volume_range,
                         move || u64::from(vm.with(|m| m.config.audible_alert.volume)),
-                        move |v| {
-                            update_and_autosave(vm, &s12, |m| {
-                                m.config.audible_alert.volume =
-                                    u8::try_from(v.min(100)).unwrap_or(100);
-                            });
-                        },
+                        autosave_handler(vm, outcome_sink, |m, v: u64| {
+                            m.config.audible_alert.volume = u8::try_from(v.min(100)).unwrap_or(100);
+                        }),
                     ),
                 )),
         )
@@ -1089,20 +1059,15 @@ fn exercise_tier_section(
                 .child(secondary_button(
                     move || ui_text(active_locale.get()).add_button,
                     move || {
-                        let mut saved = false;
-                        vm.update(|m| {
+                        let _ = apply_with_autosave(vm, &add_sink, |m| {
                             let name = std::mem::take(m.draft_exercise_mut(kind));
                             if m.add_exercise(kind, &name).is_ok() {
-                                if m.autosave().is_ok() {
-                                    saved = true;
-                                }
+                                m.autosave().is_ok()
                             } else {
                                 *m.draft_exercise_mut(kind) = name;
+                                false
                             }
                         });
-                        if saved {
-                            crate::store_outcome(&add_sink, SettingsOutcome::Saved);
-                        }
                     },
                 )),
         ))
@@ -1140,16 +1105,9 @@ fn exercise_tier_section(
                             move || ui_text(active_locale.get()).remove_button,
                             move || {
                                 let idx = row_idx.get_untracked();
-                                let mut saved = false;
-                                vm.update(|m| {
-                                    if m.remove_exercise(kind, idx).is_ok() && m.autosave().is_ok()
-                                    {
-                                        saved = true;
-                                    }
+                                let _ = apply_with_autosave(vm, &remove_sink, |m| {
+                                    m.remove_exercise(kind, idx).is_ok() && m.autosave().is_ok()
                                 });
-                                if saved {
-                                    crate::store_outcome(&remove_sink, SettingsOutcome::Saved);
-                                }
                             },
                         )),
                 )
@@ -1209,15 +1167,20 @@ fn poll_update_worker(
     state: UpdateUiState,
     quit_on_restart: bool,
 ) {
+    let mut should_quit = false;
     match rx.try_recv() {
+        Err(mpsc::TryRecvError::Empty) => {
+            drop(set_timeout(Duration::from_millis(25), move || {
+                poll_update_worker(rx, state, quit_on_restart);
+            }));
+            return;
+        }
         Ok(UpdateWorkerResult::Check(Ok(Some(info)))) => {
             state.status_msg.set(Some(UpdateStatusMessage::Available(
                 info.latest_version.clone(),
             )));
             state.is_error.set(false);
             state.available.set(Some(info));
-            state.busy.set(false);
-            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Check(Ok(None))) => {
             state.available.set(None);
@@ -1225,16 +1188,12 @@ fn poll_update_worker(
                 env!("CARGO_PKG_VERSION").to_owned(),
             )));
             state.is_error.set(false);
-            state.busy.set(false);
-            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Check(Err(err))) => {
             state
                 .status_msg
                 .set(Some(UpdateStatusMessage::CheckFailed(err)));
             state.is_error.set(true);
-            state.busy.set(false);
-            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::RestartingDaemon))) => {
             state
@@ -1242,11 +1201,7 @@ fn poll_update_worker(
                 .set(Some(UpdateStatusMessage::RestartingDaemon));
             state.is_error.set(false);
             state.available.set(None);
-            state.busy.set(false);
-            state.applying.set(false);
-            if quit_on_restart {
-                quit();
-            }
+            should_quit = quit_on_restart;
         }
         Ok(UpdateWorkerResult::Apply(Ok(ApplyUpdateOutcome::UpdatedStandalone))) => {
             state
@@ -1254,31 +1209,44 @@ fn poll_update_worker(
                 .set(Some(UpdateStatusMessage::UpdatedStandalone));
             state.is_error.set(false);
             state.available.set(None);
-            state.busy.set(false);
-            state.applying.set(false);
         }
         Ok(UpdateWorkerResult::Apply(Err(err))) => {
             state
                 .status_msg
                 .set(Some(UpdateStatusMessage::SelfUpdateFailed(err)));
             state.is_error.set(true);
-            state.busy.set(false);
-            state.applying.set(false);
-        }
-        Err(mpsc::TryRecvError::Empty) => {
-            drop(set_timeout(Duration::from_millis(25), move || {
-                poll_update_worker(rx, state, quit_on_restart);
-            }));
         }
         Err(mpsc::TryRecvError::Disconnected) => {
             state
                 .status_msg
                 .set(Some(UpdateStatusMessage::WorkerDisconnected));
             state.is_error.set(true);
-            state.busy.set(false);
-            state.applying.set(false);
         }
     }
+    state.busy.set(false);
+    state.applying.set(false);
+    if should_quit {
+        quit();
+    }
+}
+
+#[cfg(not(feature = "msstore"))]
+fn spawn_update_worker(
+    thread_name: &'static str,
+    update_ui: UpdateUiState,
+    quit_on_restart: bool,
+    work: impl FnOnce() -> UpdateWorkerResult + Send + 'static,
+) {
+    let (tx, rx) = mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name(thread_name.to_owned())
+        .spawn(move || {
+            let _ = tx.send(work());
+        });
+    let rx = Rc::new(rx);
+    drop(set_timeout(Duration::from_millis(25), move || {
+        poll_update_worker(rx, update_ui, quit_on_restart);
+    }));
 }
 
 #[cfg(not(feature = "msstore"))]
@@ -1304,17 +1272,13 @@ fn start_apply_update(
         .set(Some(UpdateStatusMessage::Downloading(
             info.latest_version.clone(),
         )));
-    let (tx, rx) = mpsc::channel();
     let version = info.latest_version;
-    let _ = std::thread::Builder::new()
-        .name("sye-settings-update".to_owned())
-        .spawn(move || {
-            let _ = tx.send(UpdateWorkerResult::Apply(cb(&version)));
-        });
-    let rx = Rc::new(rx);
-    drop(set_timeout(Duration::from_millis(25), move || {
-        poll_update_worker(rx, update_ui, quit_on_restart);
-    }));
+    spawn_update_worker(
+        "sye-settings-update",
+        update_ui,
+        quit_on_restart,
+        move || UpdateWorkerResult::Apply(cb(&version)),
+    );
     true
 }
 
@@ -1489,28 +1453,8 @@ fn about_section(
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(colors::TEXT_PRIMARY),
                 ))
-                .child(when(
-                    move || update_ui.status_msg.get().is_some() && !update_ui.is_error.get(),
-                    move || {
-                        status_banner(false, move || {
-                            update_ui
-                                .status_msg
-                                .get()
-                                .map_or_else(String::new, |msg| msg.format(active_locale.get()))
-                        })
-                    },
-                ))
-                .child(when(
-                    move || update_ui.status_msg.get().is_some() && update_ui.is_error.get(),
-                    move || {
-                        status_banner(true, move || {
-                            update_ui
-                                .status_msg
-                                .get()
-                                .map_or_else(String::new, |msg| msg.format(active_locale.get()))
-                        })
-                    },
-                ))
+                .child(update_status_banner(false, update_ui, active_locale))
+                .child(update_status_banner(true, update_ui, active_locale))
                 .child(when(
                     move || is_homebrew && update_ui.available.get().is_some(),
                     move || {
@@ -1598,22 +1542,37 @@ fn about_section(
                                 update_ui
                                     .status_msg
                                     .set(Some(UpdateStatusMessage::Checking));
-                                let (tx, rx) = mpsc::channel();
-                                let _ = std::thread::Builder::new()
-                                    .name("sye-settings-check-update".to_owned())
-                                    .spawn(move || {
-                                        let _ = tx.send(UpdateWorkerResult::Check(cb()));
-                                    });
-                                let rx = Rc::new(rx);
-                                drop(set_timeout(Duration::from_millis(25), move || {
-                                    poll_update_worker(rx, update_ui, quit_on_restart);
-                                }));
+                                spawn_update_worker(
+                                    "sye-settings-check-update",
+                                    update_ui,
+                                    quit_on_restart,
+                                    move || UpdateWorkerResult::Check(cb()),
+                                );
                             },
                         )),
                 )),
         )
         .child(stagger_item(4, animate, section_divider()))
         .child(support_section(active_locale, animate, 5))
+}
+
+#[cfg(not(feature = "msstore"))]
+fn update_status_banner(
+    is_error: bool,
+    update_ui: UpdateUiState,
+    active_locale: Memo<Locale>,
+) -> impl IntoElement {
+    when(
+        move || update_ui.status_msg.get().is_some() && update_ui.is_error.get() == is_error,
+        move || {
+            status_banner(is_error, move || {
+                update_ui
+                    .status_msg
+                    .get()
+                    .map_or_else(String::new, |msg| msg.format(active_locale.get()))
+            })
+        },
+    )
 }
 
 fn settings_main_window_options() -> MainWindowOptions {
@@ -1709,14 +1668,7 @@ fn dispatch_theme_transition(
                             }
                         };
                         if let Some((_, _, mode)) = stale {
-                            drop(run_on_main_thread(move || {
-                                if let Some(cb) = sync_timeout {
-                                    cb(mode);
-                                }
-                                if let Some(cb) = cancel_timeout {
-                                    cb();
-                                }
-                            }));
+                            schedule_sync_and_cancel(sync_timeout, cancel_timeout, mode);
                         }
                     },
                 ));
@@ -1739,16 +1691,29 @@ fn dispatch_theme_transition(
             None
         };
         if sync_cb.is_some() || cancel_cb.is_some() {
-            drop(run_on_main_thread(move || {
-                if let Some(cb) = sync_cb {
-                    cb(next_mode);
-                }
-                if let Some(cb) = cancel_cb {
-                    cb();
-                }
-            }));
+            schedule_sync_and_cancel(sync_cb, cancel_cb, next_mode);
         }
     }
+}
+
+fn schedule_sync_and_cancel(
+    sync_cb: Option<ThemeChangeCallback>,
+    cancel_cb: Option<SnapshotCancelCallback>,
+    mode: ThemeMode,
+) {
+    drop(run_on_main_thread(move || {
+        if let Some(cb) = sync_cb {
+            cb(mode);
+        }
+        if let Some(cb) = cancel_cb {
+            cb();
+        }
+    }));
+}
+
+fn fallback_theme_origin() -> [f32; 2] {
+    let win = window_state().map_or_else(window, |s| s.content_bounds.size);
+    [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
 }
 
 #[cfg(test)]
@@ -2195,18 +2160,15 @@ fn build_settings_view_inner(
                             move || active_locale.get(),
                             move || {
                                 let next_lang = vm.with_untracked(|m| m.config.language.next());
-                                let mut saved = false;
-                                vm.update(|m| {
+                                let _ = apply_with_autosave(vm, &lang_sink, |m| {
                                     m.config.language = next_lang;
                                     if m.autosave().is_ok() {
-                                        saved = true;
+                                        true
                                     } else {
                                         let _ = m.persist_language();
+                                        false
                                     }
                                 });
-                                if saved {
-                                    crate::store_outcome(&lang_sink, SettingsOutcome::Saved);
-                                }
                             },
                         ))
                         .child(theme_toggle_button(
@@ -2214,11 +2176,7 @@ fn build_settings_view_inner(
                             move || active_locale.get(),
                             measured_theme_btn_center,
                             move |origin| {
-                                let resolved_origin = origin.unwrap_or_else(|| {
-                                    let win = window_state()
-                                        .map_or_else(window, |s| s.content_bounds.size);
-                                    [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
-                                });
+                                let resolved_origin = origin.unwrap_or_else(fallback_theme_origin);
                                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                                 reveal_origin.set(resolved_origin);
                                 let current_mode =
@@ -2232,18 +2190,15 @@ fn build_settings_view_inner(
                                 let seq = queue_theme(&queued, next_mode);
                                 let apply_theme = move || {
                                     settle_theme(&queued, seq);
-                                    let mut saved = false;
-                                    vm.update(|m| {
+                                    let _ = apply_with_autosave(vm, &sink, |m| {
                                         m.config.theme = next_mode;
                                         if m.autosave().is_ok() {
-                                            saved = true;
+                                            true
                                         } else {
                                             let _ = m.persist_theme();
+                                            false
                                         }
                                     });
-                                    if saved {
-                                        crate::store_outcome(&sink, SettingsOutcome::Saved);
-                                    }
                                     appearance.set(next_appearance);
                                     set_color_scheme(next_appearance);
                                 };
@@ -2299,7 +2254,7 @@ fn build_settings_view_inner(
                         policies_section(
                             vm,
                             active_locale,
-                            Arc::clone(&policies_sink),
+                            &policies_sink,
                             has_switched_tab.get_untracked(),
                         )
                     },
@@ -2360,13 +2315,9 @@ fn build_settings_view_inner(
             move || {
                 let default_mode = ThemeMode::default();
                 let default_appearance = appearance_for_theme_mode(default_mode);
-                let resolved_origin =
-                    measured_theme_btn_center
-                        .get_untracked()
-                        .unwrap_or_else(|| {
-                            let win = window_state().map_or_else(window, |s| s.content_bounds.size);
-                            [(win.width.0 - 60.0).max(0.0), title_bar().top.0 + 32.0]
-                        });
+                let resolved_origin = measured_theme_btn_center
+                    .get_untracked()
+                    .unwrap_or_else(fallback_theme_origin);
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 reveal_origin.set(resolved_origin);
 
@@ -2381,20 +2332,15 @@ fn build_settings_view_inner(
                 let apply_reset = move || {
                     settle_theme(&queued, seq);
                     let mut autostart_changed = None;
-                    let mut saved = false;
-                    vm.update(|m| {
+                    let saved = apply_with_autosave(vm, &sink, |m| {
                         let prev = m.config.autostart;
                         m.reset_to_defaults();
-                        if m.autosave().is_ok() {
-                            saved = true;
-                        }
+                        let ok = m.autosave().is_ok();
                         if m.config.autostart != prev {
                             autostart_changed = Some(m.config.autostart);
                         }
+                        ok
                     });
-                    if saved {
-                        crate::store_outcome(&sink, SettingsOutcome::Saved);
-                    }
                     if saved && let (Some(next), Some(cb)) = (autostart_changed, &autostart_cb) {
                         cb(next);
                     }
@@ -2527,27 +2473,6 @@ fn SettingsRoot() -> impl IntoElement {
                 )
                 .into_element(),
         })
-}
-
-pub fn run_settings(config_path: PathBuf) -> Result<SettingsOutcome, UiError> {
-    run_settings_with_autostart(config_path, None, None)
-}
-
-pub fn run_settings_with_autostart(
-    config_path: PathBuf,
-    system_autostart: Option<bool>,
-    on_autostart_change: Option<AutostartChangeCallback>,
-) -> Result<SettingsOutcome, UiError> {
-    run_settings_with_hooks(
-        config_path,
-        system_autostart,
-        on_autostart_change,
-        ThemeTransitionHooks::default(),
-        SettingsUpdateConfig::default(),
-        SettingsStatusConfig::default(),
-        None,
-        Locale::En,
-    )
 }
 
 #[expect(

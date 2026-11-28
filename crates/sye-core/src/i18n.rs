@@ -42,14 +42,6 @@ pub enum Locale {
 
 impl Locale {
     #[must_use]
-    pub const fn code(self) -> &'static str {
-        match self {
-            Self::En => "en",
-            Self::Vi => "vi",
-        }
-    }
-
-    #[must_use]
     pub fn from_tag(tag: &str) -> Option<Self> {
         let trimmed = tag.trim();
         if trimmed.is_empty() {

@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use sye_core::ipc::MAX_IPC_LINE_BYTES;
-use sye_core::{OverlayLauncher, OverlayOutcome, OverlayRequest, PlatformError};
+use sye_core::{OverlayOutcome, OverlayRequest, PlatformError};
 
 pub const OVERLAY_SHOWN_SIGNAL: &str = r#"{"kind":"shown"}"#;
 const OUTCOME_DRAIN_TIMEOUT: Duration = Duration::from_millis(200);
@@ -79,8 +79,8 @@ pub struct SubprocessOverlayLauncher {
 
 impl SubprocessOverlayLauncher {
     pub fn current_exe() -> Result<Self, PlatformError> {
-        let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
-        let resolved = exe.canonicalize().unwrap_or(exe);
+        let resolved = crate::paths::resolve_current_exe()
+            .map_err(|err| PlatformError::Io(err.to_string()))?;
         Ok(Self::with_command(resolved, Vec::new()))
     }
 
@@ -105,10 +105,8 @@ impl SubprocessOverlayLauncher {
         running.drain_events();
         std::mem::take(&mut running.shown_pending)
     }
-}
 
-impl OverlayLauncher for SubprocessOverlayLauncher {
-    fn launch(&mut self, request: &OverlayRequest) -> Result<(), PlatformError> {
+    pub fn launch(&mut self, request: &OverlayRequest) -> Result<(), PlatformError> {
         self.close()?;
 
         let payload =
@@ -141,7 +139,7 @@ impl OverlayLauncher for SubprocessOverlayLauncher {
         Ok(())
     }
 
-    fn poll_outcome(&mut self) -> Result<Option<OverlayOutcome>, PlatformError> {
+    pub fn poll_outcome(&mut self) -> Result<Option<OverlayOutcome>, PlatformError> {
         let Some(running) = self.running.as_mut() else {
             return Ok(None);
         };
@@ -170,7 +168,7 @@ impl OverlayLauncher for SubprocessOverlayLauncher {
         ))
     }
 
-    fn close(&mut self) -> Result<(), PlatformError> {
+    pub fn close(&mut self) -> Result<(), PlatformError> {
         if let Some(mut running) = self.running.take() {
             let _ = running.child.kill();
             let _ = running.child.wait();

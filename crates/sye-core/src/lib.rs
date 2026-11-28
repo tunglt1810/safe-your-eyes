@@ -1,3 +1,7 @@
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+
 pub mod chime;
 pub mod config;
 pub mod i18n;
@@ -9,6 +13,63 @@ pub mod scheduler;
 pub mod session;
 pub mod traits;
 pub mod update;
+
+/// Shared Cozy design tokens referenced by both `sye-platform` (native banners, theme reveal)
+/// and `sye-ui` (Settings, break overlay).
+pub mod cozy {
+    pub const STANDARD_BEZIER: (f32, f32, f32, f32) = (0.4, 0.0, 0.2, 1.0);
+
+    pub const LIGHT_SURFACE: u32 = 0xFBF1E1;
+    pub const LIGHT_BORDER_EMPHASIZED: u32 = 0xDFCBB5;
+    pub const LIGHT_TEXT_PRIMARY: u32 = 0x261101;
+    pub const LIGHT_TEXT_SECONDARY: u32 = 0x5B4C3B;
+    pub const LIGHT_WARNING_SOFT: u32 = 0xFAE1B5;
+    pub const LIGHT_YELLOW_BORDER: u32 = 0xE5C27D;
+    pub const LIGHT_YELLOW_TEXT: u32 = 0x5E3904;
+    pub const LIGHT_ACCENT: u32 = 0xEF8F63;
+    pub const LIGHT_FOCUS_RING: u32 = 0xA84A24;
+    pub const LIGHT_ON_ACCENT: u32 = 0x261101;
+    pub const LIGHT_TRACK: u32 = 0xE6D2BC;
+
+    pub const DARK_SURFACE: u32 = 0x231D16;
+    pub const DARK_BORDER_EMPHASIZED: u32 = 0x52493F;
+    pub const DARK_TEXT_PRIMARY: u32 = 0xFFFEF7;
+    pub const DARK_TEXT_SECONDARY: u32 = 0xC2B7B1;
+    pub const DARK_WARNING_SOFT: u32 = 0x443A26;
+    pub const DARK_YELLOW_BORDER: u32 = 0xC99A44;
+    pub const DARK_YELLOW_TEXT: u32 = 0xFCE09B;
+    pub const DARK_ACCENT: u32 = 0xEE8F64;
+    pub const DARK_FOCUS_RING: u32 = 0xF2A57E;
+    pub const DARK_ON_ACCENT: u32 = 0x18140E;
+    pub const DARK_TRACK: u32 = 0x30271E;
+}
+
+/// Decodes a 5-byte `(run_len, r, g, b, a)` RLE icon stream generated at build time.
+#[must_use]
+pub fn decode_rle_rgba(encoded: &[u8], expected_len: usize) -> Vec<u8> {
+    let mut pixels = Vec::with_capacity(expected_len);
+    for &[count, r, g, b, a] in encoded.as_chunks::<5>().0 {
+        let rgba = [r, g, b, a];
+        for _ in 0..usize::from(count) {
+            pixels.extend_from_slice(&rgba);
+        }
+    }
+    pixels.resize(expected_len, 0);
+    pixels
+}
+
+pub(crate) fn write_string_atomic(path: &Path, content: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut tmp_name = path.as_os_str().to_owned();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+    fs::write(&tmp_path, content)?;
+    fs::rename(&tmp_path, path)
+}
 
 pub use chime::{
     CHIME_BITS_PER_SAMPLE, CHIME_CHANNELS, CHIME_SAMPLE_RATE, ChimeKind, synthesize_chime_wav,
@@ -34,10 +95,7 @@ pub use scheduler::{
     StatusSnapshot, TraySnapshot,
 };
 pub use session::{SESSION_SCHEMA_VERSION, SessionError, SessionState};
-pub use traits::{
-    AudioPlayer, Clock, DndProvider, DndQueryOptions, FakeClock, IdleProvider, Notifier,
-    OverlayLauncher, PlatformError,
-};
+pub use traits::{Clock, DndQueryOptions, FakeClock, PlatformError};
 pub use update::{
     GITHUB_RELEASE_DOWNLOAD_BASE, GITHUB_RELEASES_API_URL, GITHUB_RELEASES_LATEST_URL,
     HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, SemVer, UPDATE_CACHE_SCHEMA_VERSION,

@@ -48,17 +48,21 @@ fn own_visible_windows() -> Vec<usize> {
     own
 }
 
+#[cfg(windows)]
+pub(crate) fn encode_wide_nul(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
 pub fn take_foreground_for_own_window() {
     #[cfg(target_os = "windows")]
     {
         use windows_sys::Win32::System::Threading::GetCurrentProcessId;
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{INPUT, INPUT_MOUSE, SendInput};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            BringWindowToTop, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow,
-            GetWindowLongW, GetWindowThreadProcessId, SetForegroundWindow, WS_EX_TOOLWINDOW,
+            BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
         };
 
-        // SAFETY: Win32 window queries and activation on HWNDs from `own_visible_windows`.
+        // SAFETY: Win32 window queries and activation on the primary own HWND.
         #[expect(unsafe_code, reason = "Win32 FFI")]
         unsafe {
             let mut fg_pid = 0;
@@ -66,22 +70,14 @@ pub fn take_foreground_for_own_window() {
             if !fg.is_null() {
                 GetWindowThreadProcessId(fg, &mut fg_pid);
             }
-            if fg_pid == GetCurrentProcessId() {
+            let own_pid = GetCurrentProcessId();
+            if fg_pid == own_pid {
                 return;
             }
-            let own = own_visible_windows();
-            let Some(&target) = own
-                .iter()
-                .find(|&&hwnd| {
-                    let hwnd = hwnd as *mut core::ffi::c_void;
-                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE).cast_unsigned();
-                    GetWindow(hwnd, GW_OWNER).is_null() && ex_style & WS_EX_TOOLWINDOW == 0
-                })
-                .or_else(|| own.first())
-            else {
+            let hwnd = crate::app_loop::find_primary_window(own_pid);
+            if hwnd.is_null() {
                 return;
-            };
-            let hwnd = target as *mut core::ffi::c_void;
+            }
             // The Start menu and other shell surfaces hold the foreground lock, so a plain
             // `SetForegroundWindow` fails and Explorer keeps the taskbar above the overlay.
             // Windows lets the process that sent the last input event take the foreground. A

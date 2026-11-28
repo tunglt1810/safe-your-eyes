@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import ctypes.util
 import json
 import os
 import platform
@@ -368,13 +367,8 @@ def verify_settings_window(binary: Path) -> None:
         )
         print(f"PASS settings window visible: {wins}")
         sys_name = platform.system()
-        if sys_name == "Linux":
-            _linux_close_window(wins[0].handle)
-            rc = proc.wait(timeout=10.0)
-            if rc != 0:
-                raise AssertionError(f"Settings exited with {rc}: {_read_log(log_path)}")
-        elif sys_name == "Windows":
-            _windows_close_window(wins[0].handle)
+        if sys_name in ("Linux", "Windows"):
+            close_window(wins[0].handle)
             rc = proc.wait(timeout=10.0)
             if rc != 0:
                 raise AssertionError(f"Settings exited with {rc}: {_read_log(log_path)}")

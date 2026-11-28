@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import signal
 import sys
 import time
@@ -22,6 +21,7 @@ from e2e.harness import (  # noqa: E402
     E2E_TMP_BASE,
     SyeTestEnv,
     _cleanup_all_global,
+    cleanup_run_dir,
     register_run_dir,
     set_keep_tmp_global,
 )
@@ -187,12 +187,7 @@ def main(argv: list[str] | None = None) -> int:
             tier_stats[tier_num] = (passed, failed, errors, tier_dur)
     finally:
         if not args.keep_tmp:
-            shutil.rmtree(run_dir, ignore_errors=True)
-            try:
-                if E2E_TMP_BASE.exists() and not any(E2E_TMP_BASE.iterdir()):
-                    E2E_TMP_BASE.rmdir()
-            except OSError:
-                pass
+            cleanup_run_dir(run_dir)
 
     total_dur = time.monotonic() - suite_start
     total_tests = len(all_outcomes)

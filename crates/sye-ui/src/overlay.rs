@@ -240,9 +240,7 @@ struct OverlayLaunch {
 
 static OVERLAY_LAUNCH: Mutex<Option<OverlayLaunch>> = Mutex::new(None);
 
-fn overlay_main_window_options_for_primary(
-    primary: Option<crate::MonitorRect>,
-) -> MainWindowOptions {
+fn base_overlay_window_attributes(interactive: bool) -> WindowAttributes {
     let mut attrs = WindowAttributes::default();
     attrs.frame = Some(WindowFrameStyle::None);
     attrs.level = Some(WindowLevel::AboveDock);
@@ -252,15 +250,20 @@ fn overlay_main_window_options_for_primary(
     attrs.minimizable = Some(false);
     attrs.maximizable = Some(false);
     attrs.closable = Some(false);
-    attrs.focusable = Some(true);
-    attrs.activate = Some(true);
+    attrs.focusable = Some(interactive);
+    attrs.activate = Some(interactive);
     attrs.close_on_escape = Some(false);
     attrs.close_on_blur = Some(false);
     attrs.close_on_press = Some(false);
-    attrs.taskbar = Some(cfg!(target_os = "windows"));
+    attrs.taskbar = Some(interactive && cfg!(target_os = "windows"));
     attrs.shadow = Some(false);
     attrs.transparent = Some(true);
+    attrs
+}
 
+fn overlay_main_window_options_for_primary(
+    primary: Option<crate::MonitorRect>,
+) -> MainWindowOptions {
     let mut main_window = MainWindowOptions::default();
     if let Some(rect) = primary {
         main_window.default_size = Some(size(px(rect.width), px(rect.height)));
@@ -272,7 +275,7 @@ fn overlay_main_window_options_for_primary(
     {
         main_window.default_mode = Some(nsh_core::desktop::WindowMode::FullScreen);
     }
-    main_window.attributes = attrs;
+    main_window.attributes = base_overlay_window_attributes(true);
     main_window
 }
 
@@ -299,24 +302,7 @@ fn overlay_main_window_options() -> MainWindowOptions {
 }
 
 fn secondary_window_attributes() -> WindowAttributes {
-    let mut attrs = WindowAttributes::default();
-    attrs.frame = Some(WindowFrameStyle::None);
-    attrs.level = Some(WindowLevel::AboveDock);
-    attrs.workspaces = Some(Workspaces::All);
-    attrs.resizable = Some(false);
-    attrs.movable = Some(false);
-    attrs.minimizable = Some(false);
-    attrs.maximizable = Some(false);
-    attrs.closable = Some(false);
-    attrs.close_on_escape = Some(false);
-    attrs.close_on_blur = Some(false);
-    attrs.close_on_press = Some(false);
-    attrs.taskbar = Some(false);
-    attrs.shadow = Some(false);
-    attrs.activate = Some(false);
-    attrs.transparent = Some(true);
-    attrs.focusable = Some(false);
-    attrs
+    base_overlay_window_attributes(false)
 }
 
 const PROGRESS_TRACK_W: f32 = 280.0;
@@ -329,17 +315,19 @@ struct Entrance {
     remaining_scale: AnimatedValue,
 }
 
+fn remaining_scale_for(vm: &OverlayViewModel, reduced: bool) -> f32 {
+    if reduced {
+        vm.remaining_ratio_discrete()
+    } else {
+        vm.remaining_ratio()
+    }
+}
+
 impl Entrance {
     fn new(vm: Signal<OverlayViewModel>) -> Self {
         let reduced = reduce_motion();
-        let (alpha, remaining_scale) = vm.with(|m| {
-            let scale = if reduced {
-                m.remaining_ratio_discrete()
-            } else {
-                m.remaining_ratio()
-            };
-            (m.fade_in_alpha(), scale)
-        });
+        let (alpha, remaining_scale) =
+            vm.with(|m| (m.fade_in_alpha(), remaining_scale_for(m, reduced)));
         let entrance = Self {
             fade: animated_value(alpha),
             card_scale: animated_value(if reduced { 1.0 } else { 0.98 }),
@@ -359,15 +347,10 @@ impl Entrance {
     fn play(&self, vm: Signal<OverlayViewModel>) {
         let reduced = reduce_motion();
         let (alpha, fade_ms, remaining_scale, remaining) = vm.with(|m| {
-            let scale = if reduced {
-                m.remaining_ratio_discrete()
-            } else {
-                m.remaining_ratio()
-            };
             (
                 m.fade_in_alpha(),
                 m.request.fade_in_ms,
-                scale,
+                remaining_scale_for(m, reduced),
                 m.remaining(),
             )
         });
@@ -392,6 +375,36 @@ impl Entrance {
     }
 }
 
+fn overlay_action_button(
+    label: &'static str,
+    disabled: impl Fn() -> bool + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    button()
+        .on_press(on_press)
+        .disabled(disabled)
+        .h(px(40.0))
+        .px_5()
+        .items_center()
+        .justify_center()
+        .rounded(radii::PILL)
+        .bg(colors::OVERLAY_TRACK)
+        .border_1()
+        .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
+        .transition()
+        .duration(crate::theme::motion::CONTROL_MS)
+        .ease_out()
+        .hover(|s| s.opacity(0.9))
+        .active(|s| s.opacity(0.8))
+        .disabled_style(|s| s.opacity(0.4))
+        .child(
+            text(label)
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(colors::OVERLAY_TEXT),
+        )
+}
+
 fn build_overlay_card(
     vm: Signal<OverlayViewModel>,
     entrance: &Entrance,
@@ -413,68 +426,28 @@ fn build_overlay_card(
 
     let mut actions_row = view().flex_row().items_center().justify_center().gap_3();
     if show_postpone {
-        actions_row = actions_row.child(
-            button()
-                .on_press(move || {
-                    vm.update(|m| {
-                        let _ = m.trigger_postpone();
-                    });
-                    finish_postpone();
-                })
-                .disabled(move || vm.with(|m| !m.can_postpone()))
-                .h(px(40.0))
-                .px_5()
-                .items_center()
-                .justify_center()
-                .rounded(radii::PILL)
-                .bg(colors::OVERLAY_TRACK)
-                .border_1()
-                .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
-                .transition()
-                .duration(crate::theme::motion::CONTROL_MS)
-                .ease_out()
-                .hover(|s| s.opacity(0.9))
-                .active(|s| s.opacity(0.8))
-                .disabled_style(|s| s.opacity(0.4))
-                .child(
-                    text(copy.overlay_postpone_button)
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(colors::OVERLAY_TEXT),
-                ),
-        );
+        actions_row = actions_row.child(overlay_action_button(
+            copy.overlay_postpone_button,
+            move || vm.with(|m| !m.can_postpone()),
+            move || {
+                vm.update(|m| {
+                    let _ = m.trigger_postpone();
+                });
+                finish_postpone();
+            },
+        ));
     }
     if show_skip {
-        actions_row = actions_row.child(
-            button()
-                .on_press(move || {
-                    vm.update(|m| {
-                        let _ = m.trigger_skip();
-                    });
-                    finish_skip();
-                })
-                .disabled(move || vm.with(|m| !m.can_skip()))
-                .h(px(40.0))
-                .px_5()
-                .items_center()
-                .justify_center()
-                .rounded(radii::PILL)
-                .bg(colors::OVERLAY_TRACK)
-                .border_1()
-                .border_color(colors::OVERLAY_BORDER_EMPHASIZED)
-                .transition()
-                .duration(crate::theme::motion::CONTROL_MS)
-                .ease_out()
-                .hover(|s| s.opacity(0.9))
-                .active(|s| s.opacity(0.8))
-                .disabled_style(|s| s.opacity(0.4))
-                .child(
-                    text(copy.overlay_skip_button)
-                        .text_sm()
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(colors::OVERLAY_TEXT),
-                ),
-        );
+        actions_row = actions_row.child(overlay_action_button(
+            copy.overlay_skip_button,
+            move || vm.with(|m| !m.can_skip()),
+            move || {
+                vm.update(|m| {
+                    let _ = m.trigger_skip();
+                });
+                finish_skip();
+            },
+        ));
     }
 
     let mut card = view()
@@ -581,6 +554,25 @@ fn build_overlay_card(
     .child(actions_row)
 }
 
+fn primary_display(list: &[nsh_core::desktop::Display]) -> Option<&nsh_core::desktop::Display> {
+    list.iter().find(|d| d.primary).or_else(|| list.first())
+}
+
+fn overlay_canvas(
+    vm: Signal<OverlayViewModel>,
+    entrance: Entrance,
+    finish_if_ready: impl Fn() + Clone + 'static,
+) -> impl IntoElement {
+    view()
+        .flex_1()
+        .bg(colors::OVERLAY_CANVAS)
+        .items_center()
+        .justify_center()
+        .p_6()
+        .bind_opacity(&entrance.fade)
+        .child(build_overlay_card(vm, &entrance, finish_if_ready))
+}
+
 pub(crate) fn build_overlay_view(
     request: OverlayRequest,
     outcome_sink: Arc<Mutex<Option<OverlayOutcome>>>,
@@ -646,25 +638,14 @@ pub(crate) fn build_overlay_view(
         }
         shown.set(true);
         entrance.play(vm);
-        return view()
-            .flex_1()
-            .bg(colors::OVERLAY_CANVAS)
-            .items_center()
-            .justify_center()
-            .p_6()
-            .bind_opacity(&entrance.fade)
-            .child(build_overlay_card(vm, &entrance, finish_if_ready))
-            .into_element();
+        return overlay_canvas(vm, entrance, finish_if_ready).into_element();
     }
 
     set_quit_mode(QuitMode::LastWindowClosed);
 
     let primary_opts = overlay_main_window_options();
     let initial_displays = displays();
-    let initial_primary = initial_displays
-        .iter()
-        .find(|d| d.primary)
-        .or_else(|| initial_displays.first());
+    let initial_primary = primary_display(&initial_displays);
     let overlay_title = ui_text(vm.with(|m| m.request().locale)).overlay_window_title;
     let mut primary_win_el = nsh_core::element::desktop::window()
         .id("overlay-primary")
@@ -701,11 +682,7 @@ pub(crate) fn build_overlay_view(
         let effect_win = main_win.clone();
         effect(move || {
             let disp_list = displays();
-            if let Some(primary) = disp_list
-                .iter()
-                .find(|d| d.primary)
-                .or_else(|| disp_list.first())
-            {
+            if let Some(primary) = primary_display(&disp_list) {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 apply_window_bounds(&effect_win, primary.bounds);
                 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -723,11 +700,7 @@ pub(crate) fn build_overlay_view(
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             {
                 let disp_list = displays();
-                if let Some(primary) = disp_list
-                    .iter()
-                    .find(|d| d.primary)
-                    .or_else(|| disp_list.first())
-                {
+                if let Some(primary) = primary_display(&disp_list) {
                     apply_window_bounds(&focus_win, primary.bounds);
                 }
             }
@@ -741,14 +714,7 @@ pub(crate) fn build_overlay_view(
                 hook();
             }
         }));
-        view()
-            .flex_1()
-            .bg(colors::OVERLAY_CANVAS)
-            .items_center()
-            .justify_center()
-            .p_6()
-            .bind_opacity(&entrance.fade)
-            .child(build_overlay_card(vm, &entrance, finish_primary.clone()))
+        overlay_canvas(vm, entrance, finish_primary.clone())
     });
 
     let secondary_displays = computed(|| {
@@ -807,14 +773,7 @@ pub(crate) fn build_overlay_view(
                             ready.set(true);
                         }));
                     }
-                    view()
-                        .flex_1()
-                        .bg(colors::OVERLAY_CANVAS)
-                        .items_center()
-                        .justify_center()
-                        .p_6()
-                        .bind_opacity(&entrance.fade)
-                        .child(build_overlay_card(vm, &entrance, finish_if_ready.clone()))
+                    overlay_canvas(vm, entrance, finish_if_ready.clone())
                 })
             },
         ))
@@ -841,10 +800,6 @@ fn BreakOverlayRoot() -> impl IntoElement {
             .child(text("Safe Your Eyes").text_color(colors::OVERLAY_TEXT))
             .into_element(),
     }
-}
-
-pub fn run_overlay(request: OverlayRequest) -> Result<OverlayOutcome, UiError> {
-    run_overlay_with_hook(request, None, None)
 }
 
 pub fn run_overlay_with_hook(

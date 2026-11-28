@@ -128,14 +128,12 @@ struct ActiveTray {
 }
 
 pub struct TrayHandle {
-    active: Option<ActiveTray>,
+    active: ActiveTray,
 }
 
 impl fmt::Debug for TrayHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TrayHandle")
-            .field("available", &self.active.is_some())
-            .finish()
+        f.debug_struct("TrayHandle").finish_non_exhaustive()
     }
 }
 
@@ -261,7 +259,7 @@ impl TrayHandle {
         );
 
         let mut handle = Self {
-            active: Some(ActiveTray {
+            active: ActiveTray {
                 #[cfg(target_os = "macos")]
                 menu_timer,
                 #[cfg(target_os = "macos")]
@@ -294,26 +292,14 @@ impl TrayHandle {
                 updating: false,
                 settings_item,
                 quit_item,
-            }),
+            },
         };
         handle.update(initial)?;
         Ok(handle)
     }
 
-    #[must_use]
-    pub const fn unavailable() -> Self {
-        Self { active: None }
-    }
-
-    #[must_use]
-    pub const fn is_available(&self) -> bool {
-        self.active.is_some()
-    }
-
     pub fn set_locale(&mut self, locale: Locale) {
-        let Some(active) = self.active.as_mut() else {
-            return;
-        };
+        let active = &mut self.active;
         if active.locale == locale {
             return;
         }
@@ -347,7 +333,7 @@ impl TrayHandle {
             active.update_item.set_text(labels.update_default);
         }
 
-        if let Some(snapshot) = active.last_snapshot.clone() {
+        if let Some(snapshot) = active.last_snapshot {
             let status_label = format_status_label_localized(&snapshot, locale);
             #[cfg(target_os = "macos")]
             active.menu_timer.update(&snapshot, locale, &status_label);
@@ -360,9 +346,7 @@ impl TrayHandle {
 
     #[cfg(not(feature = "msstore"))]
     pub fn set_available_update(&mut self, version: Option<&str>, updating: bool) {
-        let Some(active) = self.active.as_mut() else {
-            return;
-        };
+        let active = &mut self.active;
         let next_version = version.map(str::to_owned);
         if active.available_update == next_version && active.updating == updating {
             return;
@@ -398,9 +382,7 @@ impl TrayHandle {
     }
 
     pub fn update(&mut self, snapshot: &TraySnapshot) -> Result<(), PlatformError> {
-        let Some(active) = self.active.as_mut() else {
-            return Ok(());
-        };
+        let active = &mut self.active;
         let locale = active.locale;
         #[cfg(target_os = "macos")]
         active
@@ -462,7 +444,7 @@ pub(crate) fn should_apply_snapshot(
     if last_snapshot.as_ref() == Some(next) {
         return false;
     }
-    *last_snapshot = Some(next.clone());
+    *last_snapshot = Some(*next);
     true
 }
 
@@ -472,7 +454,7 @@ pub(crate) fn advance_snapshot_countdown(
     snapshot: &TraySnapshot,
     elapsed_secs: u64,
 ) -> TraySnapshot {
-    let mut live = snapshot.clone();
+    let mut live = *snapshot;
     if live.enabled
         && matches!(
             live.state,
@@ -580,6 +562,9 @@ pub(crate) fn compute_macos_tooltip_origin(
     }
     (x, y)
 }
+
+#[cfg(target_os = "macos")]
+pub(crate) use macos_hover_tooltip::ns_rect_to_screen_rect;
 
 #[cfg(target_os = "macos")]
 #[expect(
@@ -841,7 +826,7 @@ mod macos_hover_tooltip {
         }
     }
 
-    fn ns_rect_to_screen_rect(rect: NSRect) -> ScreenRect {
+    pub(crate) fn ns_rect_to_screen_rect(rect: NSRect) -> ScreenRect {
         ScreenRect {
             x: rect.origin.x,
             y: rect.origin.y,
@@ -914,7 +899,7 @@ mod macos_menu_timer {
             tooltip_panel: SharedTooltipPanel,
         ) -> Self {
             let state = Rc::new(RefCell::new(MacMenuLiveState {
-                snapshot: initial.clone(),
+                snapshot: *initial,
                 locale,
                 updated_at: Instant::now(),
                 last_label: format_status_label_localized(initial, locale),
@@ -956,7 +941,7 @@ mod macos_menu_timer {
 
         pub(super) fn update(&self, snapshot: &TraySnapshot, locale: Locale, label: &str) {
             if let Ok(mut guard) = self.state.try_borrow_mut() {
-                guard.snapshot = snapshot.clone();
+                guard.snapshot = *snapshot;
                 guard.locale = locale;
                 guard.updated_at = Instant::now();
                 guard.last_label.clear();
@@ -1030,17 +1015,16 @@ pub fn format_status_label_localized(snapshot: &TraySnapshot, locale: Locale) ->
             Locale::Vi => "Chưa cấu hình lịch nghỉ".to_owned(),
         };
     }
-    if !snapshot.enabled || snapshot.state == SchedulerState::Stopped {
-        return match (locale, snapshot.disabled_until_unix_secs) {
-            (Locale::En, Some(_)) => "Disabled (timed)".to_owned(),
-            (Locale::En, None) => "Disabled until restart".to_owned(),
-            (Locale::Vi, Some(_)) => "Đang tạm tắt (có hẹn giờ)".to_owned(),
-            (Locale::Vi, None) => "Tắt đến khi khởi động lại".to_owned(),
-        };
-    }
-
-    match snapshot.state {
-        SchedulerState::Waiting => {
+    match (snapshot.enabled, snapshot.state) {
+        (false, _) | (true, SchedulerState::Stopped) => {
+            match (locale, snapshot.disabled_until_unix_secs) {
+                (Locale::En, Some(_)) => "Disabled (timed)".to_owned(),
+                (Locale::En, None) => "Disabled until restart".to_owned(),
+                (Locale::Vi, Some(_)) => "Đang tạm tắt (có hẹn giờ)".to_owned(),
+                (Locale::Vi, None) => "Tắt đến khi khởi động lại".to_owned(),
+            }
+        }
+        (true, SchedulerState::Waiting) => {
             let mins = snapshot.seconds_until_next_break / 60;
             let secs = snapshot.seconds_until_next_break % 60;
             match locale {
@@ -1062,7 +1046,7 @@ pub fn format_status_label_localized(snapshot: &TraySnapshot, locale: Locale) ->
                 }
             }
         }
-        SchedulerState::PreBreak => {
+        (true, SchedulerState::PreBreak) => {
             let mins = snapshot.seconds_until_next_break / 60;
             let secs = snapshot.seconds_until_next_break % 60;
             match locale {
@@ -1070,23 +1054,19 @@ pub fn format_status_label_localized(snapshot: &TraySnapshot, locale: Locale) ->
                 Locale::Vi => format!("Sắp nghỉ sau {mins:02}:{secs:02}"),
             }
         }
-        SchedulerState::Break => match locale {
+        (true, SchedulerState::Break) => match locale {
             Locale::En => "Break in progress".to_owned(),
             Locale::Vi => "Đang trong giờ nghỉ".to_owned(),
         },
-        SchedulerState::Resting => match locale {
+        (true, SchedulerState::Resting) => match locale {
             Locale::En => "Paused (idle/resting)".to_owned(),
             Locale::Vi => "Tạm dừng (đang nghỉ)".to_owned(),
         },
-        SchedulerState::Start => match locale {
+        (true, SchedulerState::Start) => match locale {
             Locale::En => "Initializing".to_owned(),
             Locale::Vi => "Đang khởi tạo".to_owned(),
         },
-        SchedulerState::Stopped => match locale {
-            Locale::En => "Disabled".to_owned(),
-            Locale::Vi => "Đang tắt".to_owned(),
-        },
-        SchedulerState::Quit => match locale {
+        (true, SchedulerState::Quit) => match locale {
             Locale::En => "Quitting...".to_owned(),
             Locale::Vi => "Đang thoát...".to_owned(),
         },
@@ -1135,22 +1115,14 @@ pub fn render_tray_icon_rgba(state: TrayIconState, template: bool) -> (Vec<u8>, 
         (true, TrayIconState::PreBreak) => TEMPLATE_PRE_BREAK_RLE,
         (true, TrayIconState::Disabled) => TEMPLATE_DISABLED_RLE,
     };
-    (decode_rle_rgba(encoded), ICON_SIZE, ICON_SIZE)
+    (
+        sye_core::decode_rle_rgba(encoded, ICON_RGBA_LEN),
+        ICON_SIZE,
+        ICON_SIZE,
+    )
 }
 
 const ICON_RGBA_LEN: usize = (ICON_SIZE as usize) * (ICON_SIZE as usize) * 4;
-
-fn decode_rle_rgba(encoded: &[u8]) -> Vec<u8> {
-    let mut pixels = Vec::with_capacity(ICON_RGBA_LEN);
-    for &[count, r, g, b, a] in encoded.as_chunks::<5>().0 {
-        let rgba = [r, g, b, a];
-        for _ in 0..usize::from(count) {
-            pixels.extend_from_slice(&rgba);
-        }
-    }
-    pixels.resize(ICON_RGBA_LEN, 0);
-    pixels
-}
 
 #[cfg(test)]
 mod tests {
@@ -1165,10 +1137,8 @@ mod tests {
             has_breaks: true,
             menu_locked: false,
             next_break_type: Some(BreakType::Short),
-            next_break_name: Some("Blink".to_owned()),
             seconds_until_next_break: 890,
             disabled_until_unix_secs: None,
-            consecutive_skips: 0,
         }
     }
 
@@ -1392,14 +1362,6 @@ mod tests {
                 "Đang cập nhật lên v0.5.0..."
             );
         }
-    }
-
-    #[test]
-    fn unavailable_tray_handle_is_noop() -> Result<(), Box<dyn std::error::Error>> {
-        let mut tray = TrayHandle::unavailable();
-        assert!(!tray.is_available());
-        tray.update(&sample_snapshot(SchedulerState::Waiting, true))?;
-        Ok(())
     }
 
     #[test]

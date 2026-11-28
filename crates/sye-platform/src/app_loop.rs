@@ -9,12 +9,17 @@ const MAX_EVENTS_PER_PUMP: usize = 64;
 pub struct PlatformEventLoop {
     #[cfg(target_os = "macos")]
     inner: Option<macos_impl::MacOsEventLoop>,
-    #[cfg(not(target_os = "macos"))]
-    _event_tx: Sender<TrayEvent>,
 }
 
 impl PlatformEventLoop {
     #[must_use]
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(
+            clippy::needless_pass_by_value,
+            reason = "macOS event loop takes ownership of event_tx"
+        )
+    )]
     pub fn new(event_tx: Sender<TrayEvent>) -> Self {
         #[cfg(target_os = "macos")]
         {
@@ -24,9 +29,8 @@ impl PlatformEventLoop {
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Self {
-                _event_tx: event_tx,
-            }
+            let _ = event_tx;
+            Self {}
         }
     }
 
@@ -338,6 +342,11 @@ const fn classify_child_window(
 }
 
 #[cfg(target_os = "windows")]
+pub(crate) fn find_primary_window(target_pid: u32) -> *mut core::ffi::c_void {
+    windows_impl::find_child_window(target_pid)
+}
+
+#[cfg(target_os = "windows")]
 mod windows_impl {
     use std::mem::MaybeUninit;
     use std::ptr;
@@ -395,7 +404,7 @@ mod windows_impl {
         }
     }
 
-    fn find_child_window(target_pid: u32) -> HWND {
+    pub(super) fn find_child_window(target_pid: u32) -> HWND {
         let mut state = FindWindowState {
             target_pid,
             primary: ptr::null_mut(),

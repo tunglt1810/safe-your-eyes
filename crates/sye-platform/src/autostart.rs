@@ -193,12 +193,11 @@ fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
 pub fn query_system_autostart(custom_config: Option<&Path>) -> Option<bool> {
     #[cfg(target_os = "macos")]
     if !has_custom_config_override(custom_config)
-        && let Ok(exe) = std::env::current_exe()
+        && let Ok(resolved) = crate::paths::resolve_current_exe()
     {
         if AutostartManager::system_default().is_ok_and(|m| m.is_enabled()) {
             return None;
         }
-        let resolved = exe.canonicalize().unwrap_or(exe);
         if is_macos_app_bundle_executable(&resolved) {
             return macos_login_item::query_status();
         }
@@ -233,8 +232,9 @@ pub fn sync_system_autostart(
     }
 
     let mgr = AutostartManager::system_default()?;
-    let exe = std::env::current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
-    let resolved_exe = strip_windows_verbatim_prefix(&exe.canonicalize().unwrap_or(exe));
+    let resolved =
+        crate::paths::resolve_current_exe().map_err(|err| PlatformError::Io(err.to_string()))?;
+    let resolved_exe = strip_windows_verbatim_prefix(&resolved);
 
     #[cfg(target_os = "macos")]
     if !custom_cfg && is_macos_app_bundle_executable(&resolved_exe) {
@@ -256,10 +256,7 @@ pub fn sync_system_autostart(
     }
     #[cfg(not(target_os = "windows"))]
     {
-        if !enabled {
-            return mgr.disable();
-        }
-        mgr.enable(&entry)
+        mgr.sync(enabled, &entry)
     }
 }
 
@@ -376,9 +373,7 @@ mod windows_run_key {
         r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     const VALUE_NAME: &str = "Safe Your Eyes";
 
-    fn to_wide(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
+    use crate::console::encode_wide_nul as to_wide;
 
     fn delete_value_if_present(subkey: &str, value_name: &str) -> Result<(), PlatformError> {
         let subkey_w = to_wide(subkey);

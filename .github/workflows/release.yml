@@ -365,40 +365,20 @@ jobs:
           git checkout main
           git pull --ff-only origin main
           VERSION="$VERSION" ARM_SHA="$ARM_SHA" INTEL_SHA="$INTEL_SHA" python3 - <<'PY'
-          import os, textwrap
+          import os, re
           from pathlib import Path
 
-          content = textwrap.dedent(f'''\
-            cask "safe-your-eyes" do
-              arch arm: "arm64", intel: "x86_64"
-
-              version "{os.environ["VERSION"]}"
-              sha256 arm:   "{os.environ["ARM_SHA"]}",
-                     intel: "{os.environ["INTEL_SHA"]}"
-
-              url "https://github.com/tunglt1810/safe-your-eyes/releases/download/v#{{version}}/safe-your-eyes-macos-#{{arch}}.zip"
-              name "Safe Your Eyes"
-              desc "Lightweight cross-platform Rust eye-protection desktop app"
-              homepage "https://tunglt1810.github.io/safe-your-eyes/"
-
-              app "Safe Your Eyes.app"
-              binary "#{{appdir}}/Safe Your Eyes.app/Contents/MacOS/safe-your-eyes"
-
-              postflight_steps do
-                run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{{{appdir}}}}/Safe Your Eyes.app"]
-              end
-
-              uninstall quit: "io.github.safeyoureyes.SafeYourEyes"
-
-              zap trash: [
-                "~/Library/Application Support/safe-your-eyes",
-                "~/Library/Caches/safe-your-eyes",
-                "~/Library/LaunchAgents/io.github.safeyoureyes.SafeYourEyes.plist",
-              ]
-            end
-          ''')
-          Path("Casks").mkdir(exist_ok=True)
-          Path("Casks/safe-your-eyes.rb").write_text(content, encoding="utf-8")
+          cask = Path("Casks/safe-your-eyes.rb")
+          text = cask.read_text(encoding="utf-8")
+          for pattern, repl, label in [
+              (r'^(\s*version\s+)"[^"]+"', rf'\1"{os.environ["VERSION"]}"', "version"),
+              (r'^(\s*sha256\s+arm:\s+)"[^"]+"', rf'\1"{os.environ["ARM_SHA"]}"', "arm sha256"),
+              (r'^(\s*intel:\s+)"[^"]+"', rf'\1"{os.environ["INTEL_SHA"]}"', "intel sha256"),
+          ]:
+              text, count = re.subn(pattern, repl, text, count=1, flags=re.MULTILINE)
+              if count != 1:
+                  raise SystemExit(f"Failed to update {label} in {cask}")
+          cask.write_text(text, encoding="utf-8")
           PY
           if ! git diff --quiet Casks/safe-your-eyes.rb; then
             git config user.name "github-actions[bot]"

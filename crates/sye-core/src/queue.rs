@@ -1,9 +1,7 @@
-use serde::{Deserialize, Serialize};
-
 use crate::config::{BreakSpec, BreakType, Config};
 use crate::rng::SplitMix64;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedBreak {
     pub break_type: BreakType,
     pub name: String,
@@ -108,16 +106,6 @@ impl BreakQueue {
     }
 
     #[must_use]
-    pub const fn short_index(&self) -> usize {
-        self.short_index
-    }
-
-    #[must_use]
-    pub const fn long_index(&self) -> usize {
-        self.long_index
-    }
-
-    #[must_use]
     pub fn persisted_short_index(&self) -> usize {
         persisted_index(
             self.short_index,
@@ -154,14 +142,6 @@ impl BreakQueue {
             .map(|b| b.duration_secs)
     }
 
-    #[must_use]
-    pub const fn has_break_type(&self, kind: BreakType) -> bool {
-        match kind {
-            BreakType::Short => !self.short_breaks.is_empty(),
-            BreakType::Long => !self.long_breaks.is_empty(),
-        }
-    }
-
     /// Never call this on postpone.
     pub fn advance(&mut self) -> &QueuedBreak {
         if !self.long_breaks.is_empty() {
@@ -186,35 +166,27 @@ impl BreakQueue {
     }
 
     pub fn select_manual(&mut self, kind: Option<BreakType>) -> Option<QueuedBreak> {
-        match kind {
-            None => Some(self.current.clone()),
-            Some(BreakType::Short) => {
-                if self.short_breaks.is_empty() {
-                    return None;
-                }
-                if self.current.spec.break_type == BreakType::Short {
-                    return Some(self.current.clone());
-                }
-                let spec = self.take_next_short();
-                let wait_secs = spec.interval_secs;
-                self.current = QueuedBreak { spec, wait_secs };
-                self.manual_short_override = true;
-                Some(self.current.clone())
-            }
-            Some(BreakType::Long) => {
-                if self.long_breaks.is_empty() {
-                    return None;
-                }
-                if self.current.spec.break_type == BreakType::Long {
-                    return Some(self.current.clone());
-                }
-                let spec = self.take_next_long();
-                let wait_secs = spec.interval_secs;
-                self.current = QueuedBreak { spec, wait_secs };
-                self.manual_short_override = false;
-                Some(self.current.clone())
-            }
+        let Some(target_kind) = kind else {
+            return Some(self.current.clone());
+        };
+        let empty = match target_kind {
+            BreakType::Short => self.short_breaks.is_empty(),
+            BreakType::Long => self.long_breaks.is_empty(),
+        };
+        if empty {
+            return None;
         }
+        if self.current.spec.break_type == target_kind {
+            return Some(self.current.clone());
+        }
+        let spec = match target_kind {
+            BreakType::Short => self.take_next_short(),
+            BreakType::Long => self.take_next_long(),
+        };
+        let wait_secs = spec.interval_secs;
+        self.current = QueuedBreak { spec, wait_secs };
+        self.manual_short_override = target_kind == BreakType::Short;
+        Some(self.current.clone())
     }
 
     pub fn skip_long_break(&mut self) {

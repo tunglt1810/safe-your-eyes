@@ -8,7 +8,9 @@ use std::time::Instant;
 
 #[cfg(all(unix, not(target_os = "macos")))]
 use notify_rust::{Hint, Notification, Timeout};
-use sye_core::{BreakType, Locale, Notifier, PlatformError, ThemeMode, localize_exercise_name};
+#[cfg(any(target_os = "macos", windows, test))]
+use sye_core::cozy;
+use sye_core::{BreakType, Locale, PlatformError, ThemeMode, localize_exercise_name};
 
 #[cfg(all(unix, not(target_os = "macos")))]
 const APP_NAME: &str = "Safe Your Eyes";
@@ -61,6 +63,23 @@ const PRE_BREAK_URGENT_SECS: u64 = 3;
 #[cfg(any(target_os = "macos", windows, test))]
 const PROGRESS_DRIFT_TOLERANCE_SECS: f64 = 1.25;
 
+#[cfg(any(target_os = "macos", windows))]
+mod banner_layout {
+    pub(crate) const BANNER_WIDTH: i32 = 368;
+    pub(crate) const MIN_NOTICE_HEIGHT: i32 = 68;
+    pub(crate) const PAD_X: i32 = 16;
+    pub(crate) const PAD_Y: i32 = 12;
+    pub(crate) const ICON_SIZE: i32 = 36;
+    pub(crate) const ICON_GAP: i32 = 12;
+    pub(crate) const TEXT_X: i32 = PAD_X + ICON_SIZE + ICON_GAP;
+    pub(crate) const LINE_GAP: i32 = 4;
+    pub(crate) const BADGE_WIDTH: i32 = 64;
+    pub(crate) const BADGE_HEIGHT: i32 = 32;
+    pub(crate) const BADGE_GAP: i32 = 12;
+    pub(crate) const PROGRESS_H: i32 = 4;
+    pub(crate) const PROGRESS_GAP: i32 = 12;
+}
+
 // Cozy v0.2.0 motion tokens (`tunglt1810/cozy`: `tokens/cozy.tokens.json`).
 #[cfg(any(target_os = "macos", test))]
 const COZY_EASE_OUT: (f32, f32, f32, f32) = (0.22, 1.0, 0.36, 1.0);
@@ -89,34 +108,34 @@ pub(crate) struct BannerPalette {
 
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const COZY_LIGHT_PALETTE: BannerPalette = BannerPalette {
-    surface: 0xFBF1E1,
-    border: 0xDFCBB5,
-    title: 0x261101,
-    body: 0x5B4C3B,
-    badge_bg: 0xFAE1B5,
-    badge_border: 0xE5C27D,
-    badge_text: 0x5E3904,
-    urgent_bg: 0xEF8F63,
-    urgent_border: 0xA84A24,
-    urgent_text: 0x261101,
-    track: 0xE6D2BC,
-    fill: 0xEF8F63,
+    surface: cozy::LIGHT_SURFACE,
+    border: cozy::LIGHT_BORDER_EMPHASIZED,
+    title: cozy::LIGHT_TEXT_PRIMARY,
+    body: cozy::LIGHT_TEXT_SECONDARY,
+    badge_bg: cozy::LIGHT_WARNING_SOFT,
+    badge_border: cozy::LIGHT_YELLOW_BORDER,
+    badge_text: cozy::LIGHT_YELLOW_TEXT,
+    urgent_bg: cozy::LIGHT_ACCENT,
+    urgent_border: cozy::LIGHT_FOCUS_RING,
+    urgent_text: cozy::LIGHT_ON_ACCENT,
+    track: cozy::LIGHT_TRACK,
+    fill: cozy::LIGHT_ACCENT,
 };
 
 #[cfg(any(target_os = "macos", windows, test))]
 pub(crate) const COZY_DARK_PALETTE: BannerPalette = BannerPalette {
-    surface: 0x231D16,
-    border: 0x52493F,
-    title: 0xFFFEF7,
-    body: 0xC2B7B1,
-    badge_bg: 0x443A26,
-    badge_border: 0xC99A44,
-    badge_text: 0xFCE09B,
-    urgent_bg: 0xEE8F64,
-    urgent_border: 0xF2A57E,
-    urgent_text: 0x18140E,
-    track: 0x30271E,
-    fill: 0xEE8F64,
+    surface: cozy::DARK_SURFACE,
+    border: cozy::DARK_BORDER_EMPHASIZED,
+    title: cozy::DARK_TEXT_PRIMARY,
+    body: cozy::DARK_TEXT_SECONDARY,
+    badge_bg: cozy::DARK_WARNING_SOFT,
+    badge_border: cozy::DARK_YELLOW_BORDER,
+    badge_text: cozy::DARK_YELLOW_TEXT,
+    urgent_bg: cozy::DARK_ACCENT,
+    urgent_border: cozy::DARK_FOCUS_RING,
+    urgent_text: cozy::DARK_ON_ACCENT,
+    track: cozy::DARK_TRACK,
+    fill: cozy::DARK_ACCENT,
 };
 
 #[cfg(any(target_os = "macos", windows, test))]
@@ -237,6 +256,25 @@ impl ProgressTimeline {
         } else {
             self.last_remaining_secs = countdown.remaining_secs;
             false
+        }
+    }
+
+    pub(crate) fn update_or_restart(
+        slot: &mut Option<Self>,
+        now: Instant,
+        countdown: PreBreakCountdown,
+        force_restart: bool,
+    ) -> bool {
+        if force_restart {
+            *slot = Some(Self::start(now, countdown));
+            return true;
+        }
+        match slot.as_mut() {
+            Some(timeline) => timeline.sync_or_restart(now, countdown),
+            None => {
+                *slot = Some(Self::start(now, countdown));
+                true
+            }
         }
     }
 }
@@ -370,22 +408,16 @@ impl Default for OsNotifier {
     }
 }
 
-#[must_use]
-pub fn format_pre_break_notification_localized(
+fn pre_break_copy_parts(
     break_type: BreakType,
     title: &str,
-    warning_secs: u64,
     locale: Locale,
-) -> (String, String) {
+) -> (&'static str, String) {
     let kind_label = match (locale, break_type) {
         (Locale::En, BreakType::Short) => "Short break",
         (Locale::En, BreakType::Long) => "Long break",
         (Locale::Vi, BreakType::Short) => "Nghỉ ngắn",
         (Locale::Vi, BreakType::Long) => "Nghỉ dài",
-    };
-    let summary = match locale {
-        Locale::En => format!("Safe Your Eyes — {kind_label} in {warning_secs}s"),
-        Locale::Vi => format!("Safe Your Eyes — {kind_label} sau {warning_secs} giây"),
     };
     let trimmed = title.trim();
     let body = if trimmed.is_empty() {
@@ -395,6 +427,21 @@ pub fn format_pre_break_notification_localized(
         }
     } else {
         localize_exercise_name(trimmed, locale).to_owned()
+    };
+    (kind_label, body)
+}
+
+#[must_use]
+pub fn format_pre_break_notification_localized(
+    break_type: BreakType,
+    title: &str,
+    warning_secs: u64,
+    locale: Locale,
+) -> (String, String) {
+    let (kind_label, body) = pre_break_copy_parts(break_type, title, locale);
+    let summary = match locale {
+        Locale::En => format!("Safe Your Eyes — {kind_label} in {warning_secs}s"),
+        Locale::Vi => format!("Safe Your Eyes — {kind_label} sau {warning_secs} giây"),
     };
     (summary, body)
 }
@@ -419,21 +466,7 @@ pub(crate) fn format_pre_break_banner_copy_localized(
     title: &str,
     locale: Locale,
 ) -> (String, String, String) {
-    let kind_label = match (locale, break_type) {
-        (Locale::En, BreakType::Short) => "Short break",
-        (Locale::En, BreakType::Long) => "Long break",
-        (Locale::Vi, BreakType::Short) => "Nghỉ ngắn",
-        (Locale::Vi, BreakType::Long) => "Nghỉ dài",
-    };
-    let trimmed = title.trim();
-    let body = if trimmed.is_empty() {
-        match locale {
-            Locale::En => "Prepare to rest your eyes.".to_owned(),
-            Locale::Vi => "Chuẩn bị cho mắt nghỉ ngơi.".to_owned(),
-        }
-    } else {
-        localize_exercise_name(trimmed, locale).to_owned()
-    };
+    let (kind_label, body) = pre_break_copy_parts(break_type, title, locale);
     // The label is set once per banner, so it must not carry a countdown number that goes stale.
     let accessible = match locale {
         Locale::En => format!("Safe Your Eyes: {kind_label} starting soon. {body}"),
@@ -481,8 +514,8 @@ pub(crate) fn compute_macos_banner_origin(
     (max_x.round(), max_y.round())
 }
 
-impl Notifier for OsNotifier {
-    fn show_pre_break(
+impl OsNotifier {
+    pub fn show_pre_break(
         &self,
         break_type: BreakType,
         title: &str,
@@ -581,7 +614,7 @@ impl Notifier for OsNotifier {
         }
     }
 
-    fn dismiss(&self) -> Result<(), PlatformError> {
+    pub fn dismiss(&self) -> Result<(), PlatformError> {
         if !self.enabled {
             return Ok(());
         }
@@ -631,41 +664,42 @@ mod macos_impl {
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_core_graphics::{CGMutablePath, CGPath};
     use objc2_foundation::{
-        NSData, NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString, NSUserDefaults, ns_string,
+        NSData, NSNumber, NSObject, NSPoint, NSRect, NSSize, NSString, ns_string,
     };
     use objc2_quartz_core::{
         CAAnimation, CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction,
-        CATransaction, kCACornerCurveContinuous, kCAMediaTimingFunctionLinear,
+        kCACornerCurveContinuous, kCAMediaTimingFunctionLinear,
     };
     use sye_core::{PlatformError, ThemeMode};
 
+    use super::banner_layout as layout;
     use super::{
         BannerPalette, COZY_EASE_OUT, COZY_ENTER_DURATION_SECS, COZY_FAST_DURATION_SECS,
         PreBreakCountdown, ProgressTimeline, compute_macos_banner_origin, resolve_dark_mode,
     };
-    use crate::tray::ScreenRect;
+    use crate::theme_reveal::{quiet_ca, system_prefers_dark};
+    use crate::tray::{ScreenRect, ns_rect_to_screen_rect};
 
     const APP_ICON_PNG: &[u8] =
         include_bytes!("../../../assets/icons/hicolor/128x128/apps/safe-your-eyes.png");
-    const BANNER_WIDTH: f64 = 368.0;
-    const MIN_NOTICE_HEIGHT: f64 = 68.0;
+    const BANNER_WIDTH: f64 = layout::BANNER_WIDTH as f64;
+    const MIN_NOTICE_HEIGHT: f64 = layout::MIN_NOTICE_HEIGHT as f64;
     const CORNER_RADIUS: f64 = 16.0;
     const SHADOW_PAD_X: f64 = 16.0;
     const SHADOW_PAD_TOP: f64 = 12.0;
     const SHADOW_PAD_BOTTOM: f64 = 24.0;
     const SHADOW_RADIUS: f64 = 8.0;
     const SHADOW_OFFSET_Y: f64 = -4.0;
-    const PAD_X: f64 = 16.0;
-    const PAD_Y: f64 = 12.0;
-    const ICON_SIZE: f64 = 36.0;
-    const ICON_GAP: f64 = 12.0;
-    const TEXT_X: f64 = PAD_X + ICON_SIZE + ICON_GAP;
-    const LINE_GAP: f64 = 4.0;
-    const BADGE_WIDTH: f64 = 64.0;
-    const BADGE_HEIGHT: f64 = 32.0;
-    const BADGE_GAP: f64 = 12.0;
-    const PROGRESS_H: f64 = 4.0;
-    const PROGRESS_GAP: f64 = 12.0;
+    const PAD_X: f64 = layout::PAD_X as f64;
+    const PAD_Y: f64 = layout::PAD_Y as f64;
+    const ICON_SIZE: f64 = layout::ICON_SIZE as f64;
+    const TEXT_X: f64 = layout::TEXT_X as f64;
+    const LINE_GAP: f64 = layout::LINE_GAP as f64;
+    const BADGE_WIDTH: f64 = layout::BADGE_WIDTH as f64;
+    const BADGE_HEIGHT: f64 = layout::BADGE_HEIGHT as f64;
+    const BADGE_GAP: f64 = layout::BADGE_GAP as f64;
+    const PROGRESS_H: f64 = layout::PROGRESS_H as f64;
+    const PROGRESS_GAP: f64 = layout::PROGRESS_GAP as f64;
     const PROGRESS_TRACK_WIDTH: f64 = BANNER_WIDTH - PAD_X * 2.0;
     const FULL_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_X;
     const COUNTDOWN_TEXT_WIDTH: f64 = BANNER_WIDTH - TEXT_X - PAD_X - BADGE_GAP - BADGE_WIDTH;
@@ -675,13 +709,6 @@ mod macos_impl {
 
     thread_local! {
         static BANNER: RefCell<Option<PreBreakBanner>> = const { RefCell::new(None) };
-    }
-
-    fn system_prefers_dark() -> bool {
-        let defaults = NSUserDefaults::standardUserDefaults();
-        defaults
-            .stringForKey(ns_string!("AppleInterfaceStyle"))
-            .is_some_and(|val| val.isEqualToString(ns_string!("Dark")))
     }
 
     fn system_reduce_motion() -> bool {
@@ -702,13 +729,6 @@ mod macos_impl {
     fn cozy_ease_out() -> Retained<CAMediaTimingFunction> {
         let (x1, y1, x2, y2) = COZY_EASE_OUT;
         CAMediaTimingFunction::functionWithControlPoints(x1, y1, x2, y2)
-    }
-
-    fn quiet_ca(f: impl FnOnce()) {
-        CATransaction::begin();
-        CATransaction::setDisableActions(true);
-        f();
-        CATransaction::commit();
     }
 
     fn set_ca_layer_colors(layer: &CALayer, bg: &NSColor, border: Option<&NSColor>) {
@@ -1209,16 +1229,14 @@ mod macos_impl {
             }
 
             let now = Instant::now();
-            let restart = if !was_visible || mode_changed || self.last_reduce_motion {
-                self.timeline = Some(ProgressTimeline::start(now, countdown));
-                true
-            } else if let Some(timeline) = self.timeline.as_mut() {
-                timeline.sync_or_restart(now, countdown)
-            } else {
-                self.timeline = Some(ProgressTimeline::start(now, countdown));
-                true
-            };
-            if restart && let Some(timeline) = self.timeline {
+            let force_restart = !was_visible || mode_changed || self.last_reduce_motion;
+            if ProgressTimeline::update_or_restart(
+                &mut self.timeline,
+                now,
+                countdown,
+                force_restart,
+            ) && let Some(timeline) = self.timeline
+            {
                 let start_w = PROGRESS_TRACK_WIDTH * timeline.start_ratio;
                 self.start_progress_drain(start_w, timeline.duration_secs);
             }
@@ -1238,7 +1256,7 @@ mod macos_impl {
             let has_countdown = countdown.is_some();
             let mode_changed = self.last_has_countdown != has_countdown;
             let was_visible = self.panel.isVisible();
-            let dark = resolve_dark_mode(theme_mode, system_prefers_dark());
+            let dark = resolve_dark_mode(theme_mode, system_prefers_dark().unwrap_or(false));
             let reduce_motion = system_reduce_motion();
             let palette = BannerPalette::for_dark(dark);
 
@@ -1411,15 +1429,6 @@ mod macos_impl {
         }
     }
 
-    fn ns_rect_to_screen_rect(rect: NSRect) -> ScreenRect {
-        ScreenRect {
-            x: rect.origin.x,
-            y: rect.origin.y,
-            width: rect.size.width,
-            height: rect.size.height,
-        }
-    }
-
     fn active_screen_visible_frame(mtm: MainThreadMarker) -> Option<ScreenRect> {
         let cursor = NSEvent::mouseLocation();
         let screens = NSScreen::screens(mtm);
@@ -1514,28 +1523,20 @@ mod windows_impl {
         WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
+    use super::banner_layout::{
+        BADGE_GAP, BADGE_HEIGHT, BADGE_WIDTH, BANNER_WIDTH, ICON_SIZE, LINE_GAP, MIN_NOTICE_HEIGHT,
+        PAD_X, PAD_Y, PROGRESS_GAP, PROGRESS_H, TEXT_X,
+    };
     use super::{
         BannerPalette, PreBreakCountdown, ProgressTimeline, compute_windows_banner_origin,
         resolve_dark_mode, rgb_to_bgr,
     };
+    use crate::console::encode_wide_nul as wide_z;
 
     const CLASS_NAME: &str = "SyePreBreakBanner";
     const WINDOW_TITLE: &str = "Safe Your Eyes";
     const APP_ICON_RESOURCE_ID: usize = 1;
     const BASE_DPI: i32 = 96;
-    const BANNER_WIDTH: i32 = 368;
-    const MIN_NOTICE_HEIGHT: i32 = 68;
-    const PAD_X: i32 = 16;
-    const PAD_Y: i32 = 12;
-    const ICON_SIZE: i32 = 36;
-    const ICON_GAP: i32 = 12;
-    const TEXT_X: i32 = PAD_X + ICON_SIZE + ICON_GAP;
-    const LINE_GAP: i32 = 4;
-    const BADGE_WIDTH: i32 = 64;
-    const BADGE_HEIGHT: i32 = 32;
-    const BADGE_GAP: i32 = 12;
-    const PROGRESS_H: i32 = 4;
-    const PROGRESS_GAP: i32 = 12;
     const MARGIN: i32 = 16;
     const BODY_MAX_LINES: i32 = 2;
     const TITLE_FONT_WEIGHT: i32 = 600;
@@ -1582,8 +1583,34 @@ mod windows_impl {
         value * dpi / BASE_DPI
     }
 
-    fn wide_z(text: &str) -> Vec<u16> {
-        text.encode_utf16().chain(Some(0)).collect()
+    unsafe fn fill_round_rect(
+        hdc: HDC,
+        rect: RECT,
+        radius: i32,
+        fill: COLORREF,
+        border: COLORREF,
+        border_w: i32,
+    ) {
+        // SAFETY: `hdc` is a live GDI device context; brush and pen are restored and deleted.
+        unsafe {
+            let brush = CreateSolidBrush(fill);
+            let pen = CreatePen(PS_SOLID, border_w, border);
+            let prev_brush = SelectObject(hdc, brush);
+            let prev_pen = SelectObject(hdc, pen);
+            RoundRect(
+                hdc,
+                rect.left,
+                rect.top,
+                rect.right,
+                rect.bottom,
+                radius,
+                radius,
+            );
+            SelectObject(hdc, prev_pen);
+            SelectObject(hdc, prev_brush);
+            DeleteObject(pen);
+            DeleteObject(brush);
+        }
     }
 
     fn draw_text(hdc: HDC, text: &[u16], rect: &mut RECT, format: DRAW_TEXT_FORMAT) -> i32 {
@@ -2056,13 +2083,13 @@ mod windows_impl {
                     self.stop_progress_timer();
                 } else {
                     let now = Instant::now();
-                    if !was_visible || mode_changed || self.last_reduce_motion {
-                        self.timeline = Some(ProgressTimeline::start(now, cd));
-                    } else if let Some(timeline) = self.timeline.as_mut() {
-                        let _ = timeline.sync_or_restart(now, cd);
-                    } else {
-                        self.timeline = Some(ProgressTimeline::start(now, cd));
-                    }
+                    let force_restart = !was_visible || mode_changed || self.last_reduce_motion;
+                    let _ = ProgressTimeline::update_or_restart(
+                        &mut self.timeline,
+                        now,
+                        cd,
+                        force_restart,
+                    );
                     if self.timeline.is_some_and(|tl| tl.ratio_at(now) > 0.0) {
                         self.start_progress_timer();
                     } else {
@@ -2141,9 +2168,6 @@ mod windows_impl {
                     DeleteObject(mem_bmp);
                     DeleteDC(mem_dc);
                 } else {
-                    if !mem_bmp.is_null() {
-                        DeleteObject(mem_bmp);
-                    }
                     if !mem_dc.is_null() {
                         DeleteDC(mem_dc);
                     }
@@ -2185,45 +2209,16 @@ mod windows_impl {
             }
             // SAFETY: `hdc` is a live GDI device context and every handle is owned or restored.
             unsafe {
-                let track_brush = CreateSolidBrush(colors.track);
-                let track_pen = CreatePen(PS_SOLID, 1, colors.track);
-                let prev_brush = SelectObject(hdc, track_brush);
-                let prev_pen = SelectObject(hdc, track_pen);
-                RoundRect(
-                    hdc,
-                    track.left,
-                    track.top,
-                    track.right,
-                    track.bottom,
-                    track_h,
-                    track_h,
-                );
-                SelectObject(hdc, prev_pen);
-                SelectObject(hdc, prev_brush);
-                DeleteObject(track_pen);
-                DeleteObject(track_brush);
+                fill_round_rect(hdc, track, track_h, colors.track, colors.track, 1);
 
                 let fill_w = self.progress_fill_width(Instant::now());
                 if fill_w > 0 {
-                    let fill_right = (track.left + fill_w).min(track.right);
+                    let fill_rect = RECT {
+                        right: (track.left + fill_w).min(track.right),
+                        ..track
+                    };
                     let radius = track_h.min(fill_w);
-                    let fill_brush = CreateSolidBrush(colors.fill);
-                    let fill_pen = CreatePen(PS_SOLID, 1, colors.fill);
-                    let prev_brush = SelectObject(hdc, fill_brush);
-                    let prev_pen = SelectObject(hdc, fill_pen);
-                    RoundRect(
-                        hdc,
-                        track.left,
-                        track.top,
-                        fill_right,
-                        track.bottom,
-                        radius,
-                        radius,
-                    );
-                    SelectObject(hdc, prev_pen);
-                    SelectObject(hdc, prev_brush);
-                    DeleteObject(fill_pen);
-                    DeleteObject(fill_brush);
+                    fill_round_rect(hdc, fill_rect, radius, colors.fill, colors.fill, 1);
                 }
             }
         }
@@ -2290,24 +2285,8 @@ mod windows_impl {
                     );
                     let mut badge_rect = self.badge_rect;
                     let pill_h = badge_rect.bottom - badge_rect.top;
-                    let badge_brush = CreateSolidBrush(badge_bg);
                     let border_w = scale(1, self.dpi).max(1);
-                    let badge_pen = CreatePen(PS_SOLID, border_w, badge_border);
-                    let prev_brush = SelectObject(hdc, badge_brush);
-                    let prev_pen = SelectObject(hdc, badge_pen);
-                    RoundRect(
-                        hdc,
-                        badge_rect.left,
-                        badge_rect.top,
-                        badge_rect.right,
-                        badge_rect.bottom,
-                        pill_h,
-                        pill_h,
-                    );
-                    SelectObject(hdc, prev_pen);
-                    SelectObject(hdc, prev_brush);
-                    DeleteObject(badge_pen);
-                    DeleteObject(badge_brush);
+                    fill_round_rect(hdc, badge_rect, pill_h, badge_bg, badge_border, border_w);
 
                     SelectObject(hdc, self.badge_font);
                     SetTextColor(hdc, badge_fg);
@@ -2780,6 +2759,33 @@ mod tests {
                 remaining_secs: 7,
                 total_secs: 15,
             },
+        ));
+
+        let mut slot: Option<ProgressTimeline> = None;
+        let cd10 = PreBreakCountdown {
+            remaining_secs: 10,
+            total_secs: 10,
+        };
+        assert!(ProgressTimeline::update_or_restart(
+            &mut slot, t0, cd10, false
+        ));
+        assert!(!ProgressTimeline::update_or_restart(
+            &mut slot,
+            t0 + Duration::from_secs(1),
+            PreBreakCountdown {
+                remaining_secs: 9,
+                total_secs: 10,
+            },
+            false,
+        ));
+        assert!(ProgressTimeline::update_or_restart(
+            &mut slot,
+            t0 + Duration::from_secs(2),
+            PreBreakCountdown {
+                remaining_secs: 8,
+                total_secs: 10,
+            },
+            true,
         ));
     }
 

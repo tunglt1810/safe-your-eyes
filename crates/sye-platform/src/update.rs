@@ -62,11 +62,8 @@ pub fn open_url(url: &str) -> Result<(), PlatformError> {
 
 #[must_use]
 pub fn detect_current_update_strategy() -> UpdateStrategy {
-    match std::env::current_exe() {
-        Ok(exe) => {
-            let resolved = exe.canonicalize().unwrap_or(exe);
-            detect_update_strategy(&resolved)
-        }
+    match crate::paths::resolve_current_exe() {
+        Ok(resolved) => detect_update_strategy(&resolved),
         Err(_) => UpdateStrategy::ManualDownload,
     }
 }
@@ -242,9 +239,8 @@ pub fn apply_self_update(
     asset_name: &str,
     current_version: &str,
 ) -> Result<(), PlatformError> {
-    let exe = std::env::current_exe()
+    let resolved_exe = crate::paths::resolve_current_exe()
         .map_err(|err| PlatformError::Io(format!("failed to locate current executable: {err}")))?;
-    let resolved_exe = exe.canonicalize().unwrap_or(exe);
     apply_self_update_to_path(target_version, asset_name, current_version, &resolved_exe)
 }
 
@@ -324,8 +320,7 @@ pub fn cleanup_stale_old_executable(exe_path: &Path) {
 }
 
 pub fn cleanup_current_stale_old_executable() {
-    if let Ok(exe) = std::env::current_exe() {
-        let resolved = exe.canonicalize().unwrap_or(exe);
+    if let Ok(resolved) = crate::paths::resolve_current_exe() {
         cleanup_stale_old_executable(&resolved);
     }
 }

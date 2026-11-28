@@ -11,7 +11,7 @@ use sye_core::scheduler::{
     OverlayOutcome, Scheduler, SchedulerAction, SchedulerEvent, SchedulerState,
 };
 use sye_core::session::SessionState;
-use sye_core::traits::{DndProvider, DndQueryOptions, IdleProvider, Notifier, OverlayLauncher};
+use sye_core::traits::DndQueryOptions;
 #[cfg(not(feature = "msstore"))]
 use sye_core::{
     HOMEBREW_UPGRADE_COMMAND, PUBLIC_DOWNLOAD_URL, UPDATE_CHECK_INTERVAL_SECS,
@@ -121,30 +121,18 @@ impl DaemonHost<'_> {
                                 self.overlay_awaiting_shown = true;
                             }
                             Err(err) => {
-                                self.overlay_launched = false;
-                                self.overlay_launch_failed = true;
-                                self.overlay_awaiting_shown = false;
-                                self.dismiss_pending_notification();
+                                self.mark_overlay_launch_failed();
                                 eprintln!("Warning: failed to launch break overlay: {err}");
                             }
                         }
                     } else {
-                        self.overlay_launched = false;
-                        self.overlay_launch_failed = true;
-                        self.overlay_awaiting_shown = false;
-                        self.dismiss_pending_notification();
+                        self.mark_overlay_launch_failed();
                         eprintln!("Warning: break overlay launcher is unavailable");
                     }
                 }
                 SchedulerAction::CloseOverlay => {
                     self.headless_break_deadline = None;
-                    self.overlay_launched = false;
-                    self.overlay_launch_failed = false;
-                    self.overlay_awaiting_shown = false;
-                    self.dismiss_pending_notification();
-                    if let Some(launcher) = self.overlay_launcher.as_mut()
-                        && let Err(err) = launcher.close()
-                    {
+                    if let Err(err) = self.close_overlay_inner() {
                         eprintln!("Warning: failed to close break overlay: {err}");
                     }
                 }
@@ -424,14 +412,26 @@ impl DaemonHost<'_> {
         }
     }
 
-    fn close_overlay(&mut self) {
+    fn mark_overlay_launch_failed(&mut self) {
+        self.overlay_launched = false;
+        self.overlay_launch_failed = true;
+        self.overlay_awaiting_shown = false;
+        self.dismiss_pending_notification();
+    }
+
+    fn close_overlay_inner(&mut self) -> Result<(), sye_core::traits::PlatformError> {
         self.overlay_launched = false;
         self.overlay_launch_failed = false;
         self.overlay_awaiting_shown = false;
         self.dismiss_pending_notification();
         if let Some(launcher) = self.overlay_launcher.as_mut() {
-            let _ = launcher.close();
+            launcher.close()?;
         }
+        Ok(())
+    }
+
+    fn close_overlay(&mut self) {
+        let _ = self.close_overlay_inner();
     }
 }
 
@@ -511,7 +511,9 @@ pub(crate) fn should_replace_running_daemon(
         )
 }
 
-fn query_running_daemon_status(socket_path: &Path) -> Option<sye_core::scheduler::StatusSnapshot> {
+pub(crate) fn query_running_daemon_status(
+    socket_path: &Path,
+) -> Option<sye_core::scheduler::StatusSnapshot> {
     match IpcClient::send_command_with_timeout(
         socket_path,
         &IpcCommand::Status,
@@ -519,6 +521,12 @@ fn query_running_daemon_status(socket_path: &Path) -> Option<sye_core::scheduler
     ) {
         Ok(IpcResponse::Status(snapshot)) => Some(snapshot),
         _ => None,
+    }
+}
+
+pub(crate) fn sync_autostart_warn(enabled: bool, config_file: &Path) {
+    if let Err(err) = sye_platform::sync_system_autostart(enabled, Some(config_file)) {
+        eprintln!("Warning: failed to synchronize autostart entry: {err}");
     }
 }
 
@@ -617,11 +625,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
             .flatten();
         match plan_startup_autostart(is_first_run, config_loaded, config.autostart, sys_autostart) {
             StartupAutostartPlan::RegisterAndPersist(enabled) => {
-                if let Err(err) =
-                    sye_platform::sync_system_autostart(enabled, Some(&paths.config_file))
-                {
-                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
-                }
+                sync_autostart_warn(enabled, &paths.config_file);
                 if let Err(err) = config.save_to_path(&paths.config_file) {
                     eprintln!("Warning: failed to write initial config: {err}");
                 }
@@ -630,11 +634,7 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 config.autostart = sys;
             }
             StartupAutostartPlan::SyncFromConfig(enabled) => {
-                if let Err(err) =
-                    sye_platform::sync_system_autostart(enabled, Some(&paths.config_file))
-                {
-                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
-                }
+                sync_autostart_warn(enabled, &paths.config_file);
             }
             StartupAutostartPlan::KeepSystem => {}
         }
@@ -786,14 +786,8 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
                 &mut config_fingerprint,
                 scheduler.config(),
             ) {
-                if !headless
-                    && updated_cfg.autostart != scheduler.config().autostart
-                    && let Err(err) = sye_platform::sync_system_autostart(
-                        updated_cfg.autostart,
-                        Some(&paths.config_file),
-                    )
-                {
-                    eprintln!("Warning: failed to synchronize autostart entry: {err}");
+                if !headless && updated_cfg.autostart != scheduler.config().autostart {
+                    sync_autostart_warn(updated_cfg.autostart, &paths.config_file);
                 }
                 let actions = scheduler.handle_event(SchedulerEvent::ReloadConfig(updated_cfg));
                 host.set_locale(scheduler.active_locale());
@@ -982,7 +976,7 @@ fn drain_ipc_requests(
                 }
             }
             IpcCommand::OpenSettings => {
-                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                if can_open_settings(scheduler.state()) {
                     open_settings = true;
                     IpcResponse::Ok {
                         message: Some("Opening settings".to_owned()),
@@ -1044,14 +1038,14 @@ fn drain_tray_events(
                 scheduler.handle_event(SchedulerEvent::TakeBreak { kind })
             }
             TrayEvent::OpenSettings | TrayEvent::Reopen => {
-                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                if can_open_settings(scheduler.state()) {
                     host.open_settings();
                 }
                 Vec::new()
             }
             #[cfg(not(feature = "msstore"))]
             TrayEvent::UpdateApp => {
-                if can_open_settings(scheduler.state(), scheduler.tray_snapshot().menu_locked) {
+                if can_open_settings(scheduler.state()) {
                     host.trigger_tray_update();
                 }
                 Vec::new()
@@ -1074,8 +1068,8 @@ const fn should_open_settings_on_startup(
     !headless && !background && !launched_at_login
 }
 
-const fn can_open_settings(state: SchedulerState, menu_locked: bool) -> bool {
-    !menu_locked && !matches!(state, SchedulerState::PreBreak | SchedulerState::Break)
+const fn can_open_settings(state: SchedulerState) -> bool {
+    !matches!(state, SchedulerState::PreBreak | SchedulerState::Break)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1104,20 +1098,40 @@ const fn plan_startup_autostart(
     }
 }
 
-fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io::Result<Child> {
-    let exe = std::env::current_exe()?;
-    let resolved = exe.canonicalize().unwrap_or(exe);
+fn spawn_self_detached(
+    config_file: &Path,
+    socket_path: &Path,
+    strip_deleted: bool,
+    configure: impl FnOnce(&mut Command),
+) -> std::io::Result<Child> {
+    #[cfg(target_os = "linux")]
+    let resolved = if strip_deleted {
+        let exe = strip_linux_deleted_exe_suffix(std::env::current_exe()?);
+        exe.canonicalize().unwrap_or(exe)
+    } else {
+        sye_platform::resolve_current_exe()?
+    };
+    #[cfg(not(target_os = "linux"))]
+    let resolved = {
+        let _ = strip_deleted;
+        sye_platform::resolve_current_exe()?
+    };
     let mut cmd = Command::new(resolved);
-    cmd.arg("--internal-settings")
-        .arg("--config")
+    configure(&mut cmd);
+    cmd.arg("--config")
         .arg(config_file)
         .arg("--socket")
         .arg(socket_path)
-        .env_remove(HANDOFF_ENV_VAR)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     sye_platform::hide_child_console(&mut cmd).spawn()
+}
+
+fn spawn_settings_subprocess(config_file: &Path, socket_path: &Path) -> std::io::Result<Child> {
+    spawn_self_detached(config_file, socket_path, false, |cmd| {
+        cmd.arg("--internal-settings").env_remove(HANDOFF_ENV_VAR);
+    })
 }
 
 pub(crate) fn hand_off_to_new_daemon(paths: &AppPaths) -> bool {
@@ -1142,18 +1156,9 @@ pub(crate) fn hand_off_to_new_daemon(paths: &AppPaths) -> bool {
 }
 
 fn spawn_daemon_for_handoff(paths: &AppPaths) -> std::io::Result<Child> {
-    let exe = std::env::current_exe()?;
-    let resolved = exe.canonicalize().unwrap_or(exe);
-    let mut cmd = Command::new(resolved);
-    cmd.arg("--config")
-        .arg(&paths.config_file)
-        .arg("--socket")
-        .arg(&paths.socket_path)
-        .env(HANDOFF_ENV_VAR, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    sye_platform::hide_child_console(&mut cmd).spawn()
+    spawn_self_detached(&paths.config_file, &paths.socket_path, false, |cmd| {
+        cmd.env(HANDOFF_ENV_VAR, "1");
+    })
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -1176,24 +1181,12 @@ fn strip_linux_deleted_exe_suffix(exe: std::path::PathBuf) -> std::path::PathBuf
 }
 
 fn spawn_restarted_daemon(paths: &AppPaths, headless: bool) -> std::io::Result<Child> {
-    let exe = std::env::current_exe()?;
-    #[cfg(target_os = "linux")]
-    let exe = strip_linux_deleted_exe_suffix(exe);
-    let resolved = exe.canonicalize().unwrap_or(exe);
-    let mut cmd = Command::new(resolved);
-    cmd.arg("--background")
-        .arg("--config")
-        .arg(&paths.config_file)
-        .arg("--socket")
-        .arg(&paths.socket_path)
-        .env_remove(HANDOFF_ENV_VAR)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    if headless {
-        cmd.arg("--headless");
-    }
-    sye_platform::hide_child_console(&mut cmd).spawn()
+    spawn_self_detached(&paths.config_file, &paths.socket_path, true, |cmd| {
+        cmd.arg("--background").env_remove(HANDOFF_ENV_VAR);
+        if headless {
+            cmd.arg("--headless");
+        }
+    })
 }
 
 #[must_use]
@@ -1248,13 +1241,12 @@ mod tests {
     }
 
     #[test]
-    fn settings_guards_block_pre_break_break_and_locked_menu() {
-        assert!(can_open_settings(SchedulerState::Waiting, false));
-        assert!(can_open_settings(SchedulerState::Stopped, false));
-        assert!(can_open_settings(SchedulerState::Resting, false));
-        assert!(!can_open_settings(SchedulerState::PreBreak, false));
-        assert!(!can_open_settings(SchedulerState::Break, false));
-        assert!(!can_open_settings(SchedulerState::Waiting, true));
+    fn settings_guards_block_pre_break_and_break() {
+        assert!(can_open_settings(SchedulerState::Waiting));
+        assert!(can_open_settings(SchedulerState::Stopped));
+        assert!(can_open_settings(SchedulerState::Resting));
+        assert!(!can_open_settings(SchedulerState::PreBreak));
+        assert!(!can_open_settings(SchedulerState::Break));
     }
 
     #[test]

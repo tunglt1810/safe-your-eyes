@@ -10,7 +10,6 @@ import secrets
 import shutil
 import signal
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -175,6 +174,33 @@ def wait_until(
         time.sleep(interval)
 
 
+def _check_uds_path_len(candidate: Path) -> Path:
+    encoded_len = len(str(candidate).encode("utf-8"))
+    if encoded_len > MAX_UDS_PATH_BYTES:
+        raise RuntimeError(
+            f"UDS socket path exceeds {MAX_UDS_PATH_BYTES} bytes "
+            f"({encoded_len}): {candidate}"
+        )
+    return candidate
+
+
+def _unlink_socket(sock: Path) -> None:
+    try:
+        if sock.exists() or sock.is_symlink():
+            sock.unlink()
+    except OSError:
+        pass
+
+
+def cleanup_run_dir(run_dir: Path) -> None:
+    shutil.rmtree(run_dir, ignore_errors=True)
+    try:
+        if E2E_TMP_BASE.exists() and not any(E2E_TMP_BASE.iterdir()):
+            E2E_TMP_BASE.rmdir()
+    except OSError:
+        pass
+
+
 def _alloc_flat_socket() -> Path:
     """Allocate a short flat UDS socket path directly under <repo>/.tmp/e2e/."""
     global _SOCK_SEQ
@@ -192,22 +218,9 @@ def _alloc_flat_socket() -> Path:
             seq = _SOCK_SEQ
         candidate = E2E_TMP_BASE / f"s_{pid_hex}{seq % 4096:03x}.sock"
         if not candidate.exists():
-            encoded_len = len(str(candidate).encode("utf-8"))
-            if encoded_len > MAX_UDS_PATH_BYTES:
-                raise RuntimeError(
-                    f"UDS socket path exceeds {MAX_UDS_PATH_BYTES} bytes "
-                    f"({encoded_len}): {candidate}"
-                )
-            return candidate
+            return _check_uds_path_len(candidate)
 
-    candidate = E2E_TMP_BASE / f"s_{secrets.token_hex(4)}.sock"
-    encoded_len = len(str(candidate).encode("utf-8"))
-    if encoded_len > MAX_UDS_PATH_BYTES:
-        raise RuntimeError(
-            f"UDS socket path exceeds {MAX_UDS_PATH_BYTES} bytes "
-            f"({encoded_len}): {candidate}"
-        )
-    return candidate
+    return _check_uds_path_len(E2E_TMP_BASE / f"s_{secrets.token_hex(4)}.sock")
 
 
 def _cleanup_all_global() -> None:
@@ -227,18 +240,9 @@ def _cleanup_all_global() -> None:
             _ACTIVE_SOCKETS.clear()
             _ACTIVE_RUN_DIRS.clear()
         for sock in sockets:
-            try:
-                if sock.exists() or sock.is_symlink():
-                    sock.unlink()
-            except OSError:
-                pass
+            _unlink_socket(sock)
         for rdir in run_dirs:
-            shutil.rmtree(rdir, ignore_errors=True)
-        try:
-            if E2E_TMP_BASE.exists() and not any(E2E_TMP_BASE.iterdir()):
-                E2E_TMP_BASE.rmdir()
-        except OSError:
-            pass
+            cleanup_run_dir(rdir)
 
 
 atexit.register(_cleanup_all_global)
@@ -287,21 +291,20 @@ class DaemonHandle:
     def poll(self) -> int | None:
         return self.proc.poll()
 
-    def read_stdout(self) -> str:
+    @staticmethod
+    def _read_log_file(fh: Any, path: Path) -> str:
         try:
-            if not self._stdout_fh.closed:
-                self._stdout_fh.flush()
-            return self.stdout_path.read_text(encoding="utf-8", errors="replace")
+            if not fh.closed:
+                fh.flush()
+            return path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return ""
 
+    def read_stdout(self) -> str:
+        return self._read_log_file(self._stdout_fh, self.stdout_path)
+
     def read_stderr(self) -> str:
-        try:
-            if not self._stderr_fh.closed:
-                self._stderr_fh.flush()
-            return self.stderr_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
+        return self._read_log_file(self._stderr_fh, self.stderr_path)
 
     def wait_until_ready(self, timeout: float = 5.0) -> dict[str, Any]:
         """Poll --status --json until daemon is responsive or exits prematurely."""
@@ -733,11 +736,7 @@ class SyeTestEnv:
 
         if not self.keep_tmp:
             for sock in self._sockets:
-                try:
-                    if sock.exists() or sock.is_symlink():
-                        sock.unlink()
-                except OSError:
-                    pass
+                _unlink_socket(sock)
                 with _LOCK:
                     if sock in _ACTIVE_SOCKETS:
                         _ACTIVE_SOCKETS.remove(sock)

@@ -2,7 +2,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use sye_core::{IdleProvider, PlatformError};
+use sye_core::PlatformError;
 
 pub struct SystemIdleProvider {
     #[cfg(target_os = "linux")]
@@ -23,16 +23,8 @@ impl SystemIdleProvider {
             x11: Mutex::new(None),
         }
     }
-}
 
-impl Default for SystemIdleProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl IdleProvider for SystemIdleProvider {
-    fn idle_duration(&self) -> Result<Duration, PlatformError> {
+    pub fn idle_duration(&self) -> Result<Duration, PlatformError> {
         #[cfg(target_os = "linux")]
         {
             linux_impl::query_idle_duration(&self.x11)
@@ -49,6 +41,12 @@ impl IdleProvider for SystemIdleProvider {
         {
             Err(PlatformError::Unsupported)
         }
+    }
+}
+
+impl Default for SystemIdleProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

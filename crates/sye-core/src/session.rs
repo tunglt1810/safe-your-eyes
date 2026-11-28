@@ -96,24 +96,9 @@ impl SessionState {
 
     pub fn save_to_path(&self, path: &Path) -> Result<(), SessionError> {
         let encoded = self.to_toml_string()?;
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent).map_err(|err| SessionError::Io {
-                message: err.to_string(),
-            })?;
-        }
-        fs::write(path, encoded).map_err(|err| SessionError::Io {
+        crate::write_string_atomic(path, &encoded).map_err(|err| SessionError::Io {
             message: err.to_string(),
         })
-    }
-}
-
-impl std::str::FromStr for SessionState {
-    type Err = SessionError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::from_toml_str(s)
     }
 }
 

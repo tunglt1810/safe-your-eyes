@@ -24,39 +24,43 @@ fn main() -> ExitCode {
     match args.mode {
         CommandMode::Help => {
             print!("{HELP_TEXT}");
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
         CommandMode::Version => {
             println!("safe-your-eyes {}", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        CommandMode::PrintDefaultConfig => {
-            return match Config::default().to_toml_string() {
-                Ok(toml_str) => {
-                    print!("{toml_str}");
-                    ExitCode::SUCCESS
-                }
+        CommandMode::PrintDefaultConfig => match Config::default().to_toml_string() {
+            Ok(toml_str) => {
+                print!("{toml_str}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("Failed to serialize default config: {err}");
+                ExitCode::FAILURE
+            }
+        },
+        CommandMode::InternalOverlay { payload_json } => run_internal_overlay(&payload_json),
+        mode => {
+            let paths = match AppPaths::with_overrides(args.config, args.socket) {
+                Ok(paths) => paths,
                 Err(err) => {
-                    eprintln!("Failed to serialize default config: {err}");
-                    ExitCode::FAILURE
+                    eprintln!("Failed to resolve application paths: {err}");
+                    return ExitCode::FAILURE;
                 }
             };
+            dispatch_with_paths(&mode, &paths, args.headless, args.background)
         }
-        CommandMode::InternalOverlay { payload_json } => {
-            return run_internal_overlay(&payload_json);
-        }
-        _ => {}
     }
+}
 
-    let paths = match AppPaths::with_overrides(args.config, args.socket) {
-        Ok(paths) => paths,
-        Err(err) => {
-            eprintln!("Failed to resolve application paths: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    match args.mode {
+fn dispatch_with_paths(
+    mode: &CommandMode,
+    paths: &AppPaths,
+    headless: bool,
+    background: bool,
+) -> ExitCode {
+    match *mode {
         CommandMode::ValidateConfig => match Config::load_from_path(&paths.config_file) {
             Ok(_) => {
                 println!("Configuration is valid: {}", paths.config_file.display());
@@ -70,10 +74,10 @@ fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         },
-        CommandMode::InternalSettings => run_settings_and_sync_autostart(&paths),
-        CommandMode::Daemon => daemon::run_daemon(&paths, args.headless, args.background),
-        CommandMode::Status { json } => send_ipc_command(
-            &paths,
+        CommandMode::InternalSettings => run_settings_and_sync_autostart(paths),
+        CommandMode::Daemon => daemon::run_daemon(paths, headless, background),
+        CommandMode::Status { json } => send_ipc_with_format(
+            paths,
             &IpcCommand::Status,
             if json {
                 StatusFormat::Json
@@ -81,30 +85,22 @@ fn main() -> ExitCode {
                 StatusFormat::Human
             },
         ),
-        CommandMode::Enable => send_ipc_command(&paths, &IpcCommand::Enable, StatusFormat::Human),
-        CommandMode::Disable { minutes } => send_ipc_command(
-            &paths,
-            &IpcCommand::Disable { minutes },
-            StatusFormat::Human,
-        ),
-        CommandMode::TakeBreak => send_ipc_command(
-            &paths,
-            &IpcCommand::TakeBreak { kind: None },
-            StatusFormat::Human,
-        ),
+        CommandMode::Enable => send_ipc_command(paths, &IpcCommand::Enable),
+        CommandMode::Disable { minutes } => {
+            send_ipc_command(paths, &IpcCommand::Disable { minutes })
+        }
+        CommandMode::TakeBreak => send_ipc_command(paths, &IpcCommand::TakeBreak { kind: None }),
         CommandMode::ShortBreak => send_ipc_command(
-            &paths,
+            paths,
             &IpcCommand::TakeBreak {
                 kind: Some(BreakType::Short),
             },
-            StatusFormat::Human,
         ),
         CommandMode::LongBreak => send_ipc_command(
-            &paths,
+            paths,
             &IpcCommand::TakeBreak {
                 kind: Some(BreakType::Long),
             },
-            StatusFormat::Human,
         ),
         CommandMode::Settings => {
             match IpcClient::send_command(&paths.socket_path, &IpcCommand::OpenSettings) {
@@ -113,14 +109,14 @@ fn main() -> ExitCode {
                     eprintln!("{message}");
                     ExitCode::FAILURE
                 }
-                Err(IpcError::NotRunning) => run_settings_and_sync_autostart(&paths),
+                Err(IpcError::NotRunning) => run_settings_and_sync_autostart(paths),
                 Err(err) => {
                     eprintln!("{err}");
                     ExitCode::FAILURE
                 }
             }
         }
-        CommandMode::Quit => send_ipc_command(&paths, &IpcCommand::Quit, StatusFormat::Human),
+        CommandMode::Quit => send_ipc_command(paths, &IpcCommand::Quit),
         CommandMode::Help
         | CommandMode::Version
         | CommandMode::PrintDefaultConfig
@@ -167,7 +163,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     // An older daemon left running across an in-place upgrade spawns the newly installed binary
     // for Settings; hand off to a fresh daemon so tray and break overlay match this version.
     if std::env::var_os(daemon::HANDOFF_ENV_VAR).is_none()
-        && let Some(snapshot) = query_daemon_status(&paths.socket_path)
+        && let Some(snapshot) = daemon::query_running_daemon_status(&paths.socket_path)
         && daemon::should_replace_running_daemon(&snapshot, daemon::CURRENT_VERSION)
         && daemon::hand_off_to_new_daemon(paths)
     {
@@ -178,9 +174,7 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     let initial_system_autostart = sye_platform::query_system_autostart(Some(config_file));
     let hook_path = config_file.clone();
     let on_autostart_change = Box::new(move |enabled: bool| {
-        if let Err(err) = sye_platform::sync_system_autostart(enabled, Some(&hook_path)) {
-            eprintln!("Warning: failed to synchronize autostart entry: {err}");
-        }
+        daemon::sync_autostart_warn(enabled, &hook_path);
     });
 
     #[cfg(not(feature = "msstore"))]
@@ -241,7 +235,9 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     let status_socket_path = paths.socket_path.clone();
     let status_config = sye_ui::SettingsStatusConfig {
         initial_status: None,
-        on_poll_status: Some(Arc::new(move || query_daemon_status(&status_socket_path))),
+        on_poll_status: Some(Arc::new(move || {
+            daemon::query_running_daemon_status(&status_socket_path)
+        })),
     };
 
     #[cfg(target_os = "macos")]
@@ -282,19 +278,6 @@ fn run_settings_and_sync_autostart(paths: &AppPaths) -> ExitCode {
     }
 }
 
-fn query_daemon_status(
-    socket_path: &std::path::Path,
-) -> Option<sye_core::scheduler::StatusSnapshot> {
-    match IpcClient::send_command_with_timeout(
-        socket_path,
-        &IpcCommand::Status,
-        std::time::Duration::from_millis(250),
-    ) {
-        Ok(IpcResponse::Status(snapshot)) => Some(snapshot),
-        _ => None,
-    }
-}
-
 fn write_overlay_line(line: &str) -> bool {
     use std::io::Write as _;
 
@@ -322,7 +305,15 @@ enum StatusFormat {
     Json,
 }
 
-fn send_ipc_command(paths: &AppPaths, cmd: &IpcCommand, status_format: StatusFormat) -> ExitCode {
+fn send_ipc_command(paths: &AppPaths, cmd: &IpcCommand) -> ExitCode {
+    send_ipc_with_format(paths, cmd, StatusFormat::Human)
+}
+
+fn send_ipc_with_format(
+    paths: &AppPaths,
+    cmd: &IpcCommand,
+    status_format: StatusFormat,
+) -> ExitCode {
     match IpcClient::send_command(&paths.socket_path, cmd) {
         Ok(IpcResponse::Status(snapshot)) => match status_format {
             StatusFormat::Json => match serde_json::to_string(&snapshot) {

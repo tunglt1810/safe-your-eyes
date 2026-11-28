@@ -51,17 +51,10 @@ const APP_ICON_RGBA_LEN: usize = (APP_ICON_SIZE as usize) * (APP_ICON_SIZE as us
 
 fn app_icon_rgba() -> Arc<[u8]> {
     static PIXELS: OnceLock<Arc<[u8]>> = OnceLock::new();
-    Arc::clone(PIXELS.get_or_init(|| {
-        let mut out = Vec::with_capacity(APP_ICON_RGBA_LEN);
-        for &[count, r, g, b, a] in APP_ICON_RLE.as_chunks::<5>().0 {
-            let rgba = [r, g, b, a];
-            for _ in 0..usize::from(count) {
-                out.extend_from_slice(&rgba);
-            }
-        }
-        out.resize(APP_ICON_RGBA_LEN, 0);
-        Arc::from(out)
-    }))
+    Arc::clone(
+        PIXELS
+            .get_or_init(|| Arc::from(sye_core::decode_rle_rgba(APP_ICON_RLE, APP_ICON_RGBA_LEN))),
+    )
 }
 
 pub(crate) fn app_icon(size_px: f32) -> impl IntoElement {
@@ -144,34 +137,36 @@ pub(crate) fn stagger_item(
     container.bind_opacity(&opacity).bind_translate_y(&y)
 }
 
-pub(crate) fn language_toggle_button(
-    mode: impl Fn() -> LanguageMode + Copy + 'static,
-    locale: impl Fn() -> Locale + Copy + 'static,
-    on_press: impl Fn() + 'static,
+fn stroke_icon(
+    size: f32,
+    line_width: f32,
+    stroke_color: impl Fn() -> AdaptiveColor + 'static,
+    svg: impl Fn() -> &'static str + 'static,
 ) -> impl IntoElement {
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
-
-    let icon = canvas(move || {
-        let stroke = color(colors::TEXT_PRIMARY);
+    let scale = size / 24.0_f32;
+    canvas(move || {
         Painter::new()
-            .scale(15.0_f32 / 24.0_f32, 15.0_f32 / 24.0_f32)
-            .stroke_color(stroke)
-            .line_width(2.0_f32)
+            .scale(scale, scale)
+            .stroke_color(color(stroke_color()))
+            .line_width(line_width)
             .line_cap(LineCap::Round)
             .line_join(LineJoin::Round)
-            .stroke_svg(GLOBE_ICON_SVG)
+            .stroke_svg(svg())
     })
-    .w(px(15.0))
-    .h(px(15.0))
-    .flex_shrink_0();
+    .w(px(size))
+    .h(px(size))
+    .flex_shrink_0()
+}
 
-    view()
-        .accessible(true)
-        .role(AccessibilityRole::Button)
-        .label(move || language_mode_a11y_label(mode(), locale()))
+fn header_pill_button(
+    base: nsh_core::element::View,
+    icon: impl IntoElement,
+    label: impl IntoReactive<SharedString>,
+) -> impl IntoElement {
+    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
+    base.role(AccessibilityRole::Button)
         .focusable(true)
         .window_drag(false)
-        .on_press(move |_: &PressEvent| on_press())
         .h(px(36.0))
         .px_3()
         .flex_row()
@@ -189,11 +184,37 @@ pub(crate) fn language_toggle_button(
         .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
         .child(icon)
         .child(
-            text(move || language_mode_label(mode(), locale()))
+            text(label)
                 .text_sm()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(colors::TEXT_PRIMARY),
         )
+}
+
+fn measure_center_into(
+    btn_ref: nsh_core::element::ElementRef,
+    measured_center: Signal<Option<[f32; 2]>>,
+) {
+    spawn(async move {
+        if let Some(m) = btn_ref.measure().await {
+            let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
+            let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
+            measured_center.set(Some([cx, cy]));
+        }
+    });
+}
+
+pub(crate) fn language_toggle_button(
+    mode: impl Fn() -> LanguageMode + Copy + 'static,
+    locale: impl Fn() -> Locale + Copy + 'static,
+    on_press: impl Fn() + 'static,
+) -> impl IntoElement {
+    let icon = stroke_icon(15.0, 2.0, || colors::TEXT_PRIMARY, || GLOBE_ICON_SVG);
+    let base = view()
+        .accessible(true)
+        .label(move || language_mode_a11y_label(mode(), locale()))
+        .on_press(move |_: &PressEvent| on_press());
+    header_pill_button(base, icon, move || language_mode_label(mode(), locale()))
 }
 
 pub(crate) fn theme_toggle_button(
@@ -203,82 +224,39 @@ pub(crate) fn theme_toggle_button(
     on_press: impl Fn(Option<[f32; 2]>) + 'static,
 ) -> impl IntoElement {
     let btn_ref = element_ref();
-    let (bx1, by1, bx2, by2) = motion::COZY_STANDARD_BEZIER;
 
     effect(move || {
         let _ = nsh_core::element::desktop::title_bar();
         let _ = nsh_core::element::desktop::window_state();
         let _ = window();
-        spawn(async move {
-            if let Some(m) = btn_ref.measure().await {
-                let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
-                let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
-                measured_center.set(Some([cx, cy]));
-            }
-        });
+        measure_center_into(btn_ref, measured_center);
     });
 
-    let icon = canvas(move || {
-        let svg = match mode() {
+    let icon = stroke_icon(
+        16.0,
+        2.0,
+        || colors::TEXT_PRIMARY,
+        move || match mode() {
             ThemeMode::Light => SUN_ICON_SVG,
             ThemeMode::Dark => MOON_ICON_SVG,
             ThemeMode::System => MONITOR_ICON_SVG,
-        };
-        let stroke = color(colors::TEXT_PRIMARY);
-        Painter::new()
-            .scale(16.0_f32 / 24.0_f32, 16.0_f32 / 24.0_f32)
-            .stroke_color(stroke)
-            .line_width(2.0_f32)
-            .line_cap(LineCap::Round)
-            .line_join(LineJoin::Round)
-            .stroke_svg(svg)
-    })
-    .w(px(16.0))
-    .h(px(16.0))
-    .flex_shrink_0();
+        },
+    );
 
-    view()
+    let base = view()
         .element_ref(&btn_ref)
-        .role(AccessibilityRole::Button)
-        .focusable(true)
-        .window_drag(false)
         .on_layout(move |_: &Bounds<Points>| {
-            spawn(async move {
-                if let Some(m) = btn_ref.measure().await {
-                    let cx = m.page.x.0 + m.frame.size.width.0 * 0.5;
-                    let cy = m.page.y.0 + m.frame.size.height.0 * 0.5;
-                    measured_center.set(Some([cx, cy]));
-                }
-            });
+            measure_center_into(btn_ref, measured_center);
         })
         .on_press(move |ev: &PressEvent| {
             let p = ev.page_position;
             let live_press = (p.x.0 > 0.0 || p.y.0 > 0.0).then_some([p.x.0, p.y.0]);
             let origin = live_press.or_else(|| measured_center.get_untracked());
             on_press(origin);
-        })
-        .h(px(36.0))
-        .px_3()
-        .flex_row()
-        .items_center()
-        .justify_center()
-        .gap_2()
-        .rounded(radii::PILL)
-        .bg(colors::BACKGROUND_SURFACE)
-        .border_1()
-        .border_color(colors::BORDER_EMPHASIZED)
-        .transition()
-        .duration(motion::CONTROL_MS)
-        .ease_bezier(bx1, by1, bx2, by2)
-        .hover(|s| s.bg(colors::OVERLAY_HOVER))
-        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
-        .child(icon)
-        .child(
-            text(move || theme_mode_label_localized(mode(), locale()))
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::TEXT_PRIMARY),
-        )
+        });
+    header_pill_button(base, icon, move || {
+        theme_mode_label_localized(mode(), locale())
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -290,64 +268,60 @@ pub(crate) enum CountdownTone {
     Disabled,
 }
 
+#[derive(Clone, Copy)]
+struct CountdownToneStyle {
+    bg: AdaptiveColor,
+    border: AdaptiveColor,
+    icon: AdaptiveColor,
+    text: AdaptiveColor,
+    chip_bg: AdaptiveColor,
+    svg: &'static str,
+}
+
 impl CountdownTone {
-    const fn bg_color(self) -> AdaptiveColor {
+    const fn style(self) -> CountdownToneStyle {
+        use crate::theme::badge;
         match self {
-            Self::Active => crate::theme::badge::GREEN_BG,
-            Self::Warning => crate::theme::badge::YELLOW_BG,
-            Self::Break => crate::theme::badge::ORANGE_BG,
-            Self::Paused => crate::theme::badge::BLUE_BG,
-            Self::Disabled => crate::theme::badge::GRAY_BG,
-        }
-    }
-
-    const fn border_color(self) -> AdaptiveColor {
-        match self {
-            Self::Active => crate::theme::badge::GREEN_BORDER,
-            Self::Warning => crate::theme::badge::YELLOW_BORDER,
-            Self::Break => crate::theme::badge::ORANGE_BORDER,
-            Self::Paused => crate::theme::badge::BLUE_BORDER,
-            Self::Disabled => crate::theme::badge::GRAY_BORDER,
-        }
-    }
-
-    const fn icon_color(self) -> AdaptiveColor {
-        match self {
-            Self::Active => crate::theme::badge::GREEN_ICON,
-            Self::Warning => crate::theme::badge::YELLOW_ICON,
-            Self::Break => crate::theme::badge::ORANGE_ICON,
-            Self::Paused => crate::theme::badge::BLUE_ICON,
-            Self::Disabled => crate::theme::badge::GRAY_ICON,
-        }
-    }
-
-    const fn text_color(self) -> AdaptiveColor {
-        match self {
-            Self::Active => crate::theme::badge::GREEN_TEXT,
-            Self::Warning => crate::theme::badge::YELLOW_TEXT,
-            Self::Break => crate::theme::badge::ORANGE_TEXT,
-            Self::Paused => crate::theme::badge::BLUE_TEXT,
-            Self::Disabled => crate::theme::badge::GRAY_TEXT,
-        }
-    }
-
-    const fn time_chip_bg(self) -> AdaptiveColor {
-        match self {
-            Self::Active => crate::theme::badge::GREEN_CHIP_BG,
-            Self::Warning => crate::theme::badge::YELLOW_CHIP_BG,
-            Self::Break => crate::theme::badge::ORANGE_BG,
-            Self::Paused => crate::theme::badge::BLUE_BG,
-            Self::Disabled => crate::theme::badge::GRAY_BG,
-        }
-    }
-
-    const fn icon_svg(self) -> &'static str {
-        match self {
-            Self::Active => CLOCK_ICON_SVG,
-            Self::Warning => ALERT_ICON_SVG,
-            Self::Break => EYE_ICON_SVG,
-            Self::Paused => PAUSE_ICON_SVG,
-            Self::Disabled => DISABLED_ICON_SVG,
+            Self::Active => CountdownToneStyle {
+                bg: badge::GREEN_BG,
+                border: badge::GREEN_BORDER,
+                icon: badge::GREEN_ICON,
+                text: badge::GREEN_TEXT,
+                chip_bg: badge::GREEN_CHIP_BG,
+                svg: CLOCK_ICON_SVG,
+            },
+            Self::Warning => CountdownToneStyle {
+                bg: badge::YELLOW_BG,
+                border: badge::YELLOW_BORDER,
+                icon: badge::YELLOW_ICON,
+                text: badge::YELLOW_TEXT,
+                chip_bg: badge::YELLOW_CHIP_BG,
+                svg: ALERT_ICON_SVG,
+            },
+            Self::Break => CountdownToneStyle {
+                bg: badge::ORANGE_BG,
+                border: badge::ORANGE_BORDER,
+                icon: badge::ORANGE_ICON,
+                text: badge::ORANGE_TEXT,
+                chip_bg: badge::ORANGE_BG,
+                svg: EYE_ICON_SVG,
+            },
+            Self::Paused => CountdownToneStyle {
+                bg: badge::BLUE_BG,
+                border: badge::BLUE_BORDER,
+                icon: badge::BLUE_ICON,
+                text: badge::BLUE_TEXT,
+                chip_bg: badge::BLUE_BG,
+                svg: PAUSE_ICON_SVG,
+            },
+            Self::Disabled => CountdownToneStyle {
+                bg: badge::GRAY_BG,
+                border: badge::GRAY_BORDER,
+                icon: badge::GRAY_ICON,
+                text: badge::GRAY_TEXT,
+                chip_bg: badge::GRAY_BG,
+                svg: DISABLED_ICON_SVG,
+            },
         }
     }
 }
@@ -366,20 +340,12 @@ pub(crate) fn countdown_status_pill(
     time: impl Fn() -> Option<String> + Copy + 'static,
     accessible_label: impl IntoReactive<SharedString>,
 ) -> impl IntoElement {
-    let icon = canvas(move || {
-        let current = tone();
-        let stroke = color(current.icon_color());
-        Painter::new()
-            .scale(14.0_f32 / 24.0_f32, 14.0_f32 / 24.0_f32)
-            .stroke_color(stroke)
-            .line_width(2.0_f32)
-            .line_cap(LineCap::Round)
-            .line_join(LineJoin::Round)
-            .stroke_svg(current.icon_svg())
-    })
-    .w(px(14.0))
-    .h(px(14.0))
-    .flex_shrink_0();
+    let icon = stroke_icon(
+        14.0,
+        2.0,
+        move || tone().style().icon,
+        move || tone().style().svg,
+    );
 
     view()
         .accessible(true)
@@ -391,9 +357,9 @@ pub(crate) fn countdown_status_pill(
         .items_center()
         .gap_2()
         .rounded(radii::PILL)
-        .bg(move || tone().bg_color())
+        .bg(move || tone().style().bg)
         .border_1()
-        .border_color(move || tone().border_color())
+        .border_color(move || tone().style().border)
         .transition_colors()
         .duration(motion::CONTROL_MS)
         .ease_out()
@@ -402,7 +368,7 @@ pub(crate) fn countdown_status_pill(
             text(label)
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(move || tone().text_color()),
+                .text_color(move || tone().style().text),
         )
         .child(when(
             move || time().is_some(),
@@ -411,12 +377,12 @@ pub(crate) fn countdown_status_pill(
                     .px_2()
                     .py(px(2.0))
                     .rounded(radii::PILL)
-                    .bg(move || tone().time_chip_bg())
+                    .bg(move || tone().style().chip_bg)
                     .child(
                         text(move || time().unwrap_or_default())
                             .text_sm()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(move || tone().text_color())
+                            .text_color(move || tone().style().text)
                             .tabular_nums(),
                     )
             },
@@ -757,47 +723,28 @@ pub(crate) fn status_banner(
 }
 
 pub(crate) fn support_link(label: impl IntoReactive<SharedString>) -> impl IntoElement {
-    link()
-        .href(SUPPORT_URL)
-        .h(px(36.0))
-        .px_4()
-        .items_center()
-        .justify_center()
-        .rounded(radii::PILL)
-        .bg(colors::ACCENT)
-        .transition()
-        .duration(motion::CONTROL_MS)
-        .ease_out()
-        .hover(|s| s.opacity(0.92))
-        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
-        .child(
-            text(label)
-                .text_sm()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(colors::ON_ACCENT),
-        )
+    external_link_button(label, SUPPORT_URL, true)
 }
 
-#[cfg(not(feature = "msstore"))]
 pub(crate) fn external_link_button(
     label: impl IntoReactive<SharedString>,
     href: &'static str,
     primary: bool,
 ) -> impl IntoElement {
+    let base = link()
+        .href(href)
+        .h(px(36.0))
+        .px_4()
+        .items_center()
+        .justify_center()
+        .rounded(radii::PILL)
+        .transition()
+        .duration(motion::CONTROL_MS)
+        .ease_out()
+        .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88));
     if primary {
-        link()
-            .href(href)
-            .h(px(36.0))
-            .px_4()
-            .items_center()
-            .justify_center()
-            .rounded(radii::PILL)
-            .bg(colors::ACCENT)
-            .transition()
-            .duration(motion::CONTROL_MS)
-            .ease_out()
+        base.bg(colors::ACCENT)
             .hover(|s| s.opacity(0.92))
-            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
             .child(
                 text(label)
                     .text_sm()
@@ -806,21 +753,10 @@ pub(crate) fn external_link_button(
             )
             .into_element()
     } else {
-        link()
-            .href(href)
-            .h(px(36.0))
-            .px_4()
-            .items_center()
-            .justify_center()
-            .rounded(radii::PILL)
-            .bg(colors::BACKGROUND_SURFACE)
+        base.bg(colors::BACKGROUND_SURFACE)
             .border_1()
             .border_color(colors::BORDER_EMPHASIZED)
-            .transition()
-            .duration(motion::CONTROL_MS)
-            .ease_out()
             .hover(|s| s.bg(colors::OVERLAY_HOVER))
-            .active(|s| s.scale(motion::PRESS_SCALE).opacity(0.88))
             .child(
                 text(label)
                     .text_sm()
@@ -836,19 +772,7 @@ pub(crate) fn version_update_badge(
     label: impl IntoReactive<SharedString>,
     on_press: impl Fn() + 'static,
 ) -> impl IntoElement {
-    let icon = canvas(|| {
-        let stroke = color(colors::ON_ACCENT);
-        Painter::new()
-            .scale(12.0_f32 / 24.0_f32, 12.0_f32 / 24.0_f32)
-            .stroke_color(stroke)
-            .line_width(2.25_f32)
-            .line_cap(LineCap::Round)
-            .line_join(LineJoin::Round)
-            .stroke_svg(DOWNLOAD_ICON_SVG)
-    })
-    .w(px(12.0))
-    .h(px(12.0))
-    .flex_shrink_0();
+    let icon = stroke_icon(12.0, 2.25, || colors::ON_ACCENT, || DOWNLOAD_ICON_SVG);
 
     button()
         .on_press(on_press)

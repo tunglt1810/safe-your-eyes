@@ -4,7 +4,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
-use sye_core::{AudioPlayer, ChimeKind, PlatformError, synthesize_chime_wav};
+use sye_core::{ChimeKind, PlatformError, synthesize_chime_wav};
 
 static AUDIO_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -18,6 +18,12 @@ struct PlayerSpec {
 pub struct OsAudioPlayer {
     temp_dir: PathBuf,
     players: &'static [PlayerSpec],
+}
+
+impl Default for OsAudioPlayer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OsAudioPlayer {
@@ -47,16 +53,8 @@ impl OsAudioPlayer {
         let wav = synthesize_chime_wav(kind, clamped);
         self.play_wav(&wav)
     }
-}
 
-impl Default for OsAudioPlayer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl AudioPlayer for OsAudioPlayer {
-    fn play_wav(&self, wav_bytes: &[u8]) -> Result<(), PlatformError> {
+    pub fn play_wav(&self, wav_bytes: &[u8]) -> Result<(), PlatformError> {
         if wav_bytes.is_empty() {
             return Ok(());
         }

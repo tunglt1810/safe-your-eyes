@@ -3,7 +3,7 @@
     forbid(unsafe_code)
 )]
 
-pub mod app_loop;
+mod app_loop;
 mod audio;
 mod autostart;
 mod clock;
@@ -40,8 +40,9 @@ pub use ipc::{DEFAULT_IPC_TIMEOUT, IpcClient, IpcError, IpcServer};
 pub use locale::detect_system_locale;
 pub use notify::{OsNotifier, format_pre_break_notification_localized};
 pub use overlay::{OVERLAY_SHOWN_SIGNAL, SubprocessOverlayLauncher};
-pub use paths::{AppPaths, session_path_for_config, update_cache_path_for_config};
-pub use sye_core::traits;
+pub use paths::{
+    AppPaths, resolve_current_exe, session_path_for_config, update_cache_path_for_config,
+};
 pub use theme_reveal::{
     cancel_theme_transition_snapshot, capture_theme_transition_snapshot,
     circular_reveal_max_radius, map_reveal_origin_y, reveal_theme_transition_snapshot,

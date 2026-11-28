@@ -39,13 +39,23 @@ const fn tone(light: Rgba, dark: Rgba) -> AdaptiveColor {
     }
 }
 
+const fn fixed_dark(color: AdaptiveColor) -> AdaptiveColor {
+    AdaptiveColor {
+        light: color.dark,
+        dark: color.dark,
+    }
+}
+
 pub(crate) mod colors {
-    use super::{AdaptiveColor, rgb, rgba, tone};
+    use sye_core::cozy;
+
+    use super::{AdaptiveColor, fixed_dark, rgb, rgba, tone};
 
     pub(crate) const BACKGROUND_BODY: AdaptiveColor = tone(rgb(0xFAEBDA), rgb(0x18140E));
-    pub(crate) const BACKGROUND_SURFACE: AdaptiveColor = tone(rgb(0xFBF1E1), rgb(0x231D16));
+    pub(crate) const BACKGROUND_SURFACE: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_SURFACE), rgb(cozy::DARK_SURFACE));
     pub(crate) const BACKGROUND_MUTED: AdaptiveColor = tone(rgb(0xF3DFC8), rgb(0x30261D));
-    pub(crate) const TRACK: AdaptiveColor = tone(rgb(0xE6D2BC), rgb(0x30271E));
+    pub(crate) const TRACK: AdaptiveColor = tone(rgb(cozy::LIGHT_TRACK), rgb(cozy::DARK_TRACK));
 
     pub(crate) const SIDEBAR_BG: AdaptiveColor = tone(rgb(0xC3CBB9), rgb(0x29332A));
     pub(crate) const SIDEBAR_ACTIVE: AdaptiveColor = tone(rgb(0xF8E8D3), rgb(0x404A41));
@@ -53,17 +63,24 @@ pub(crate) mod colors {
     pub(crate) const SIDEBAR_TEXT_MUTED: AdaptiveColor = tone(rgb(0x55503A), rgb(0xB8C4B6));
     pub(crate) const OVERLAY_HOVER: AdaptiveColor = tone(rgba(0x2611010D), rgba(0xFFFEF70F));
 
-    pub(crate) const ACCENT: AdaptiveColor = tone(rgb(0xEF8F63), rgb(0xEE8F64));
-    pub(crate) const ON_ACCENT: AdaptiveColor = tone(rgb(0x261101), rgb(0x18140E));
-    pub(crate) const FOCUS_RING: AdaptiveColor = tone(rgb(0xA84A24), rgb(0xF2A57E));
+    pub(crate) const ACCENT: AdaptiveColor = tone(rgb(cozy::LIGHT_ACCENT), rgb(cozy::DARK_ACCENT));
+    pub(crate) const ON_ACCENT: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_ON_ACCENT), rgb(cozy::DARK_ON_ACCENT));
+    pub(crate) const FOCUS_RING: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_FOCUS_RING), rgb(cozy::DARK_FOCUS_RING));
 
-    pub(crate) const TEXT_PRIMARY: AdaptiveColor = tone(rgb(0x261101), rgb(0xFFFEF7));
-    pub(crate) const TEXT_SECONDARY: AdaptiveColor = tone(rgb(0x5B4C3B), rgb(0xC2B7B1));
+    pub(crate) const TEXT_PRIMARY: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_TEXT_PRIMARY), rgb(cozy::DARK_TEXT_PRIMARY));
+    pub(crate) const TEXT_SECONDARY: AdaptiveColor = tone(
+        rgb(cozy::LIGHT_TEXT_SECONDARY),
+        rgb(cozy::DARK_TEXT_SECONDARY),
+    );
     pub(crate) const TEXT_DISABLED: AdaptiveColor = tone(rgb(0x968574), rgb(0x70655C));
 
     pub(crate) const WARNING: AdaptiveColor = tone(rgb(0xB87A12), rgb(0xF5C156));
     pub(crate) const ERROR: AdaptiveColor = tone(rgb(0xC8433B), rgb(0xF27B70));
-    pub(crate) const WARNING_SOFT: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
+    pub(crate) const WARNING_SOFT: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_WARNING_SOFT), rgb(cozy::DARK_WARNING_SOFT));
     pub(crate) const ON_WARNING_MUTED: AdaptiveColor = tone(rgb(0x6B4408), rgb(0xFCE09B));
     pub(crate) const ERROR_SOFT: AdaptiveColor = tone(rgb(0xF9CFC8), rgb(0x472826));
     pub(crate) const ON_ERROR_MUTED: AdaptiveColor = tone(rgb(0x7E211C), rgb(0xF9BEB8));
@@ -71,21 +88,24 @@ pub(crate) mod colors {
     pub(crate) const HEADING_HIGHLIGHT: AdaptiveColor = tone(rgb(0xFAD3B9), rgb(0x7D4737));
 
     pub(crate) const BORDER: AdaptiveColor = tone(rgba(0x5B4C3B22), rgb(0x3E3831));
-    pub(crate) const BORDER_EMPHASIZED: AdaptiveColor = tone(rgb(0xDFCBB5), rgb(0x52493F));
+    pub(crate) const BORDER_EMPHASIZED: AdaptiveColor = tone(
+        rgb(cozy::LIGHT_BORDER_EMPHASIZED),
+        rgb(cozy::DARK_BORDER_EMPHASIZED),
+    );
 
-    pub(crate) const SWITCH_KNOB: AdaptiveColor = tone(rgb(0xFFFEF7), rgb(0xFFFEF7));
+    pub(crate) const SWITCH_KNOB: AdaptiveColor = fixed_dark(TEXT_PRIMARY);
 
-    pub(crate) const OVERLAY_CANVAS: AdaptiveColor = tone(rgb(0x18140E), rgb(0x18140E));
-    pub(crate) const OVERLAY_CARD: AdaptiveColor = tone(rgb(0x231D16), rgb(0x231D16));
-    pub(crate) const OVERLAY_TEXT: AdaptiveColor = tone(rgb(0xFFFEF7), rgb(0xFFFEF7));
-    pub(crate) const OVERLAY_MUTED: AdaptiveColor = tone(rgb(0xC2B7B1), rgb(0xC2B7B1));
-    pub(crate) const OVERLAY_TRACK: AdaptiveColor = tone(rgb(0x30271E), rgb(0x30271E));
-    pub(crate) const OVERLAY_BORDER: AdaptiveColor = tone(rgb(0x3E3831), rgb(0x3E3831));
-    pub(crate) const OVERLAY_BORDER_EMPHASIZED: AdaptiveColor = tone(rgb(0x52493F), rgb(0x52493F));
+    pub(crate) const OVERLAY_CANVAS: AdaptiveColor = fixed_dark(BACKGROUND_BODY);
+    pub(crate) const OVERLAY_CARD: AdaptiveColor = fixed_dark(BACKGROUND_SURFACE);
+    pub(crate) const OVERLAY_TEXT: AdaptiveColor = fixed_dark(TEXT_PRIMARY);
+    pub(crate) const OVERLAY_MUTED: AdaptiveColor = fixed_dark(TEXT_SECONDARY);
+    pub(crate) const OVERLAY_TRACK: AdaptiveColor = fixed_dark(TRACK);
+    pub(crate) const OVERLAY_BORDER: AdaptiveColor = fixed_dark(BORDER);
+    pub(crate) const OVERLAY_BORDER_EMPHASIZED: AdaptiveColor = fixed_dark(BORDER_EMPHASIZED);
 }
 
 pub(crate) mod kpi {
-    use super::{AdaptiveColor, rgb, tone};
+    use super::{AdaptiveColor, colors, rgb, tone};
 
     pub(crate) const SAGE_BG: AdaptiveColor = tone(rgb(0xE2DEC4), rgb(0x31392C));
     pub(crate) const SAGE_ACCENT: AdaptiveColor = tone(rgb(0x7EAB9A), rgb(0x5E8C7A));
@@ -93,7 +113,7 @@ pub(crate) mod kpi {
     pub(crate) const PEACH_BG: AdaptiveColor = tone(rgb(0xFBCBB4), rgb(0x432F28));
     pub(crate) const PEACH_ACCENT: AdaptiveColor = tone(rgb(0xF48A65), rgb(0xE5866B));
 
-    pub(crate) const BUTTER_BG: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
+    pub(crate) const BUTTER_BG: AdaptiveColor = colors::WARNING_SOFT;
     pub(crate) const BUTTER_ACCENT: AdaptiveColor = tone(rgb(0xFAC76A), rgb(0xD9A74E));
 
     pub(crate) const MIST_BG: AdaptiveColor = tone(rgb(0xD2D7DA), rgb(0x2B333D));
@@ -101,33 +121,39 @@ pub(crate) mod kpi {
 }
 
 pub(crate) mod badge {
-    use super::{AdaptiveColor, rgb, rgba, tone};
+    use sye_core::cozy;
 
-    pub(crate) const GREEN_BG: AdaptiveColor = tone(rgb(0xE2DEC4), rgb(0x31392C));
+    use super::{AdaptiveColor, colors, kpi, rgb, rgba, tone};
+
+    pub(crate) const GREEN_BG: AdaptiveColor = kpi::SAGE_BG;
     pub(crate) const GREEN_BORDER: AdaptiveColor = tone(rgb(0xB8C4A6), rgb(0x5E8C7A));
     pub(crate) const GREEN_ICON: AdaptiveColor = tone(rgb(0x3C6E58), rgb(0x8EC2AC));
     pub(crate) const GREEN_TEXT: AdaptiveColor = tone(rgb(0x234930), rgb(0xC3E6CC));
     pub(crate) const GREEN_CHIP_BG: AdaptiveColor = tone(rgba(0x23493018), rgba(0xC3E6CC1F));
 
-    pub(crate) const YELLOW_BG: AdaptiveColor = tone(rgb(0xFAE1B5), rgb(0x443A26));
-    pub(crate) const YELLOW_BORDER: AdaptiveColor = tone(rgb(0xE5C27D), rgb(0xC99A44));
+    pub(crate) const YELLOW_BG: AdaptiveColor = kpi::BUTTER_BG;
+    pub(crate) const YELLOW_BORDER: AdaptiveColor = tone(
+        rgb(cozy::LIGHT_YELLOW_BORDER),
+        rgb(cozy::DARK_YELLOW_BORDER),
+    );
     pub(crate) const YELLOW_ICON: AdaptiveColor = tone(rgb(0x8A5406), rgb(0xF5C96B));
-    pub(crate) const YELLOW_TEXT: AdaptiveColor = tone(rgb(0x5E3904), rgb(0xFCE09B));
+    pub(crate) const YELLOW_TEXT: AdaptiveColor =
+        tone(rgb(cozy::LIGHT_YELLOW_TEXT), rgb(cozy::DARK_YELLOW_TEXT));
     pub(crate) const YELLOW_CHIP_BG: AdaptiveColor = tone(rgba(0x5E390418), rgba(0xFCE09B1F));
 
-    pub(crate) const ORANGE_BG: AdaptiveColor = tone(rgb(0xFBCBB4), rgb(0x432F28));
+    pub(crate) const ORANGE_BG: AdaptiveColor = kpi::PEACH_BG;
     pub(crate) const ORANGE_BORDER: AdaptiveColor = tone(rgb(0xEDA98B), rgb(0xD97B56));
     pub(crate) const ORANGE_ICON: AdaptiveColor = tone(rgb(0xB5542B), rgb(0xF2A57E));
     pub(crate) const ORANGE_TEXT: AdaptiveColor = tone(rgb(0x6B2B11), rgb(0xFAD1BC));
 
-    pub(crate) const BLUE_BG: AdaptiveColor = tone(rgb(0xD2D7DA), rgb(0x2B333D));
+    pub(crate) const BLUE_BG: AdaptiveColor = kpi::MIST_BG;
     pub(crate) const BLUE_BORDER: AdaptiveColor = tone(rgb(0xA2B3C1), rgb(0x5C7388));
     pub(crate) const BLUE_ICON: AdaptiveColor = tone(rgb(0x2F5B84), rgb(0x9BC5EA));
     pub(crate) const BLUE_TEXT: AdaptiveColor = tone(rgb(0x1F3F5C), rgb(0xC5DEF5));
 
     pub(crate) const GRAY_BG: AdaptiveColor = tone(rgb(0xEDE0CE), rgb(0x2E2720));
     pub(crate) const GRAY_BORDER: AdaptiveColor = tone(rgb(0xDFCBB5), rgb(0x473E35));
-    pub(crate) const GRAY_ICON: AdaptiveColor = tone(rgb(0x5B4C3B), rgb(0xC2B7B1));
+    pub(crate) const GRAY_ICON: AdaptiveColor = colors::TEXT_SECONDARY;
     pub(crate) const GRAY_TEXT: AdaptiveColor = tone(rgb(0x3B2A1C), rgb(0xE8DFD5));
 }
 
@@ -156,7 +182,7 @@ pub(crate) mod motion {
     };
 
     pub(crate) const COZY_EASE: Easing = Easing::Bezier(0.22, 1.0, 0.36, 1.0);
-    pub(crate) const COZY_STANDARD_BEZIER: (f32, f32, f32, f32) = (0.4, 0.0, 0.2, 1.0);
+    pub(crate) const COZY_STANDARD_BEZIER: (f32, f32, f32, f32) = sye_core::cozy::STANDARD_BEZIER;
 
     pub(crate) const HIGHLIGHT_SWEEP_MS: f32 = 380.0;
     pub(crate) const THEME_COLOR_MS: f32 = 200.0;

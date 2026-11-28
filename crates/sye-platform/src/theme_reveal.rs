@@ -58,6 +58,11 @@ pub fn cancel_theme_transition_snapshot() {
 }
 
 #[cfg(target_os = "macos")]
+pub(crate) fn quiet_ca(f: impl FnOnce()) {
+    macos::quiet(f);
+}
+
+#[cfg(target_os = "macos")]
 mod macos {
     use std::cell::{Cell, RefCell};
     use std::ptr;
@@ -259,7 +264,8 @@ mod macos {
 
         let animation = CABasicAnimation::animationWithKeyPath(Some(ns_string!("path")));
         animation.setDuration((duration_ms as f64) / 1000.0);
-        let timing = CAMediaTimingFunction::functionWithControlPoints(0.4, 0.0, 0.2, 1.0);
+        let (bx1, by1, bx2, by2) = sye_core::cozy::STANDARD_BEZIER;
+        let timing = CAMediaTimingFunction::functionWithControlPoints(bx1, by1, bx2, by2);
         animation.setTimingFunction(Some(&timing));
         #[expect(
             unsafe_code,
@@ -302,7 +308,7 @@ mod macos {
         });
     }
 
-    fn quiet(f: impl FnOnce()) {
+    pub(super) fn quiet(f: impl FnOnce()) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         f();

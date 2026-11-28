@@ -28,11 +28,6 @@ impl SmartPausePolicy {
         }
     }
 
-    #[must_use]
-    pub const fn is_idle_paused(&self) -> bool {
-        self.idle_paused
-    }
-
     pub const fn reset(&mut self) {
         self.idle_paused = false;
         self.idle_origin = None;
@@ -223,12 +218,15 @@ pub fn is_gaming_candidate(
     process_name: Option<&str>,
     executable_path: Option<&str>,
 ) -> bool {
-    if is_excluded_game_process(process_name) {
-        return false;
-    }
     let process_stem = process_name
         .map(normalize_process_stem)
         .filter(|s| !s.is_empty());
+    if process_stem
+        .as_deref()
+        .is_some_and(|stem| EXCLUDED_GAME_PROCESSES.contains(&stem))
+    {
+        return false;
+    }
 
     if let Some(path) = executable_path {
         let normalized_path = path.trim().replace('\\', "/").to_lowercase();
@@ -287,21 +285,17 @@ pub struct DoNotDisturbPolicy;
 impl DoNotDisturbPolicy {
     #[must_use]
     pub fn evaluate(cfg: &DoNotDisturbConfig, ctx: &DndContext) -> DndDecision {
-        if !cfg.enabled && !cfg.while_gaming {
+        if !cfg.needs_query() {
             return DndDecision::Allow;
         }
         if cfg.enabled && cfg.while_on_battery && ctx.on_battery {
             return DndDecision::Suppress(DndReason::OnBattery);
         }
-        let has_window_rules =
-            !cfg.skip_break_windows.is_empty() || !cfg.take_break_windows.is_empty();
-        if has_window_rules {
-            if cfg.enabled && matches_context_window(ctx, &cfg.skip_break_windows) {
-                return DndDecision::Suppress(DndReason::SkipWindow);
-            }
-            if matches_context_window(ctx, &cfg.take_break_windows) {
-                return DndDecision::Allow;
-            }
+        if cfg.enabled && matches_context_window(ctx, &cfg.skip_break_windows) {
+            return DndDecision::Suppress(DndReason::SkipWindow);
+        }
+        if matches_context_window(ctx, &cfg.take_break_windows) {
+            return DndDecision::Allow;
         }
         if cfg.enabled && ctx.is_fullscreen {
             return DndDecision::Suppress(DndReason::Fullscreen);
@@ -320,20 +314,28 @@ fn matches_context_window(ctx: &DndContext, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return false;
     }
-    [
+    let candidates: Vec<String> = [
         ctx.active_window_class.as_deref(),
         ctx.active_process_name.as_deref(),
     ]
     .into_iter()
     .flatten()
-    .filter(|candidate| !candidate.trim().is_empty())
-    .any(|candidate| matches_any_window_lower(&candidate.to_lowercase(), patterns))
-}
-
-fn matches_any_window_lower(active_lower: &str, patterns: &[String]) -> bool {
+    .map(str::trim)
+    .filter(|candidate| !candidate.is_empty())
+    .map(str::to_lowercase)
+    .collect();
+    if candidates.is_empty() {
+        return false;
+    }
     patterns.iter().any(|pattern| {
         let trimmed = pattern.trim();
-        !trimmed.is_empty() && active_lower.contains(&trimmed.to_lowercase())
+        if trimmed.is_empty() {
+            return false;
+        }
+        let needle = trimmed.to_lowercase();
+        candidates
+            .iter()
+            .any(|candidate| candidate.contains(&needle))
     })
 }
 

@@ -75,20 +75,26 @@ impl AppPaths {
     }
 }
 
-#[must_use]
-pub fn session_path_for_config(config_path: &Path) -> PathBuf {
+fn sibling_path_for_config(config_path: &Path, filename: &str) -> PathBuf {
     match config_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join("session.toml"),
-        _ => PathBuf::from("session.toml"),
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(filename),
+        _ => PathBuf::from(filename),
     }
 }
 
 #[must_use]
+pub fn session_path_for_config(config_path: &Path) -> PathBuf {
+    sibling_path_for_config(config_path, "session.toml")
+}
+
+#[must_use]
 pub fn update_cache_path_for_config(config_path: &Path) -> PathBuf {
-    match config_path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent.join("update.toml"),
-        _ => PathBuf::from("update.toml"),
-    }
+    sibling_path_for_config(config_path, "update.toml")
+}
+
+pub fn resolve_current_exe() -> std::io::Result<PathBuf> {
+    let exe = std::env::current_exe()?;
+    Ok(exe.canonicalize().unwrap_or(exe))
 }
 
 fn default_socket_path(proj: &ProjectDirs) -> PathBuf {

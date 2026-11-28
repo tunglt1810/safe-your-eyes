@@ -5,7 +5,7 @@ use std::path::Path;
 #[cfg(target_os = "linux")]
 use std::sync::Mutex;
 
-use sye_core::{DndContext, DndProvider, DndQueryOptions, PlatformError};
+use sye_core::{DndContext, DndQueryOptions, PlatformError};
 
 pub struct SystemDndProvider {
     #[cfg(target_os = "linux")]
@@ -26,20 +26,8 @@ impl SystemDndProvider {
             x11: Mutex::new(None),
         }
     }
-}
 
-impl Default for SystemDndProvider {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DndProvider for SystemDndProvider {
-    fn query_dnd_context(&self) -> Result<DndContext, PlatformError> {
-        self.query_dnd_context_with(DndQueryOptions::default())
-    }
-
-    fn query_dnd_context_with(
+    pub fn query_dnd_context_with(
         &self,
         options: DndQueryOptions,
     ) -> Result<DndContext, PlatformError> {
@@ -60,6 +48,12 @@ impl DndProvider for SystemDndProvider {
             let _ = options;
             Ok(DndContext::default())
         }
+    }
+}
+
+impl Default for SystemDndProvider {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -124,6 +118,30 @@ fn has_linux_game_environ(raw: &[u8]) -> bool {
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn read_proc_identity(proc_dir: &Path) -> (Option<String>, Option<String>) {
+    let exe_path = fs::read_link(proc_dir.join("exe"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|s| !s.trim().is_empty());
+    let comm = fs::read_to_string(proc_dir.join("comm"))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let process_name = exe_path
+        .as_deref()
+        .and_then(extract_executable_file_name)
+        .or(comm);
+    (process_name, exe_path)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn has_proc_game_environ(proc_dir: &Path) -> bool {
+    fs::read(proc_dir.join("environ"))
+        .ok()
+        .is_some_and(|raw| has_linux_game_environ(&raw))
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn has_linux_background_game_in(proc_root: &Path, self_pid: u32) -> bool {
     let Ok(entries) = fs::read_dir(proc_root) else {
         return false;
@@ -141,28 +159,14 @@ fn has_linux_background_game_in(proc_root: &Path, self_pid: u32) -> bool {
             continue;
         }
         let proc_dir = entry.path();
-        let exe_path = fs::read_link(proc_dir.join("exe"))
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|s| !s.trim().is_empty());
-        let comm = fs::read_to_string(proc_dir.join("comm"))
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        let process_name = exe_path
-            .as_deref()
-            .and_then(extract_executable_file_name)
-            .or(comm);
+        let (process_name, exe_path) = read_proc_identity(&proc_dir);
         if sye_core::is_excluded_game_process(process_name.as_deref()) {
             continue;
         }
         if sye_core::is_gaming_candidate(None, process_name.as_deref(), exe_path.as_deref()) {
             return true;
         }
-        if fs::read(proc_dir.join("environ"))
-            .ok()
-            .is_some_and(|raw| has_linux_game_environ(&raw))
-        {
+        if has_proc_game_environ(&proc_dir) {
             return true;
         }
     }
@@ -235,7 +239,6 @@ fn parse_macos_frontmost_output(output: &str) -> (bool, Option<String>) {
 
 #[cfg(target_os = "linux")]
 mod linux_impl {
-    use std::fs;
     use std::path::Path;
     use std::sync::{Mutex, PoisonError};
 
@@ -244,10 +247,7 @@ mod linux_impl {
     use x11rb::protocol::xproto::{Atom, AtomEnum, ConnectionExt as _, Window};
     use x11rb::rust_connection::RustConnection;
 
-    use super::{
-        extract_executable_file_name, has_linux_background_game_in, has_linux_game_environ,
-        is_battery_discharging_in, parse_wm_class,
-    };
+    use super::{has_linux_background_game_in, is_battery_discharging_in, parse_wm_class};
 
     #[derive(Default)]
     struct X11ActiveWindow {
@@ -421,22 +421,9 @@ mod linux_impl {
 
     fn query_proc_info(pid: u32) -> (Option<String>, Option<String>, bool) {
         let proc_dir = Path::new("/proc").join(pid.to_string());
-        let exe_path = fs::read_link(proc_dir.join("exe"))
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-            .filter(|s| !s.trim().is_empty());
-        let comm = fs::read_to_string(proc_dir.join("comm"))
-            .ok()
-            .map(|s| s.trim().to_owned())
-            .filter(|s| !s.is_empty());
-        let process_name = exe_path
-            .as_deref()
-            .and_then(extract_executable_file_name)
-            .or(comm);
+        let (process_name, exe_path) = super::read_proc_identity(&proc_dir);
         let has_game_env = !sye_core::is_excluded_game_process(process_name.as_deref())
-            && fs::read(proc_dir.join("environ"))
-                .ok()
-                .is_some_and(|raw| has_linux_game_environ(&raw));
+            && super::has_proc_game_environ(&proc_dir);
         (process_name, exe_path, has_game_env)
     }
 
@@ -917,6 +904,15 @@ mod windows_impl {
         let (process_name, executable_path) =
             query_process_executable_for_pid(query_window_pid(hwnd));
 
+        ForegroundWindowInfo {
+            is_fullscreen: is_window_fullscreen(hwnd),
+            window_class,
+            process_name,
+            executable_path,
+        }
+    }
+
+    fn is_window_fullscreen(hwnd: HWND) -> bool {
         let mut win_rect = RECT {
             left: 0,
             top: 0,
@@ -927,24 +923,14 @@ mod windows_impl {
         #[expect(unsafe_code, reason = "Win32 FFI")]
         let has_rect = unsafe { GetWindowRect(hwnd, &mut win_rect) } != 0;
         if !has_rect {
-            return ForegroundWindowInfo {
-                window_class,
-                process_name,
-                executable_path,
-                is_fullscreen: false,
-            };
+            return false;
         }
 
         // SAFETY: `hwnd` is non-null; returns monitor handle or null.
         #[expect(unsafe_code, reason = "Win32 FFI")]
         let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
         if monitor.is_null() {
-            return ForegroundWindowInfo {
-                window_class,
-                process_name,
-                executable_path,
-                is_fullscreen: false,
-            };
+            return false;
         }
 
         let mut info = MONITORINFO {
@@ -967,26 +953,14 @@ mod windows_impl {
         #[expect(unsafe_code, reason = "Win32 FFI")]
         let has_info = unsafe { GetMonitorInfoW(monitor, &mut info) } != 0;
         if !has_info {
-            return ForegroundWindowInfo {
-                window_class,
-                process_name,
-                executable_path,
-                is_fullscreen: false,
-            };
+            return false;
         }
 
         let mon = info.rcMonitor;
-        let is_fullscreen = win_rect.left <= mon.left
+        win_rect.left <= mon.left
             && win_rect.top <= mon.top
             && win_rect.right >= mon.right
-            && win_rect.bottom >= mon.bottom;
-
-        ForegroundWindowInfo {
-            is_fullscreen,
-            window_class,
-            process_name,
-            executable_path,
-        }
+            && win_rect.bottom >= mon.bottom
     }
 }
 
@@ -1170,7 +1144,7 @@ mod tests {
     #[test]
     fn system_dnd_provider_returns_ok_in_headless_env() -> Result<(), Box<dyn std::error::Error>> {
         let provider = SystemDndProvider::new();
-        let _ctx = provider.query_dnd_context()?;
+        let _ctx = provider.query_dnd_context_with(DndQueryOptions::default())?;
         Ok(())
     }
 }

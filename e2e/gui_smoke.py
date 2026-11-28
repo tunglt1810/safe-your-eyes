@@ -490,21 +490,65 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
                 f"Closing Settings changed the countdown: before={before} after={after}"
             )
         print(f"PASS daemon survives Settings close, countdown kept: {before} -> {after}")
+    finally:
+        subprocess.run(
+            [str(binary), "--quit", "--config", str(cfg), "--socket", str(sock)],
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        try:
+            daemon.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait(timeout=5.0)
+        log.close()
 
-        if platform.system() == "Darwin":
-            _macos_request_quit(daemon.pid)
-            try:
-                exit_code = daemon.wait(timeout=5.0)
-            except subprocess.TimeoutExpired as exc:
+
+def verify_macos_daemon_terminate(binary: Path) -> None:
+    cfg = TMP_BASE / "macos_terminate_config.toml"
+    sock = TMP_BASE / "macos_terminate.sock"
+    cfg.write_text("autostart = false\ncheck_for_updates = false\n", encoding="utf-8")
+    log_path = TMP_BASE / "macos_terminate.stderr.log"
+    log = log_path.open("w", encoding="utf-8")
+    daemon = subprocess.Popen(
+        [str(binary), "--background", "--config", str(cfg), "--socket", str(sock)],
+        stdout=subprocess.DEVNULL,
+        stderr=log,
+        text=True,
+    )
+    try:
+        deadline = time.monotonic() + 15.0
+        ready = False
+        while time.monotonic() < deadline:
+            if daemon.poll() is not None:
                 raise AssertionError(
-                    f"Daemon did not exit on macOS terminate request: {_read_log(log_path)}"
-                ) from exc
-            if exit_code != 0:
-                raise AssertionError(
-                    f"Daemon exited with {exit_code} on macOS terminate request: "
-                    f"{_read_log(log_path)}"
+                    f"Daemon exited early ({daemon.returncode}): {_read_log(log_path)}"
                 )
-            print("PASS macOS NSRunningApplication.terminate exits daemon cleanly")
+            try:
+                daemon_status(binary, cfg, sock)
+                ready = True
+                break
+            except Exception:
+                time.sleep(0.2)
+        if not ready:
+            raise AssertionError(
+                f"Daemon IPC did not become ready in time: {_read_log(log_path)}"
+            )
+
+        _macos_request_quit(daemon.pid)
+        try:
+            exit_code = daemon.wait(timeout=5.0)
+        except subprocess.TimeoutExpired as exc:
+            raise AssertionError(
+                f"Daemon did not exit on macOS terminate request: {_read_log(log_path)}"
+            ) from exc
+        if exit_code != 0:
+            raise AssertionError(
+                f"Daemon exited with {exit_code} on macOS terminate request: "
+                f"{_read_log(log_path)}"
+            )
+        print("PASS macOS NSRunningApplication.terminate exits daemon cleanly")
     finally:
         if daemon.poll() is None:
             subprocess.run(
@@ -624,7 +668,9 @@ def main() -> int:
             _macos_build_probe()
         verify_settings_window(binary)
         verify_overlay_windows(binary)
-        if platform.system() in ("Linux", "Windows"):
+        if platform.system() == "Darwin":
+            verify_macos_daemon_terminate(binary)
+        elif platform.system() in ("Linux", "Windows"):
             verify_daemon_survives_settings_close(binary)
     finally:
         shutil.rmtree(TMP_BASE, ignore_errors=True)

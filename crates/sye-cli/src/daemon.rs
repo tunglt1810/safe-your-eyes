@@ -905,7 +905,12 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
         host.refresh_tray(&scheduler.tray_snapshot());
 
         if let Some(ref event_loop) = app_loop {
-            event_loop.pump_events(POLL_INTERVAL);
+            event_loop.pump_events(POLL_INTERVAL, || {
+                let actions = scheduler.handle_event(SchedulerEvent::Quit);
+                host.execute(actions);
+                host.close_overlay();
+                host.close_settings();
+            });
         } else {
             std::thread::sleep(POLL_INTERVAL);
         }
@@ -917,9 +922,6 @@ pub(crate) fn run_daemon(paths: &AppPaths, headless: bool, background: bool) -> 
     drop(server);
     if restart_after_exit && let Err(err) = spawn_restarted_daemon(paths, headless) {
         eprintln!("Warning: failed to restart updated daemon: {err}");
-    }
-    if let Some(event_loop) = app_loop {
-        event_loop.finish_termination();
     }
 
     ExitCode::SUCCESS

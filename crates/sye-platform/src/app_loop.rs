@@ -34,29 +34,25 @@ impl PlatformEventLoop {
         }
     }
 
-    pub fn pump_events(&self, timeout: Duration) {
+    pub fn pump_events(&self, timeout: Duration, on_terminate: impl FnOnce()) {
         #[cfg(target_os = "macos")]
         {
             if let Some(ref inner) = self.inner {
-                inner.pump(timeout);
+                inner.pump(timeout, on_terminate);
             } else {
+                let _ = on_terminate;
                 std::thread::sleep(timeout);
             }
         }
         #[cfg(target_os = "windows")]
         {
+            let _ = on_terminate;
             windows_impl::pump(timeout);
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
+            let _ = on_terminate;
             std::thread::sleep(timeout);
-        }
-    }
-
-    pub fn finish_termination(&self) {
-        #[cfg(target_os = "macos")]
-        if let Some(ref inner) = self.inner {
-            inner.finish_termination();
         }
     }
 
@@ -101,6 +97,8 @@ impl PlatformEventLoop {
     reason = "macOS AppKit NSApplicationDelegate definition, initialization, and runloop mode"
 )]
 mod macos_impl {
+    use std::cell::Cell;
+    use std::ptr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::Sender;
@@ -124,9 +122,55 @@ mod macos_impl {
     const KEY_AE_PROP_DATA: u32 = u32::from_be_bytes(*b"prdt");
     const KEY_AE_LAUNCHED_AS_LOGIN_ITEM: u32 = u32::from_be_bytes(*b"lgit");
 
+    #[derive(Clone, Copy)]
+    struct TerminateCallback {
+        data: *mut (),
+        call: unsafe fn(*mut ()),
+    }
+
+    impl TerminateCallback {
+        fn new<F: FnOnce()>(slot: &mut Option<F>) -> Self {
+            unsafe fn invoke<F: FnOnce()>(ptr: *mut ()) {
+                // SAFETY: `ptr` points to a live `Option<F>` on the main thread stack for the
+                // active `pump` call, and `TerminateCallbackGuard` clears the slot on return.
+                if let Some(callback) = unsafe { (*ptr.cast::<Option<F>>()).take() } {
+                    callback();
+                }
+            }
+
+            Self {
+                data: ptr::from_mut(slot).cast::<()>(),
+                call: invoke::<F>,
+            }
+        }
+
+        unsafe fn invoke(self) {
+            // SAFETY: Caller guarantees `self.data` is live and uniquely accessed.
+            unsafe { (self.call)(self.data) };
+        }
+    }
+
+    struct TerminateCallbackGuard<'a> {
+        slot: &'a Cell<Option<TerminateCallback>>,
+        prev: Option<TerminateCallback>,
+    }
+
+    impl<'a> TerminateCallbackGuard<'a> {
+        fn install(slot: &'a Cell<Option<TerminateCallback>>, callback: TerminateCallback) -> Self {
+            let prev = slot.replace(Some(callback));
+            Self { slot, prev }
+        }
+    }
+
+    impl Drop for TerminateCallbackGuard<'_> {
+        fn drop(&mut self) {
+            self.slot.set(self.prev);
+        }
+    }
+
     struct DelegateIvars {
         event_tx: Sender<TrayEvent>,
-        termination_requested: Arc<AtomicBool>,
+        on_terminate: Cell<Option<TerminateCallback>>,
         launched_as_login_item: Arc<AtomicBool>,
         did_finish_launching: Arc<AtomicBool>,
     }
@@ -173,11 +217,14 @@ mod macos_impl {
 
             #[unsafe(method(applicationShouldTerminate:))]
             fn should_terminate(&self, _sender: &NSApplication) -> NSApplicationTerminateReply {
-                self.ivars()
-                    .termination_requested
-                    .store(true, Ordering::Release);
-                let _ = self.ivars().event_tx.send(TrayEvent::Quit);
-                NSApplicationTerminateReply::TerminateLater
+                // Returning `TerminateLater` blocks `-[NSApplication terminate:]` in
+                // `NSModalPanelRunLoopMode` and deadlocks the manual daemon pump loop.
+                if let Some(callback) = self.ivars().on_terminate.take() {
+                    // SAFETY: `callback` is installed on the main thread for the active `pump`
+                    // call and removed via `take()` before running so it cannot re-enter.
+                    unsafe { callback.invoke() };
+                }
+                NSApplicationTerminateReply::TerminateNow
             }
         }
     );
@@ -193,8 +240,7 @@ mod macos_impl {
 
     pub(super) struct MacOsEventLoop {
         app: Retained<NSApplication>,
-        _delegate: Retained<DaemonAppDelegate>,
-        termination_requested: Arc<AtomicBool>,
+        delegate: Retained<DaemonAppDelegate>,
         launched_as_login_item: Arc<AtomicBool>,
         did_finish_launching: Arc<AtomicBool>,
     }
@@ -202,7 +248,6 @@ mod macos_impl {
     impl MacOsEventLoop {
         pub(super) fn try_new(event_tx: Sender<TrayEvent>) -> Option<Self> {
             let mtm = MainThreadMarker::new()?;
-            let termination_requested = Arc::new(AtomicBool::new(false));
             let launched_as_login_item = Arc::new(AtomicBool::new(false));
             let did_finish_launching = Arc::new(AtomicBool::new(false));
             let instance = autoreleasepool(|_| {
@@ -212,7 +257,7 @@ mod macos_impl {
                     mtm,
                     DelegateIvars {
                         event_tx,
-                        termination_requested: Arc::clone(&termination_requested),
+                        on_terminate: Cell::new(None),
                         launched_as_login_item: Arc::clone(&launched_as_login_item),
                         did_finish_launching: Arc::clone(&did_finish_launching),
                     },
@@ -221,8 +266,7 @@ mod macos_impl {
                 app.finishLaunching();
                 Self {
                     app,
-                    _delegate: delegate,
-                    termination_requested,
+                    delegate,
                     launched_as_login_item,
                     did_finish_launching,
                 }
@@ -233,12 +277,21 @@ mod macos_impl {
                 if remaining.is_zero() {
                     break;
                 }
-                instance.pump(remaining.min(Duration::from_millis(10)));
+                instance.pump_once(remaining.min(Duration::from_millis(10)));
             }
             Some(instance)
         }
 
-        pub(super) fn pump(&self, timeout: Duration) {
+        pub(super) fn pump(&self, timeout: Duration, on_terminate: impl FnOnce()) {
+            let mut callback_slot = Some(on_terminate);
+            let _guard = TerminateCallbackGuard::install(
+                &self.delegate.ivars().on_terminate,
+                TerminateCallback::new(&mut callback_slot),
+            );
+            self.pump_once(timeout);
+        }
+
+        fn pump_once(&self, timeout: Duration) {
             autoreleasepool(|_| {
                 // SAFETY: `NSDefaultRunLoopMode` is an immutable AppKit/Foundation static constant.
                 let mode = unsafe { NSDefaultRunLoopMode };
@@ -299,19 +352,44 @@ mod macos_impl {
                 }
             });
         }
-
-        pub(super) fn finish_termination(&self) {
-            if self.termination_requested.swap(false, Ordering::AcqRel) {
-                autoreleasepool(|_| {
-                    self.app.replyToApplicationShouldTerminate(true);
-                });
-            }
-        }
     }
 
     impl Drop for MacOsEventLoop {
         fn drop(&mut self) {
             self.app.setDelegate(None);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::cell::Cell;
+
+        use super::{TerminateCallback, TerminateCallbackGuard};
+
+        #[test]
+        fn terminate_callback_guard_invokes_once_and_clears_on_drop() {
+            let cell = Cell::new(None);
+            let mut count = 0_u32;
+            {
+                let mut cb = Some(|| count += 1);
+                let _guard =
+                    TerminateCallbackGuard::install(&cell, TerminateCallback::new(&mut cb));
+                if let Some(callback) = cell.take() {
+                    // SAFETY: `cb` is alive for the scope of `_guard`.
+                    unsafe { callback.invoke() };
+                }
+                assert!(cell.take().is_none());
+            }
+            assert_eq!(count, 1);
+            assert!(cell.take().is_none());
+
+            {
+                let mut cb = Some(|| count += 10);
+                let _guard =
+                    TerminateCallbackGuard::install(&cell, TerminateCallback::new(&mut cb));
+            }
+            assert_eq!(count, 1);
+            assert!(cell.take().is_none());
         }
     }
 }
@@ -562,11 +640,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn platform_event_loop_pumps_and_finishes_cleanly_on_test_thread() {
+    fn platform_event_loop_pumps_cleanly_on_test_thread() {
         let (tx, _rx) = mpsc::channel();
         let event_loop = PlatformEventLoop::new(tx);
-        event_loop.pump_events(Duration::from_millis(5));
-        event_loop.finish_termination();
+        event_loop.pump_events(Duration::from_millis(5), || {});
     }
 
     #[test]

@@ -195,6 +195,31 @@ def _macos_visible_windows(pid: int) -> list[VisibleWindow]:
     ]
 
 
+def _macos_request_quit(pid: int) -> None:
+    script = (
+        "ObjC.import('AppKit');"
+        "function run(argv) {"
+        "  var app = $.NSRunningApplication.runningApplicationWithProcessIdentifier("
+        "    parseInt(argv[0], 10)"
+        "  );"
+        "  if (app.isNil() || !app.terminate()) {"
+        "    throw new Error('NSRunningApplication.terminate failed');"
+        "  }"
+        "}"
+    )
+    proc = subprocess.run(
+        ["osascript", "-l", "JavaScript", "-e", script, str(pid)],
+        text=True,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"Failed to send macOS terminate request to pid {pid}: {proc.stderr.strip()}"
+        )
+
+
 def _windows_active_display_count() -> int:
     user32 = ctypes.windll.user32  # type: ignore[attr-defined]
     return max(int(user32.GetSystemMetrics(SM_CMONITORS)), 1)
@@ -465,18 +490,34 @@ def verify_daemon_survives_settings_close(binary: Path) -> None:
                 f"Closing Settings changed the countdown: before={before} after={after}"
             )
         print(f"PASS daemon survives Settings close, countdown kept: {before} -> {after}")
+
+        if platform.system() == "Darwin":
+            _macos_request_quit(daemon.pid)
+            try:
+                exit_code = daemon.wait(timeout=5.0)
+            except subprocess.TimeoutExpired as exc:
+                raise AssertionError(
+                    f"Daemon did not exit on macOS terminate request: {_read_log(log_path)}"
+                ) from exc
+            if exit_code != 0:
+                raise AssertionError(
+                    f"Daemon exited with {exit_code} on macOS terminate request: "
+                    f"{_read_log(log_path)}"
+                )
+            print("PASS macOS NSRunningApplication.terminate exits daemon cleanly")
     finally:
-        subprocess.run(
-            [str(binary), "--quit", "--config", str(cfg), "--socket", str(sock)],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-        try:
-            daemon.wait(timeout=10.0)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
-            daemon.wait(timeout=5.0)
+        if daemon.poll() is None:
+            subprocess.run(
+                [str(binary), "--quit", "--config", str(cfg), "--socket", str(sock)],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            try:
+                daemon.wait(timeout=10.0)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+                daemon.wait(timeout=5.0)
         log.close()
 
 
